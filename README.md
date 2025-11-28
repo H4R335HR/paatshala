@@ -204,6 +204,7 @@ output/
 | Module ID | Moodle module ID |
 | Group ID | Group filter (if applied) |
 | Name | Student name |
+| Email | Student email address |
 | Status | Submission status |
 | Last Modified | Last submission time |
 | Submission | Submitted content/files |

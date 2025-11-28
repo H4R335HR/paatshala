@@ -555,6 +555,9 @@ def parse_grading_table(html):
         name_link = name_cell.find("a")
         name = name_link.get_text(strip=True) if name_link else ""
         
+        # Email is typically in cell 3
+        email = text_or_none(cells[3])
+        
         status_cell = cells[4]
         status_divs = status_cell.find_all("div")
         status = " | ".join([div.get_text(strip=True) for div in status_divs])
@@ -582,6 +585,7 @@ def parse_grading_table(html):
         
         rows.append({
             "Name": name,
+            "Email": email,
             "Status": status,
             "Last Modified": last_modified,
             "Submission": submissions,

@@ -861,6 +861,9 @@ def parse_grading_table(html):
         name_link = name_cell.find("a")
         name = name_link.get_text(strip=True) if name_link else ""
         
+        # Email is typically in cell 3
+        email = text_or_none(cells[3])
+        
         status_cell = cells[4]
         status_divs = status_cell.find_all("div")
         status = " | ".join([div.get_text(strip=True) for div in status_divs])
@@ -888,6 +891,7 @@ def parse_grading_table(html):
         
         rows.append({
             "Name": name,
+            "Email": email,
             "Status": status,
             "Last Modified": last_modified,
             "Submission": submissions,
@@ -1061,7 +1065,7 @@ def fetch_submissions(session_id, course_id, module_id, module_name, group_id=No
     fieldnames = ["Task Name", "Module ID"]
     if group_id:
         fieldnames.append("Group ID")
-    fieldnames.extend(["Name", "Status", "Last Modified", "Submission", "Feedback Comments", "Final Grade"])
+    fieldnames.extend(["Name", "Email", "Status", "Last Modified", "Submission", "Feedback Comments", "Final Grade"])
     
     with open(output_file, 'w', newline='', encoding='utf-8') as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -1132,7 +1136,7 @@ def do_everything(session_id, course_id, num_threads):
                 output_dir = get_output_dir(course_id)
                 output_file = output_dir / f"submissions_{course_id}_mod{module_id}.csv"
                 
-                fieldnames = ["Task Name", "Module ID", "Name", "Status", "Last Modified",
+                fieldnames = ["Task Name", "Module ID", "Name", "Email", "Status", "Last Modified",
                               "Submission", "Feedback Comments", "Final Grade"]
                 
                 with open(output_file, 'w', newline='', encoding='utf-8') as f:
