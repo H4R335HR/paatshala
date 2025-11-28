@@ -1,6 +1,10 @@
 # Paatshala Tool
 
-A unified command-line tool for managing and extracting data from [Paatshala](https://paatshala.ictkerala.org) (ICT Academy of Kerala's Moodle LMS).
+A unified tool for managing and extracting data from [Paatshala](https://paatshala.ictkerala.org) (ICT Academy of Kerala's Moodle LMS).
+
+**Two interfaces available:**
+- 🖥️ **CLI** (`paatshala.py`) — Command-line interface for power users and automation
+- 🌐 **GUI** (`paatshala_gui.py`) — Web-based interface using Streamlit
 
 ## Features
 
@@ -10,6 +14,7 @@ A unified command-line tool for managing and extracting data from [Paatshala](ht
 - **Smart Dependencies** — Auto-fetches prerequisites (e.g., tasks list before submissions)
 - **Threaded Fetching** — Parallel requests for faster data extraction
 - **Organized Output** — All files saved to `output/course_<id>/` subfolders
+- **Web GUI** — Beautiful browser-based interface with tables and downloads
 
 ## What It Does
 
@@ -26,6 +31,10 @@ A unified command-line tool for managing and extracting data from [Paatshala](ht
 - `requests`
 - `beautifulsoup4`
 
+```bash
+pip install requests beautifulsoup4
+```
+
 ## Installation
 
 ```bash
@@ -36,7 +45,50 @@ pip install -r requirements.txt
 
 Or simply download `paatshala.py` and run it directly.
 
-## Configuration
+## GUI Version (Streamlit)
+
+The GUI provides a browser-based interface with:
+- Login form with username/password or cookie
+- Course dropdown selector
+- Tabbed interface for Tasks, Quiz Scores, and Submissions
+- Interactive data tables with sorting
+- One-click CSV downloads
+
+### Running the GUI
+
+```bash
+pip install streamlit
+streamlit run paatshala_gui.py
+```
+
+Opens automatically at `http://localhost:8501`
+
+### Screenshots
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  🎓 Paatshala Tool                                          │
+│  Extract data from ICT Academy Kerala's Moodle LMS          │
+├─────────────────────────────────────────────────────────────┤
+│  ┌──────────────┐                                           │
+│  │ 🔐 Sidebar   │   📋 Tasks │ 📊 Quiz Scores │ 📝 Submissions │
+│  │              │  ─────────────────────────────────────────│
+│  │ ✓ Logged in  │                                           │
+│  │              │   ┌─────────────────────────────────────┐ │
+│  │ 📚 Course:   │   │ Task Name  │ Due Date │ Submitted   │ │
+│  │ [CSA Batch▾] │   │ Task 1     │ Nov 25   │ 45          │ │
+│  │              │   │ Task 2     │ Nov 28   │ 42          │ │
+│  └──────────────┘   └─────────────────────────────────────┘ │
+│                                                             │
+│                     [📥 Download CSV]                       │
+└─────────────────────────────────────────────────────────────┘
+```
+
+## CLI Version
+
+## CLI Version
+
+### Configuration
 
 ### First Run
 On first run, you'll be prompted for credentials. You can optionally save them to a `.config` file.
