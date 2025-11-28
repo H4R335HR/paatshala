@@ -26,10 +26,6 @@ A unified command-line tool for managing and extracting data from [Paatshala](ht
 - `requests`
 - `beautifulsoup4`
 
-```bash
-pip install requests beautifulsoup4
-```
-
 ## Installation
 
 ```bash
