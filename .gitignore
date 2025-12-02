@@ -1,0 +1,6 @@
+venv/
+__pycache__/
+output/
+*.pyc
+.config
+.last_session
