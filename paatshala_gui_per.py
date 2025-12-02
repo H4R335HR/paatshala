@@ -1189,7 +1189,7 @@ def main():
     st.divider()
     
     # Tabs
-    tab1, tab2, tab3 = st.tabs(["📋 Tasks", "📊 Quiz Scores", "📝 Submissions"])
+    tab1, tab2, tab3, tab4 = st.tabs(["📋 Tasks", "📊 Quiz Scores", "📝 Submissions", "🔍 Evaluation"])
     
     # -------------------------------------------------------------------------
     # TAB 1: TASKS
@@ -1462,6 +1462,126 @@ def main():
                     file_name=f"submissions_{course['id']}.csv",
                     mime="text/csv"
                 )
+
+    # -------------------------------------------------------------------------
+    # TAB 4: EVALUATION
+    # -------------------------------------------------------------------------
+    with tab4:
+        st.subheader("Submission Evaluation")
+        
+        if not st.session_state.submissions_data:
+            st.info("⚠️ Please fetch submissions first (in Submissions tab) to evaluate them.")
+        else:
+            # Student selector
+            # Create a label that includes name and status for easier selection
+            student_options = {
+                f"{row['Name']} ({row['Status']})": row
+                for row in st.session_state.submissions_data
+            }
+            
+            selected_student_label = st.selectbox(
+                "Select Student",
+                options=list(student_options.keys())
+            )
+            
+            if selected_student_label:
+                student_data = student_options[selected_student_label]
+                
+                # Display Student Details
+                st.markdown("#### 👤 Student Details")
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.markdown(f"**Name:** {student_data.get('Name', 'N/A')}")
+                with col2:
+                    st.markdown(f"**Email:** {student_data.get('Email', 'N/A')}")
+                with col3:
+                    status = student_data.get('Status', 'N/A')
+                    color = "green" if "Submitted" in status else "orange" if "Draft" in status else "red"
+                    st.markdown(f"**Status:** :{color}[{status}]")
+                
+                st.divider()
+                
+                # Display Submission Content
+                st.markdown("#### 📄 Submission Content")
+                submission_text = student_data.get('Submission', '')
+                
+                if not submission_text:
+                    st.warning("No submission content found.")
+                else:
+                    st.info(submission_text)
+                    
+                    # Link Analysis
+                    st.markdown("#### 🔗 Link Analysis")
+                    
+                    # Extract URL
+                    url_match = re.search(r'(https?://[^\s]+)', submission_text)
+                    if url_match:
+                        url = url_match.group(1)
+                        st.write(f"**Extracted Link:** [{url}]({url})")
+                        
+                        col1, col2 = st.columns(2)
+                        
+                        # 1. Verify Link
+                        with col1:
+                            with st.spinner("Verifying link..."):
+                                try:
+                                    # Use a short timeout for verification
+                                    resp = requests.head(url, timeout=5, allow_redirects=True)
+                                    if resp.ok:
+                                        st.success(f"✅ Link Valid (Status: {resp.status_code})")
+                                    else:
+                                        st.error(f"❌ Link Invalid (Status: {resp.status_code})")
+                                except Exception as e:
+                                    st.error(f"❌ Link Unreachable ({str(e)})")
+                        
+                        # 2. GitHub Checks
+                        with col2:
+                            if "github.com" in url:
+                                with st.spinner("Checking GitHub API..."):
+                                    # Parse owner and repo
+                                    # Expected format: https://github.com/owner/repo
+                                    parts = url.rstrip('/').split('/')
+                                    if len(parts) >= 5:
+                                        owner = parts[-2]
+                                        repo = parts[-1]
+                                        api_url = f"https://api.github.com/repos/{owner}/{repo}"
+                                        
+                                        try:
+                                            api_resp = requests.get(api_url, timeout=5)
+                                            
+                                            if api_resp.status_code == 200:
+                                                repo_data = api_resp.json()
+                                                
+                                                # Public Check
+                                                if not repo_data.get('private'):
+                                                    st.success("✅ Public Repository")
+                                                else:
+                                                    st.warning("🔒 Private Repository")
+                                                
+                                                # Fork Check
+                                                if repo_data.get('fork'):
+                                                    st.warning("⚠️ Forked Repository")
+                                                    # Get parent info
+                                                    parent = repo_data.get('parent', {}).get('full_name', 'Unknown')
+                                                    st.caption(f"Forked from: {parent}")
+                                                else:
+                                                    st.success("✅ Original Repository (Not a fork)")
+                                                    
+                                            elif api_resp.status_code == 404:
+                                                st.error("❌ Repository not found (or private)")
+                                            elif api_resp.status_code == 403:
+                                                st.warning("⚠️ API Rate Limit Exceeded")
+                                            else:
+                                                st.error(f"❌ GitHub API Error: {api_resp.status_code}")
+                                                
+                                        except Exception as e:
+                                            st.error(f"❌ API Check Failed: {str(e)}")
+                                    else:
+                                        st.warning("⚠️ Could not parse GitHub URL structure")
+                            else:
+                                st.info("ℹ️ Not a GitHub link - skipping repo checks")
+                    else:
+                        st.warning("No link found in submission text.")
 
 
 if __name__ == "__main__":
