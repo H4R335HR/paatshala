@@ -977,6 +977,23 @@ def evaluate_submission(row):
     return row
 
 
+def get_display_dataframe(data):
+    """Create a display-friendly dataframe for the Evaluation tab"""
+    display_data = []
+    for r in data:
+        display_data.append({
+            "Name": r.get('Name'),
+            "Status": r.get('Status'),
+            "Link": r.get('Eval_Link'),
+            "Valid?": r.get('Eval_Link_Valid'),
+            "Repo Status": r.get('Eval_Repo_Status'),
+            "Fork?": r.get('Eval_Is_Fork'),
+            "Parent": r.get('Eval_Parent'),
+            "Checked": format_timestamp(r.get('Eval_Last_Checked', ''))
+        })
+    return display_data
+
+
 # ============================================================================
 # CSV HELPERS
 # ============================================================================
@@ -1541,6 +1558,9 @@ def main():
             total = len(data)
             evaluated = sum(1 for r in data if r.get('Eval_Last_Checked'))
             
+            # Placeholder for the table (defined early for real-time updates)
+            table_placeholder = st.empty()
+            
             col1, col2, col3 = st.columns([2, 1, 1])
             with col1:
                 st.metric("Evaluated Submissions", f"{evaluated} / {total}")
@@ -1555,23 +1575,27 @@ def main():
                         data[i] = evaluate_submission(data[i])
                         progress_bar.progress((idx + 1) / count)
                         
+                        # Real-time update
+                        table_placeholder.dataframe(
+                            get_display_dataframe(data),
+                            use_container_width=True,
+                            column_config={
+                                "Link": st.column_config.LinkColumn("Link"),
+                                "Valid?": st.column_config.TextColumn("Valid?", width="small"),
+                                "Fork?": st.column_config.TextColumn("Fork?", width="small"),
+                            },
+                            selection_mode="single-row"
+                        )
+                        
                         # Check for Rate Limit to abort early
                         if data[i].get('Eval_Repo_Status') == "Rate Limit":
                             st.warning("⚠️ GitHub API Rate Limit reached. Stopping early.")
                             break
                     
                     # Save progress
-                    selected_task = None
-                    # Find selected task to construct filename (this is a bit hacky, relying on session state from other tab)
-                    # A better way is to look at the first row's Module ID if available
                     if data and 'Module ID' in data[0]:
                         mid = data[0]['Module ID']
-                        # We need to reconstruct the filename logic or just save to the same loaded file
-                        # Since we don't have the filename easily, we'll search for it or just skip saving if too complex
-                        # But persistence is a requirement. Let's try to find the filename from the selected task in Tab 3
-                        # For now, we'll just update the session state, and if the user switches tabs or refreshes, it might be lost
-                        # UNLESS we save it. Let's try to save using the generic name pattern
-                        fname = f"submissions_{course['id']}_mod{mid}.csv" # Simplified
+                        fname = f"submissions_{course['id']}_mod{mid}.csv"
                         save_csv_to_disk(course['id'], fname, data)
                     
                     st.rerun()
@@ -1582,6 +1606,19 @@ def main():
                     for i in range(total):
                         data[i] = evaluate_submission(data[i])
                         progress_bar.progress((i + 1) / total)
+                        
+                        # Real-time update
+                        table_placeholder.dataframe(
+                            get_display_dataframe(data),
+                            use_container_width=True,
+                            column_config={
+                                "Link": st.column_config.LinkColumn("Link"),
+                                "Valid?": st.column_config.TextColumn("Valid?", width="small"),
+                                "Fork?": st.column_config.TextColumn("Fork?", width="small"),
+                            },
+                            selection_mode="single-row"
+                        )
+                        
                         if data[i].get('Eval_Repo_Status') == "Rate Limit":
                             break
                     
@@ -1591,74 +1628,95 @@ def main():
 
             st.divider()
 
-            # --- Table View ---
-            # Prepare a display-friendly dataframe
-            display_data = []
-            for r in data:
-                display_data.append({
-                    "Name": r.get('Name'),
-                    "Status": r.get('Status'),
-                    "Link": r.get('Eval_Link'),
-                    "Valid?": r.get('Eval_Link_Valid'),
-                    "Repo Status": r.get('Eval_Repo_Status'),
-                    "Fork?": r.get('Eval_Is_Fork'),
-                    "Parent": r.get('Eval_Parent'),
-                    "Checked": format_timestamp(r.get('Eval_Last_Checked', ''))
-                })
-            
-            st.dataframe(
-                display_data,
+            # --- Table View (Interactive) ---
+            # Use the placeholder for the main display too
+            event = table_placeholder.dataframe(
+                get_display_dataframe(data),
                 use_container_width=True,
                 column_config={
                     "Link": st.column_config.LinkColumn("Link"),
                     "Valid?": st.column_config.TextColumn("Valid?", width="small"),
                     "Fork?": st.column_config.TextColumn("Fork?", width="small"),
-                }
+                },
+                on_select="rerun",
+                selection_mode="single-row"
             )
+            
+            # Handle Selection
+            selected_idx = None
+            if len(event.selection.rows) > 0:
+                selected_idx = event.selection.rows[0]
             
             st.divider()
 
             # --- Detail View ---
             st.markdown("### 🔍 Individual Detail")
             
-            student_options = {
-                f"{row['Name']} ({row['Status']})": i
-                for i, row in enumerate(data)
-            }
+            # Use indices for options to handle duplicate names correctly
+            student_indices = list(range(len(data)))
             
-            selected_student_label = st.selectbox(
+            def format_student_option(i):
+                row = data[i]
+                return f"{row.get('Name', 'Unknown')} ({row.get('Status', 'Unknown')})"
+            
+            # Initialize session state for selection tracking
+            if 'last_table_selection' not in st.session_state:
+                st.session_state.last_table_selection = None
+            if 'eval_selected_index' not in st.session_state:
+                st.session_state.eval_selected_index = 0
+            
+            # Detect change in table selection
+            if selected_idx != st.session_state.last_table_selection:
+                st.session_state.last_table_selection = selected_idx
+                if selected_idx is not None:
+                    st.session_state.eval_selected_index = selected_idx
+                    # Force update the widget state
+                    st.session_state.eval_student_select = selected_idx
+            
+            # Ensure index is valid
+            if st.session_state.eval_selected_index >= len(data):
+                st.session_state.eval_selected_index = 0
+                
+            def on_change_selectbox():
+                st.session_state.eval_selected_index = st.session_state.eval_student_select
+            
+            selected_index = st.selectbox(
                 "Select Student for Details",
-                options=list(student_options.keys())
+                options=student_indices,
+                format_func=format_student_option,
+                index=st.session_state.eval_selected_index,
+                key="eval_student_select",
+                on_change=on_change_selectbox
             )
             
-            if selected_student_label:
-                idx = student_options[selected_student_label]
-                row = data[idx]
+            # Use the tracked index
+            idx = st.session_state.eval_selected_index
+            row = data[idx]
                 
-                col1, col2 = st.columns([3, 1])
-                with col1:
-                    st.markdown(f"**Name:** {row.get('Name')} | **Email:** {row.get('Email')}")
-                with col2:
-                    if st.button("🔄 Refresh Analysis", key=f"refresh_{idx}"):
-                        data[idx] = evaluate_submission(row)
-                        if 'Module ID' in row:
-                            save_csv_to_disk(course['id'], f"submissions_{course['id']}_mod{row['Module ID']}.csv", data)
-                        st.rerun()
+            col1, col2 = st.columns([3, 1])
+            with col1:
+                st.markdown(f"**Name:** {row.get('Name')} | **Email:** {row.get('Email')}")
+            with col2:
+                if st.button("🔄 Refresh Analysis", key=f"refresh_{idx}"):
+                    data[idx] = evaluate_submission(row)
+                    if 'Module ID' in row:
+                        save_csv_to_disk(course['id'], f"submissions_{course['id']}_mod{row['Module ID']}.csv", data)
+                    st.rerun()
 
-                # Show existing analysis
-                if row.get('Eval_Last_Checked'):
-                    c1, c2, c3 = st.columns(3)
-                    with c1:
-                        st.info(f"Link: {row.get('Eval_Link') or 'None'}")
-                    with c2:
-                        st.info(f"Valid: {row.get('Eval_Link_Valid') or 'N/A'}")
-                    with c3:
-                        st.info(f"Repo: {row.get('Eval_Repo_Status') or 'N/A'}")
-                        if row.get('Eval_Is_Fork') == 'Yes':
-                            st.caption(f"Fork of: {row.get('Eval_Parent')}")
-                
-                with st.expander("Submission Content", expanded=True):
-                    st.text(row.get('Submission', ''))
+            # Show existing analysis
+            if row.get('Eval_Last_Checked'):
+                c1, c2, c3 = st.columns(3)
+                with c1:
+                    st.info(f"Link: {row.get('Eval_Link') or 'None'}")
+                with c2:
+                    st.info(f"Valid: {row.get('Eval_Link_Valid') or 'N/A'}")
+                with c3:
+                    st.info(f"Repo: {row.get('Eval_Repo_Status') or 'N/A'}")
+                    if row.get('Eval_Is_Fork') == 'Yes':
+                        st.caption(f"Fork of: {row.get('Eval_Parent')}")
+            
+            with st.expander("Submission Content", expanded=True):
+                st.text(row.get('Submission', ''))
 
 
 if __name__ == "__main__":
