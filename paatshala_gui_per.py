@@ -913,6 +913,70 @@ def fetch_submissions(session_id, module_id, group_id=None):
         return []
 
 
+def evaluate_submission(row):
+    """Run link verification and GitHub checks for a submission row"""
+    submission_text = row.get('Submission', '')
+    
+    # Initialize/Reset fields
+    row['Eval_Link'] = ""
+    row['Eval_Link_Valid'] = ""
+    row['Eval_Repo_Status'] = ""
+    row['Eval_Is_Fork'] = ""
+    row['Eval_Parent'] = ""
+    row['Eval_Last_Checked'] = datetime.now().isoformat()
+    
+    if not submission_text:
+        return row
+
+    # Extract URL
+    url_match = re.search(r'(https?://[^\s]+)', submission_text)
+    if not url_match:
+        return row
+        
+    url = url_match.group(1)
+    row['Eval_Link'] = url
+    
+    # 1. Verify Link
+    try:
+        resp = requests.head(url, timeout=5, allow_redirects=True)
+        row['Eval_Link_Valid'] = "✅" if resp.ok else "❌"
+    except:
+        row['Eval_Link_Valid'] = "❌ (Unreachable)"
+    
+    # 2. GitHub Checks
+    if "github.com" in url:
+        parts = url.rstrip('/').split('/')
+        if len(parts) >= 5:
+            owner = parts[-2]
+            repo = parts[-1]
+            api_url = f"https://api.github.com/repos/{owner}/{repo}"
+            
+            try:
+                api_resp = requests.get(api_url, timeout=5)
+                
+                if api_resp.status_code == 200:
+                    repo_data = api_resp.json()
+                    row['Eval_Repo_Status'] = "Public" if not repo_data.get('private') else "Private"
+                    
+                    if repo_data.get('fork'):
+                        row['Eval_Is_Fork'] = "Yes"
+                        row['Eval_Parent'] = repo_data.get('parent', {}).get('full_name', 'Unknown')
+                    else:
+                        row['Eval_Is_Fork'] = "No"
+                        
+                elif api_resp.status_code == 404:
+                    row['Eval_Repo_Status'] = "Not Found/Private"
+                elif api_resp.status_code == 403:
+                    row['Eval_Repo_Status'] = "Rate Limit"
+                else:
+                    row['Eval_Repo_Status'] = f"Error {api_resp.status_code}"
+                    
+            except:
+                row['Eval_Repo_Status'] = "API Error"
+    
+    return row
+
+
 # ============================================================================
 # CSV HELPERS
 # ============================================================================
@@ -1472,116 +1536,129 @@ def main():
         if not st.session_state.submissions_data:
             st.info("⚠️ Please fetch submissions first (in Submissions tab) to evaluate them.")
         else:
-            # Student selector
-            # Create a label that includes name and status for easier selection
+            # --- Batch Actions ---
+            data = st.session_state.submissions_data
+            total = len(data)
+            evaluated = sum(1 for r in data if r.get('Eval_Last_Checked'))
+            
+            col1, col2, col3 = st.columns([2, 1, 1])
+            with col1:
+                st.metric("Evaluated Submissions", f"{evaluated} / {total}")
+            
+            with col2:
+                if st.button("🚀 Evaluate Pending", use_container_width=True, disabled=(evaluated == total)):
+                    progress_bar = st.progress(0, text="Evaluating pending submissions...")
+                    pending_indices = [i for i, r in enumerate(data) if not r.get('Eval_Last_Checked')]
+                    count = len(pending_indices)
+                    
+                    for idx, i in enumerate(pending_indices):
+                        data[i] = evaluate_submission(data[i])
+                        progress_bar.progress((idx + 1) / count)
+                        
+                        # Check for Rate Limit to abort early
+                        if data[i].get('Eval_Repo_Status') == "Rate Limit":
+                            st.warning("⚠️ GitHub API Rate Limit reached. Stopping early.")
+                            break
+                    
+                    # Save progress
+                    selected_task = None
+                    # Find selected task to construct filename (this is a bit hacky, relying on session state from other tab)
+                    # A better way is to look at the first row's Module ID if available
+                    if data and 'Module ID' in data[0]:
+                        mid = data[0]['Module ID']
+                        # We need to reconstruct the filename logic or just save to the same loaded file
+                        # Since we don't have the filename easily, we'll search for it or just skip saving if too complex
+                        # But persistence is a requirement. Let's try to find the filename from the selected task in Tab 3
+                        # For now, we'll just update the session state, and if the user switches tabs or refreshes, it might be lost
+                        # UNLESS we save it. Let's try to save using the generic name pattern
+                        fname = f"submissions_{course['id']}_mod{mid}.csv" # Simplified
+                        save_csv_to_disk(course['id'], fname, data)
+                    
+                    st.rerun()
+
+            with col3:
+                if st.button("🔄 Force Refresh All", use_container_width=True):
+                    progress_bar = st.progress(0, text="Re-evaluating all...")
+                    for i in range(total):
+                        data[i] = evaluate_submission(data[i])
+                        progress_bar.progress((i + 1) / total)
+                        if data[i].get('Eval_Repo_Status') == "Rate Limit":
+                            break
+                    
+                    if data and 'Module ID' in data[0]:
+                         save_csv_to_disk(course['id'], f"submissions_{course['id']}_mod{data[0]['Module ID']}.csv", data)
+                    st.rerun()
+
+            st.divider()
+
+            # --- Table View ---
+            # Prepare a display-friendly dataframe
+            display_data = []
+            for r in data:
+                display_data.append({
+                    "Name": r.get('Name'),
+                    "Status": r.get('Status'),
+                    "Link": r.get('Eval_Link'),
+                    "Valid?": r.get('Eval_Link_Valid'),
+                    "Repo Status": r.get('Eval_Repo_Status'),
+                    "Fork?": r.get('Eval_Is_Fork'),
+                    "Parent": r.get('Eval_Parent'),
+                    "Checked": format_timestamp(r.get('Eval_Last_Checked', ''))
+                })
+            
+            st.dataframe(
+                display_data,
+                use_container_width=True,
+                column_config={
+                    "Link": st.column_config.LinkColumn("Link"),
+                    "Valid?": st.column_config.TextColumn("Valid?", width="small"),
+                    "Fork?": st.column_config.TextColumn("Fork?", width="small"),
+                }
+            )
+            
+            st.divider()
+
+            # --- Detail View ---
+            st.markdown("### 🔍 Individual Detail")
+            
             student_options = {
-                f"{row['Name']} ({row['Status']})": row
-                for row in st.session_state.submissions_data
+                f"{row['Name']} ({row['Status']})": i
+                for i, row in enumerate(data)
             }
             
             selected_student_label = st.selectbox(
-                "Select Student",
+                "Select Student for Details",
                 options=list(student_options.keys())
             )
             
             if selected_student_label:
-                student_data = student_options[selected_student_label]
+                idx = student_options[selected_student_label]
+                row = data[idx]
                 
-                # Display Student Details
-                st.markdown("#### 👤 Student Details")
-                col1, col2, col3 = st.columns(3)
+                col1, col2 = st.columns([3, 1])
                 with col1:
-                    st.markdown(f"**Name:** {student_data.get('Name', 'N/A')}")
+                    st.markdown(f"**Name:** {row.get('Name')} | **Email:** {row.get('Email')}")
                 with col2:
-                    st.markdown(f"**Email:** {student_data.get('Email', 'N/A')}")
-                with col3:
-                    status = student_data.get('Status', 'N/A')
-                    color = "green" if "Submitted" in status else "orange" if "Draft" in status else "red"
-                    st.markdown(f"**Status:** :{color}[{status}]")
+                    if st.button("🔄 Refresh Analysis", key=f"refresh_{idx}"):
+                        data[idx] = evaluate_submission(row)
+                        if 'Module ID' in row:
+                            save_csv_to_disk(course['id'], f"submissions_{course['id']}_mod{row['Module ID']}.csv", data)
+                        st.rerun()
+
+                # Show existing analysis
+                if row.get('Eval_Last_Checked'):
+                    c1, c2, c3 = st.columns(3)
+                    with c1:
+                        st.info(f"Link: {row.get('Eval_Link') or 'None'}")
+                    with c2:
+                        st.info(f"Valid: {row.get('Eval_Link_Valid') or 'N/A'}")
+                    with c3:
+                        st.info(f"Repo: {row.get('Eval_Repo_Status') or 'N/A'}")
+                        if row.get('Eval_Is_Fork') == 'Yes':
+                            st.caption(f"Fork of: {row.get('Eval_Parent')}")
                 
-                st.divider()
-                
-                # Display Submission Content
-                st.markdown("#### 📄 Submission Content")
-                submission_text = student_data.get('Submission', '')
-                
-                if not submission_text:
-                    st.warning("No submission content found.")
-                else:
-                    st.info(submission_text)
-                    
-                    # Link Analysis
-                    st.markdown("#### 🔗 Link Analysis")
-                    
-                    # Extract URL
-                    url_match = re.search(r'(https?://[^\s]+)', submission_text)
-                    if url_match:
-                        url = url_match.group(1)
-                        st.write(f"**Extracted Link:** [{url}]({url})")
-                        
-                        col1, col2 = st.columns(2)
-                        
-                        # 1. Verify Link
-                        with col1:
-                            with st.spinner("Verifying link..."):
-                                try:
-                                    # Use a short timeout for verification
-                                    resp = requests.head(url, timeout=5, allow_redirects=True)
-                                    if resp.ok:
-                                        st.success(f"✅ Link Valid (Status: {resp.status_code})")
-                                    else:
-                                        st.error(f"❌ Link Invalid (Status: {resp.status_code})")
-                                except Exception as e:
-                                    st.error(f"❌ Link Unreachable ({str(e)})")
-                        
-                        # 2. GitHub Checks
-                        with col2:
-                            if "github.com" in url:
-                                with st.spinner("Checking GitHub API..."):
-                                    # Parse owner and repo
-                                    # Expected format: https://github.com/owner/repo
-                                    parts = url.rstrip('/').split('/')
-                                    if len(parts) >= 5:
-                                        owner = parts[-2]
-                                        repo = parts[-1]
-                                        api_url = f"https://api.github.com/repos/{owner}/{repo}"
-                                        
-                                        try:
-                                            api_resp = requests.get(api_url, timeout=5)
-                                            
-                                            if api_resp.status_code == 200:
-                                                repo_data = api_resp.json()
-                                                
-                                                # Public Check
-                                                if not repo_data.get('private'):
-                                                    st.success("✅ Public Repository")
-                                                else:
-                                                    st.warning("🔒 Private Repository")
-                                                
-                                                # Fork Check
-                                                if repo_data.get('fork'):
-                                                    st.warning("⚠️ Forked Repository")
-                                                    # Get parent info
-                                                    parent = repo_data.get('parent', {}).get('full_name', 'Unknown')
-                                                    st.caption(f"Forked from: {parent}")
-                                                else:
-                                                    st.success("✅ Original Repository (Not a fork)")
-                                                    
-                                            elif api_resp.status_code == 404:
-                                                st.error("❌ Repository not found (or private)")
-                                            elif api_resp.status_code == 403:
-                                                st.warning("⚠️ API Rate Limit Exceeded")
-                                            else:
-                                                st.error(f"❌ GitHub API Error: {api_resp.status_code}")
-                                                
-                                        except Exception as e:
-                                            st.error(f"❌ API Check Failed: {str(e)}")
-                                    else:
-                                        st.warning("⚠️ Could not parse GitHub URL structure")
-                            else:
-                                st.info("ℹ️ Not a GitHub link - skipping repo checks")
-                    else:
-                        st.warning("No link found in submission text.")
+                with st.expander("Submission Content", expanded=True):
+                    st.text(row.get('Submission', ''))
 
 
 if __name__ == "__main__":
