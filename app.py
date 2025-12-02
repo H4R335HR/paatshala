@@ -503,9 +503,19 @@ def main():
                 for t in st.session_state.tasks_data
             }
             
+            # Try to pre-select from last session
+            pre_select_index = 0
+            last = load_last_session()
+            if last.get('last_module_id'):
+                for i, (name, t) in enumerate(task_options.items()):
+                    if str(t['Module ID']) == str(last['last_module_id']):
+                        pre_select_index = i
+                        break
+
             selected_task_name = st.selectbox(
                 "Select Assignment",
-                options=list(task_options.keys())
+                options=list(task_options.keys()),
+                index=pre_select_index
             )
             
             selected_task = task_options.get(selected_task_name)
@@ -563,6 +573,8 @@ def main():
                 # Load existing or fetch new
                 if existing_data and not fetch_btn:
                     st.session_state.submissions_data = existing_data
+                    # Save persistence for auto-load next time
+                    save_last_session({'last_module_id': module_id})
                 
                 if fetch_btn:
                     with st.spinner("Fetching submissions..."):
@@ -584,6 +596,9 @@ def main():
                             # Save to disk
                             save_csv_to_disk(course['id'], submissions_filename, rows)
                             save_meta(course['id'], meta_key, len(rows))
+                            
+                            # Save persistence
+                            save_last_session({'last_module_id': module_id})
                             
                             st.success(f"✓ Fetched {len(rows)} submissions → Saved to `output/course_{course['id']}/`")
                             st.rerun()
