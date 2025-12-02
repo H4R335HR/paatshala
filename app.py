@@ -6,13 +6,14 @@ Paatshala Tool - Refactored GUI Version (Streamlit)
 import time
 import streamlit as st
 import pandas as pd
+from pathlib import Path
 
 from core.auth import (
     login_and_get_cookie, validate_session, setup_session, attempt_auto_login
 )
 from core.api import (
     get_courses, fetch_tasks_list, fetch_quiz_scores_all,
-    fetch_submissions, evaluate_submission, get_available_groups
+    fetch_submissions, evaluate_submission, download_file, get_available_groups
 )
 from core.persistence import (
     read_config, write_config, clear_config,
@@ -572,9 +573,21 @@ def main():
                 
                 # Load existing or fetch new
                 if existing_data and not fetch_btn:
-                    st.session_state.submissions_data = existing_data
-                    # Save persistence for auto-load next time
-                    save_last_session({'last_module_id': module_id})
+                    # Only load if not already loaded for this module
+                    should_load = True
+                    if st.session_state.submissions_data:
+                        # Check if loaded data belongs to current module
+                        try:
+                            current_data_mod_id = str(st.session_state.submissions_data[0].get('Module ID', ''))
+                            if current_data_mod_id == str(module_id):
+                                should_load = False
+                        except:
+                            pass
+                    
+                    if should_load:
+                        st.session_state.submissions_data = existing_data
+                        # Save persistence for auto-load next time
+                        save_last_session({'last_module_id': module_id})
                 
                 if fetch_btn:
                     with st.spinner("Fetching submissions..."):
@@ -677,15 +690,42 @@ def main():
             # --- Table View (Interactive) ---
             # --- Table View (Interactive) ---
             # Use the placeholder for the main display too
+            # Determine assignment type from first row
+            assignment_type = "link"
+            if data and len(data) > 0:
+                assignment_type = data[0].get("Assignment_Type", "link")
+            
+            # Configure columns based on assignment type
+            cols_config = {
+                "Link": st.column_config.LinkColumn("Link"),
+                "Valid?": st.column_config.TextColumn("Valid?"),
+                "Fork?": st.column_config.TextColumn("Fork?"),
+            }
+            
+            hidden_cols = []
+            if assignment_type == 'file':
+                hidden_cols = ["Link", "Valid?", "Repo Status", "Fork?", "Eval_Link", "Eval_Link_Valid", "Eval_Repo_Status", "Eval_Is_Fork", "Eval_Parent"]
+                # Ensure these columns are hidden
+                for col in ["Link", "Valid?", "Fork?"]: # Only these are directly in column_config
+                    cols_config[col] = None
+            
             with table_placeholder:
+                # Filter out hidden columns from display dataframe if needed, 
+                # but st.dataframe handles extra columns fine if we don't configure them explicitly.
+                # However, to be safe, let's just rely on column_config to hide them if possible, 
+                # or just don't include them in the view?
+                # Actually, get_display_dataframe constructs specific columns. We should modify it or filter the result.
+                
+                display_df = pd.DataFrame(get_display_dataframe(data))
+                if assignment_type == 'file':
+                    # Remove columns from display DF
+                    cols_to_drop = [c for c in ["Link", "Valid?", "Repo Status", "Fork?"] if c in display_df.columns]
+                    display_df = display_df.drop(columns=cols_to_drop)
+                
                 event = st.dataframe(
-                    pd.DataFrame(get_display_dataframe(data)),
+                    display_df,
                     use_container_width=True,
-                    column_config={
-                        "Link": st.column_config.LinkColumn("Link"),
-                        "Valid?": st.column_config.TextColumn("Valid?", width="small"),
-                        "Fork?": st.column_config.TextColumn("Fork?", width="small"),
-                    },
+                    column_config=cols_config,
                     on_select="rerun",
                     selection_mode="single-row",
                     key="submission_table"
@@ -755,17 +795,99 @@ def main():
                         save_csv_to_disk(course['id'], f"submissions_{course['id']}_mod{row['Module ID']}.csv", data)
                     st.rerun()
 
-            # Show existing analysis
-            if row.get('Eval_Last_Checked'):
-                c1, c2, c3 = st.columns(3)
-                with c1:
-                    st.info(f"Link: {row.get('Eval_Link') or 'None'}")
-                with c2:
-                    st.info(f"Valid: {row.get('Eval_Link_Valid') or 'N/A'}")
-                with c3:
-                    st.info(f"Repo: {row.get('Eval_Repo_Status') or 'N/A'}")
-                    if row.get('Eval_Is_Fork') == 'Yes':
-                        st.caption(f"Fork of: {row.get('Eval_Parent')}")
+            st.divider()
+
+            # Determine submission type (fallback if missing)
+            sub_type = row.get('Submission_Type')
+            if not sub_type:
+                submission_files = row.get('Submission_Files')
+                if isinstance(submission_files, str) and submission_files.startswith('['):
+                    try:
+                        submission_files = eval(submission_files)
+                    except:
+                        submission_files = []
+                
+                if submission_files:
+                    sub_type = 'file'
+                elif "http" in row.get('Submission', ''):
+                    sub_type = 'link'
+                elif row.get('Submission'):
+                    sub_type = 'text'
+                else:
+                    sub_type = 'empty'
+
+            # Render based on ASSIGNMENT type (overrides individual submission type for UI structure)
+            if assignment_type == 'file':
+                # File Assignment View
+                submission_files = row.get('Submission_Files')
+                if isinstance(submission_files, str):
+                    try:
+                        submission_files = eval(submission_files)
+                    except:
+                        submission_files = []
+                
+                if submission_files:
+                    st.markdown("#### 📂 Submitted Files")
+                    for fname, furl in submission_files:
+                        # Construct local path to check existence
+                        safe_student = "".join([c for c in row.get('Name', 'Unknown') if c.isalnum() or c in (' ', '-', '_')]).strip()
+                        safe_filename = "".join([c for c in fname if c.isalnum() or c in (' ', '-', '_', '.')]).strip()
+                        local_path = Path(f"output/course_{course['id']}/downloads/{safe_student}/{safe_filename}")
+                        
+                        col_d1, col_d2 = st.columns([3, 1])
+                        with col_d1:
+                            st.text(fname)
+                        with col_d2:
+                            if local_path.exists():
+                                with open(local_path, "rb") as f:
+                                    st.download_button(
+                                        label="📂 Download",
+                                        data=f,
+                                        file_name=fname,
+                                        mime="application/octet-stream",
+                                        key=f"dl_{idx}_{fname}",
+                                        use_container_width=True
+                                    )
+                            else:
+                                if st.button("⬇️ Fetch", key=f"fetch_{idx}_{fname}", use_container_width=True):
+                                    with st.spinner("Fetching from server..."):
+                                        session = setup_session(st.session_state.session_id)
+                                        saved_path = download_file(session, furl, course['id'], row.get('Name', 'Unknown'), fname)
+                                        if saved_path:
+                                            st.success("Fetched!")
+                                            st.rerun()
+                                        else:
+                                            st.error("Failed to fetch")
+                else:
+                    st.warning("⚠️ No file submitted")
+
+            else:
+                # Link/Text Assignment View
+                if sub_type == 'link' or (sub_type == 'empty' and row.get('Eval_Last_Checked')):
+                    # Show analysis if it's a link OR if we have checked it (even if empty, though unlikely)
+                    if row.get('Eval_Last_Checked'):
+                        st.markdown(f"**Submission Link:** [{row.get('Eval_Link')}]({row.get('Eval_Link')})")
+                        
+                        c1, c2 = st.columns(2)
+                        with c1:
+                            valid = row.get('Eval_Link_Valid') or 'N/A'
+                            if '✅' in str(valid):
+                                st.success(f"Link Valid: {valid}")
+                            else:
+                                st.error(f"Link Valid: {valid}")
+                        with c2:
+                            repo_status = row.get('Eval_Repo_Status') or 'N/A'
+                            st.info(f"Repo Status: {repo_status}")
+                            if row.get('Eval_Is_Fork') == 'Yes':
+                                st.caption(f"Fork of: {row.get('Eval_Parent')}")
+                    else:
+                        st.warning("Analysis not run yet. Click 'Refresh Analysis'.")
+                
+                elif sub_type == 'text':
+                    st.info("ℹ️ Text-only submission (No link detected)")
+                
+                elif sub_type == 'empty':
+                    st.warning("⚠️ No submission found")
             
             with st.expander("Submission Content", expanded=True):
                 st.text(row.get('Submission', ''))

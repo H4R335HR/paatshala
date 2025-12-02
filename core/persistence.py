@@ -153,7 +153,12 @@ def save_csv_to_disk(course_id, filename, rows, fieldnames=None):
         return None
     
     if fieldnames is None:
-        fieldnames = list(rows[0].keys())
+        # Collect all unique keys from all rows to ensure no data is lost
+        # (e.g. if some rows have 'Eval_Link' and others don't)
+        all_keys = set()
+        for r in rows:
+            all_keys.update(r.keys())
+        fieldnames = sorted(list(all_keys))
     
     try:
         with open(output_path, 'w', newline='', encoding='utf-8') as f:
@@ -161,7 +166,8 @@ def save_csv_to_disk(course_id, filename, rows, fieldnames=None):
             writer.writeheader()
             writer.writerows(rows)
         return output_path
-    except:
+    except Exception as e:
+        print(f"Error saving CSV: {e}")
         return None
 
 def load_csv_from_disk(course_id, filename):

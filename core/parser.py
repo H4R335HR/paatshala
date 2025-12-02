@@ -78,10 +78,20 @@ def parse_grading_table(html):
         return []
     
     rows = []
+    # Detect assignment type from headers
+    assignment_type = "link" # Default
+    thead = table.find("thead")
+    if thead:
+        headers = [text_or_none(th).lower() for th in thead.find_all("th")]
+        if any("file submissions" in h for h in headers):
+            assignment_type = "file"
+        elif any("online text" in h for h in headers):
+            assignment_type = "link"
+    
     tbody = table.find("tbody")
     if not tbody:
         return []
-    
+
     for tr in tbody.find_all("tr"):
         if "emptyrow" in tr.get("class", []):
             continue
@@ -107,12 +117,17 @@ def parse_grading_table(html):
         file_divs = submission_cell.find_all("div", class_="fileuploadsubmission")
         if file_divs:
             submissions = []
+            submission_files = []
             for div in file_divs:
                 file_link = div.find("a", href=lambda h: h and "pluginfile.php" in h)
                 if file_link:
-                    submissions.append(file_link.get_text(strip=True))
+                    fname = file_link.get_text(strip=True)
+                    furl = file_link.get("href", "")
+                    submissions.append(fname)
+                    submission_files.append((fname, furl))
             submissions = ", ".join(submissions)
         else:
+            submission_files = []
             no_overflow_div = submission_cell.find("div", class_="no-overflow")
             if no_overflow_div:
                 submissions = no_overflow_div.get_text(" ", strip=True)
@@ -128,6 +143,9 @@ def parse_grading_table(html):
             "Status": status,
             "Last Modified": last_modified,
             "Submission": submissions,
+            "Submission_Files": submission_files,
+            "Submission_Type": "file" if submission_files else ("link" if "http" in submissions else ("text" if submissions else "empty")),
+            "Assignment_Type": assignment_type,
             "Feedback Comments": feedback,
             "Final Grade": final_grade
         })

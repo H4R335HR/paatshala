@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import defaultdict
 from bs4 import BeautifulSoup
 from datetime import datetime
+from pathlib import Path
 
 from .auth import setup_session, PAATSHALA_HOST, BASE
 from .parser import parse_assign_view, parse_grading_table
@@ -361,7 +362,21 @@ def evaluate_submission(row):
     row['Eval_Parent'] = ""
     row['Eval_Last_Checked'] = datetime.now().isoformat()
     
-    if not submission_text:
+    # Determine type if missing (backward compatibility)
+    sub_type = row.get('Submission_Type')
+    if not sub_type:
+        if row.get('Submission_Files'):
+            sub_type = 'file'
+        elif "http" in submission_text:
+            sub_type = 'link'
+        elif submission_text:
+            sub_type = 'text'
+        else:
+            sub_type = 'empty'
+        row['Submission_Type'] = sub_type
+
+    # Only evaluate links
+    if sub_type != 'link':
         return row
 
     # Extract URL
@@ -411,3 +426,32 @@ def evaluate_submission(row):
                 row['Eval_Repo_Status'] = "API Error"
     
     return row
+
+def download_file(session, url, course_id, student_name, filename):
+    """Download a file from Moodle using the session and save it locally"""
+    try:
+        # Create directory structure: output/course_X/downloads/Student_Name/
+        # Sanitize names to be safe for filesystem
+        safe_student = "".join([c for c in student_name if c.isalnum() or c in (' ', '-', '_')]).strip()
+        safe_filename = "".join([c for c in filename if c.isalnum() or c in (' ', '-', '_', '.')]).strip()
+        
+        base_dir = Path(f"output/course_{course_id}/downloads/{safe_student}")
+        base_dir.mkdir(parents=True, exist_ok=True)
+        
+        local_path = base_dir / safe_filename
+        
+        # If already exists, return it (caching)
+        if local_path.exists():
+            return str(local_path)
+            
+        response = session.get(url, stream=True)
+        if response.status_code == 200:
+            with open(local_path, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    f.write(chunk)
+            return str(local_path)
+        else:
+            return None
+    except Exception as e:
+        print(f"Download error: {e}")
+        return None
