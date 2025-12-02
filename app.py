@@ -711,6 +711,10 @@ def main():
             if st.session_state.eval_selected_index >= len(data):
                 st.session_state.eval_selected_index = 0
                 
+            # Ensure widget state is initialized
+            if 'eval_student_select' not in st.session_state:
+                st.session_state.eval_student_select = st.session_state.eval_selected_index
+
             def on_change_selectbox():
                 st.session_state.eval_selected_index = st.session_state.eval_student_select
             
@@ -718,7 +722,6 @@ def main():
                 "Select Student for Details",
                 options=student_indices,
                 format_func=format_student_option,
-                index=st.session_state.eval_selected_index,
                 key="eval_student_select",
                 on_change=on_change_selectbox
             )
