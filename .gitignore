@@ -5,3 +5,4 @@ output/
 *.pyc
 .config
 .last_session
+.debug*
