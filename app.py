@@ -12,7 +12,7 @@ from core.auth import (
     login_and_get_cookie, validate_session, setup_session, attempt_auto_login
 )
 from core.api import (
-    get_courses, fetch_tasks_list, fetch_quiz_scores_all,
+    get_courses, fetch_tasks_list, fetch_quiz_scores_all, get_quizzes,
     fetch_submissions, evaluate_submission, download_file, get_available_groups
 )
 from core.persistence import (
@@ -410,16 +410,73 @@ def main():
         st.subheader("Practice Quiz Scores")
         
         # Try to load from disk if not loaded
-        if st.session_state.quiz_data is None:
-            disk_data = load_csv_from_disk(course['id'], f"quiz_scores_{course['id']}.csv")
+        # Group selector for Quizzes
+        selected_quiz_group_id = None
+        
+        # We need at least one quiz ID to check for groups
+        # We can quickly fetch the list of quizzes without scores
+        if st.session_state.authenticated:
+            session = setup_session(st.session_state.session_id)
+            # This is fast as it just parses the course page
+            quizzes_list = get_quizzes(session, course['id'])
+            
+            if quizzes_list:
+                # Use the first quiz to check for groups
+                first_quiz_id = quizzes_list[0][1]
+                quiz_groups = get_available_groups(session, first_quiz_id, activity_type='quiz')
+                
+                if quiz_groups:
+                    q_group_options = {"All Groups": (None, None)}
+                    q_group_options.update({
+                        f"{g[1]} (ID: {g[0]})": (g[0], g[1])
+                        for g in quiz_groups
+                    })
+                    
+                    col_q1, col_q2 = st.columns([3, 1])
+                    with col_q1:
+                        selected_q_group_label = st.selectbox(
+                            "Filter by Batch (Group)",
+                            options=list(q_group_options.keys()),
+                            key="quiz_group_selector"
+                        )
+                        selected_quiz_group_id, _ = q_group_options.get(selected_q_group_label, (None, None))
+        
+        # Construct filename based on group
+        quiz_filename = f"quiz_scores_{course['id']}"
+        if selected_quiz_group_id:
+            quiz_filename += f"_grp{selected_quiz_group_id}"
+        quiz_filename += ".csv"
+        
+        quiz_meta_key = 'quiz'
+        if selected_quiz_group_id:
+            quiz_meta_key += f"_grp{selected_quiz_group_id}"
+
+        # Try to load from disk if not loaded (or if group changed)
+        # We need a way to track which group is currently loaded in session_state
+        # For simplicity, if the user changes group, they might need to hit fetch/refresh if we don't auto-reload
+        # But let's try to auto-load if available
+        
+        # Check if current loaded data matches selected group
+        # We can store the loaded group_id in session_state
+        if 'quiz_loaded_group_id' not in st.session_state:
+            st.session_state.quiz_loaded_group_id = None
+            
+        if st.session_state.quiz_data is None or st.session_state.quiz_loaded_group_id != selected_quiz_group_id:
+            disk_data = load_csv_from_disk(course['id'], quiz_filename)
             if disk_data:
                 st.session_state.quiz_data = disk_data
                 st.session_state.quiz_loaded_from_disk = True
+                st.session_state.quiz_loaded_group_id = selected_quiz_group_id
+            elif st.session_state.quiz_loaded_group_id != selected_quiz_group_id:
+                 # Group changed but no data on disk, clear current view
+                 st.session_state.quiz_data = None
+                 st.session_state.quiz_loaded_from_disk = False
+                 st.session_state.quiz_loaded_group_id = selected_quiz_group_id
         
         col1, col2 = st.columns([3, 1])
         with col1:
-            if st.session_state.quiz_loaded_from_disk and 'quiz' in meta:
-                show_data_status(meta, 'quiz', 'Quiz')
+            if st.session_state.quiz_loaded_from_disk and quiz_meta_key in meta:
+                show_data_status(meta, quiz_meta_key, 'Quiz')
             elif st.session_state.quiz_data:
                 show_fresh_status(len(st.session_state.quiz_data))
         
@@ -437,7 +494,7 @@ def main():
                 progress_bar.progress(value, text=f"Fetching quiz scores... {int(value * 100)}%")
             
             quiz_names, rows = fetch_quiz_scores_all(
-                st.session_state.session_id, course['id'], update_progress
+                st.session_state.session_id, course['id'], selected_quiz_group_id, update_progress
             )
             
             progress_bar.progress(1.0, text="Complete!")
@@ -445,10 +502,11 @@ def main():
             if rows:
                 st.session_state.quiz_data = rows
                 st.session_state.quiz_loaded_from_disk = False
+                st.session_state.quiz_loaded_group_id = selected_quiz_group_id
                 
                 # Save to disk
-                save_csv_to_disk(course['id'], f"quiz_scores_{course['id']}.csv", rows)
-                save_meta(course['id'], 'quiz', len(rows))
+                save_csv_to_disk(course['id'], quiz_filename, rows)
+                save_meta(course['id'], quiz_meta_key, len(rows))
                 
                 st.success(f"✓ Fetched scores for {len(rows)} students → Saved to `output/course_{course['id']}/`")
                 time.sleep(0.5)
@@ -467,7 +525,7 @@ def main():
             st.download_button(
                 label="📥 Download CSV",
                 data=csv_data,
-                file_name=f"quiz_scores_{course['id']}.csv",
+                file_name=quiz_filename,
                 mime="text/csv"
             )
     

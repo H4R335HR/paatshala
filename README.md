@@ -4,7 +4,7 @@ A unified tool for managing and extracting data from [Paatshala](https://paatsha
 
 **Two interfaces available:**
 - 🖥️ **CLI** (`paatshala.py`) — Command-line interface for power users and automation
-- 🌐 **GUI** (`paatshala_gui.py`) — Web-based interface using Streamlit
+- 🌐 **GUI** (`app.py`) — Web-based interface using Streamlit
 
 ## Features
 
@@ -28,12 +28,7 @@ A unified tool for managing and extracting data from [Paatshala](https://paatsha
 ## Requirements
 
 - Python 3.7+
-- `requests`
-- `beautifulsoup4`
-
-```bash
-pip install requests beautifulsoup4
-```
+- Dependencies listed in `requirements.txt`
 
 ## Installation
 
@@ -58,7 +53,7 @@ The GUI provides a browser-based interface with:
 
 ```bash
 pip install streamlit
-streamlit run paatshala_gui.py
+streamlit run app.py
 ```
 
 Opens automatically at `http://localhost:8501`

@@ -229,11 +229,14 @@ def get_quizzes(session, course_id):
     
     return quizzes
 
-def fetch_quiz_scores(session_id, module_id):
+def fetch_quiz_scores(session_id, module_id, group_id=None):
     """Fetch scores for a quiz module"""
     s = get_thread_session(session_id)
     
     report_url = f"https://{PAATSHALA_HOST}/mod/quiz/report.php?id={module_id}&mode=overview"
+    if group_id:
+        report_url += f"&group={group_id}"
+    
     report_resp = s.get(report_url)
     if not report_resp.ok:
         return module_id, {}, 0
@@ -264,7 +267,7 @@ def fetch_quiz_scores(session_id, module_id):
     
     return module_id, dict(scores), attempt_count
 
-def fetch_quiz_scores_all(session_id, course_id, progress_callback=None):
+def fetch_quiz_scores_all(session_id, course_id, group_id=None, progress_callback=None):
     """Fetch all quiz scores for a course"""
     main_session = setup_session(session_id)
     quizzes = get_quizzes(main_session, course_id)
@@ -278,7 +281,7 @@ def fetch_quiz_scores_all(session_id, course_id, progress_callback=None):
     total = len(quizzes)
     
     with ThreadPoolExecutor(max_workers=DEFAULT_THREADS) as executor:
-        futures = {executor.submit(fetch_quiz_scores, session_id, mid): mid for _, mid in quizzes}
+        futures = {executor.submit(fetch_quiz_scores, session_id, mid, group_id): mid for _, mid in quizzes}
         
         completed = 0
         for fut in as_completed(futures):
@@ -308,9 +311,12 @@ def fetch_quiz_scores_all(session_id, course_id, progress_callback=None):
     
     return quiz_names_ordered, rows
 
-def get_available_groups(session, module_id):
-    """Get list of available groups for an assignment"""
-    url = f"{BASE}/mod/assign/view.php?id={module_id}&action=grading"
+def get_available_groups(session, module_id, activity_type='assign'):
+    """Get list of available groups for an assignment or quiz"""
+    if activity_type == 'quiz':
+        url = f"{BASE}/mod/quiz/report.php?id={module_id}&mode=overview"
+    else:
+        url = f"{BASE}/mod/assign/view.php?id={module_id}&action=grading"
     
     try:
         resp = session.get(url, timeout=30)
