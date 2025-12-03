@@ -145,6 +145,265 @@ def get_tasks(session, course_id):
     
     return tasks
 
+def get_topics(session, course_id):
+    """Get all topics (sections) from course page with robust ID extraction"""
+    base_url = f"{BASE}/course/view.php"
+    params = {"id": course_id}
+    
+    # Retry loop: Attempt 1 (Normal), Attempt 2 (Force Edit Mode)
+    for attempt in range(2):
+        # On second attempt, force edit mode
+        if attempt == 1:
+            params["edit"] = "on"
+            # If we found a sesskey in the first attempt (even if IDs were missing), use it
+            # But usually sesskey is in the page we just fetched. 
+            # We'll rely on the fact that 'edit=on' usually works or redirects to a link with sesskey
+            
+        resp = session.get(base_url, params=params)
+        if not resp.ok:
+            return []
+        
+        soup = BeautifulSoup(resp.text, "html.parser")
+        
+        # Standard Moodle sections
+        # Use a more flexible search since classes can be "section main clearfix..."
+        sections = soup.find_all("li", class_=lambda c: c and "section" in c.split() and "main" in c.split())
+        if not sections:
+            # Fallback for other themes (e.g. tiles, grid) or if 'main' is missing
+            sections = soup.find_all("li", class_=lambda c: c and "section" in c.split())
+        
+        # Extract sesskey from the page (needed for actions)
+        sesskey = ""
+        logout_link = soup.find("a", href=lambda h: h and "sesskey=" in h)
+        if logout_link:
+            m = re.search(r"sesskey=([^&]+)", logout_link["href"])
+            if m:
+                sesskey = m.group(1)
+                
+        # If forcing edit mode, we might need to append sesskey to the params for next time?
+        # Actually, if we are here, we just parsed the page.
+        
+        topics = []
+        missing_ids = False
+        
+        for section in sections:
+            section_id = section.get("id", "").replace("section-", "")
+            
+            # Try to find the name
+            name = "Untitled Section"
+            name_node = section.find(class_="sectionname")
+            if not name_node:
+                name_node = section.find(class_="section-title")
+            
+            if name_node:
+                name = name_node.get_text(strip=True)
+            else:
+                # Try aria-label on the section itself
+                label = section.get("aria-label")
+                if label:
+                    name = label
+            
+            # Count activities
+            activities = section.find_all("li", class_=lambda c: c and "activity" in c)
+            activity_count = len(activities)
+            
+            # Extract summary text if available
+            summary = ""
+            summary_node = section.find(class_="summary")
+            if summary_node:
+                summary = summary_node.get_text(" ", strip=True)[:100] + "..." if len(summary_node.get_text(strip=True)) > 100 else summary_node.get_text(" ", strip=True)
+    
+            # Find the DB ID for editing (often in the edit link or inplace editable attributes)
+            db_id = ""
+            
+            # 1. Try inplace editable attributes (most robust for section name)
+            # <span class="inplaceeditable" ... data-itemid="10013" ...>
+            inplace_span = section.find("span", class_="inplaceeditable", attrs={"data-itemtype": "sectionname"})
+            if inplace_span:
+                db_id = inplace_span.get("data-itemid")
+                
+            # 2. Fallback: Search for editsection.php link (Broader regex)
+            if not db_id:
+                edit_link = section.find("a", href=lambda h: h and "editsection.php" in h and "delete" not in h)
+                if edit_link:
+                    m = re.search(r"[?&]id=(\d+)", edit_link["href"])
+                    if m:
+                        db_id = m.group(1)
+            
+            # 3. Last resort: Regex search in section HTML
+            if not db_id:
+                m = re.search(r"editsection\.php\?id=(\d+)", str(section))
+                if m:
+                    db_id = m.group(1)
+    
+            # Check visibility
+            visible = True
+            if "hidden" in section.get("class", []):
+                visible = False
+    
+            # Only add if it looks like a real section (has ID or content)
+            if section_id or activity_count > 0:
+                topics.append({
+                    "Section ID": section_id,
+                    "DB ID": db_id,
+                    "Topic Name": name,
+                    "Activity Count": activity_count,
+                    "Summary": summary,
+                    "Visible": visible,
+                    "Sesskey": sesskey # Include sesskey in each row for convenience
+                })
+                
+                if not db_id:
+                    missing_ids = True
+                    
+        # Decision Logic:
+        # If we found topics but some are missing IDs (especially the last one), and this is attempt 0,
+        # then we should retry with Edit Mode.
+        if attempt == 0 and topics and missing_ids:
+            # Check if we have a "Turn editing on" link to use its specific URL/sesskey
+            turn_editing_on = soup.find("a", href=lambda h: h and "edit=on" in h)
+            if turn_editing_on:
+                edit_href = turn_editing_on.get("href")
+                if edit_href:
+                    # Use this full URL for the next attempt
+                    base_url = edit_href
+                    params = {} # URL already has params
+            elif sesskey:
+                 # Append sesskey to params for next attempt if we constructed it manually
+                 params["sesskey"] = sesskey
+            
+            continue # Try again
+            
+        # If we are here, either we have all IDs, or we are on attempt 1 (gave up), or no topics found.
+        return topics
+
+    return []
+
+def add_topic(session, course_id, sesskey, count=1):
+    """Add a new topic to the course"""
+    # We need to find the current number of sections to know where to insert?
+    # Actually changenumsections.php usually appends.
+    # We might need to find the 'insertsection' param which is usually 0 for append?
+    # Or use course/edit.php?action=addsection
+    
+    # Based on inspection: course/changenumsections.php?courseid=237&insertsection=0&sesskey=...
+    url = f"{BASE}/course/changenumsections.php"
+    params = {
+        "courseid": course_id,
+        "insertsection": 0, # 0 usually means append
+        "sesskey": sesskey,
+        "sectionreturn": 0,
+        "numsections": count
+    }
+    resp = session.get(url, params=params)
+    return resp.ok
+
+def delete_topic(session, db_id, sesskey):
+    """Delete a topic"""
+    # course/editsection.php?id=5431&sr&delete=1&sesskey=...
+    url = f"{BASE}/course/editsection.php"
+    params = {
+        "id": db_id,
+        "sr": "",
+        "delete": 1,
+        "sesskey": sesskey
+    }
+    resp = session.get(url, params=params)
+    return resp.ok
+
+def toggle_topic_visibility(session, course_id, section_id, sesskey, hide=True):
+    """Hide or Show a topic"""
+    # course/view.php?id=237&sesskey=...&hide=59
+    url = f"{BASE}/course/view.php"
+    params = {
+        "id": course_id,
+        "sesskey": sesskey
+    }
+    if hide:
+        params["hide"] = section_id # Use section_id (order)
+    else:
+        params["show"] = section_id # Use section_id (order)
+        
+    resp = session.get(url, params=params)
+    return resp.ok
+
+def rename_topic_inplace(session, sesskey, itemid, new_name):
+    """Rename topic using Moodle's inplace editable AJAX API"""
+    # POST /lib/ajax/service.php?sesskey=...&info=core_update_inplace_editable
+    url = f"{BASE}/lib/ajax/service.php"
+    params = {
+        "sesskey": sesskey,
+        "info": "core_update_inplace_editable"
+    }
+    
+    payload = [{
+        "index": 0,
+        "methodname": "core_update_inplace_editable",
+        "args": {
+            "itemid": str(itemid),
+            "component": "format_topics",
+            "itemtype": "sectionname",
+            "value": new_name
+        }
+    }]
+    
+    try:
+        resp = session.post(url, params=params, json=payload)
+        if resp.ok:
+            data = resp.json()
+            # Moodle returns a list of results. Check for error.
+            if isinstance(data, list) and data:
+                if data[0].get("error"):
+                    return False
+                return True
+            return False # Unexpected response format
+        return False
+    except Exception as e:
+        print(f"Error renaming topic: {e}")
+        return False
+
+def update_topic(session, db_id, name, summary=""):
+    """Update topic summary (and name via form if needed)"""
+    # Note: For simple renaming, rename_topic_inplace is preferred.
+    # This function is kept for updating the Summary which requires the form.
+    
+    # First GET the form to get hidden fields
+    edit_url = f"{BASE}/course/editsection.php?id={db_id}&sr"
+    resp = session.get(edit_url)
+    if not resp.ok:
+        return False
+        
+    soup = BeautifulSoup(resp.text, "html.parser")
+    form = soup.find("form", action="editsection.php")
+    if not form:
+        return False
+        
+    data = {}
+    for input_tag in form.find_all("input"):
+        if input_tag.get("name"):
+            data[input_tag["name"]] = input_tag.get("value", "")
+            
+    # Update fields
+    if "name_custom" in data:
+        data["name_custom"] = "1"
+        data["name"] = name
+    elif "section_name[custom]" in data: # Newer Moodle forms
+         data["section_name[custom]"] = "1"
+         data["section_name[value]"] = name
+    else:
+        data["name"] = name
+        
+    # Summary is usually a textarea or editor
+    if "summary_editor[text]" in data:
+        data["summary_editor[text]"] = summary
+    elif "summary" in data:
+        data["summary"] = summary
+        
+    # Submit
+    post_url = f"{BASE}/course/editsection.php"
+    resp = session.post(post_url, data=data)
+    return resp.ok
+
 def fetch_task_details(session_id, name, mid, url):
     """Fetch task details using thread-local session"""
     s = get_thread_session(session_id)

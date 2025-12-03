@@ -12,8 +12,9 @@ from core.auth import (
     login_and_get_cookie, validate_session, setup_session, attempt_auto_login
 )
 from core.api import (
-    get_courses, fetch_tasks_list, fetch_quiz_scores_all, get_quizzes,
-    fetch_submissions, evaluate_submission, download_file, get_available_groups
+    get_courses, fetch_tasks_list, fetch_quiz_scores_all, get_quizzes, get_topics,
+    fetch_submissions, evaluate_submission, download_file, get_available_groups,
+    add_topic, delete_topic, toggle_topic_visibility, update_topic, rename_topic_inplace
 )
 from core.persistence import (
     read_config, write_config, clear_config,
@@ -57,7 +58,10 @@ def init_session_state():
         'submissions_data': None,
         'submissions_loaded_from_disk': False,
         'auto_login_attempted': False,
+        'auto_login_attempted': False,
         'selected_task_for_submissions': None,
+        'topics_data': None,
+        'topics_loaded_from_disk': False,
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -180,7 +184,10 @@ def main():
                     st.session_state.selected_course = None
                     st.session_state.tasks_data = None
                     st.session_state.quiz_data = None
+                    st.session_state.tasks_data = None
+                    st.session_state.quiz_data = None
                     st.session_state.submissions_data = None
+                    st.session_state.topics_data = None
                     st.rerun()
             
             with col2:
@@ -270,6 +277,8 @@ def main():
                         st.session_state.quiz_loaded_from_disk = False
                         st.session_state.submissions_data = None
                         st.session_state.submissions_loaded_from_disk = False
+                        st.session_state.topics_data = None
+                        st.session_state.topics_loaded_from_disk = False
                         # Save to last session
                         save_last_session({
                             'course_id': new_course['id'],
@@ -332,7 +341,177 @@ def main():
     st.divider()
     
     # Tabs
-    tab1, tab2, tab3, tab4 = st.tabs(["📋 Tasks", "📊 Quiz Scores", "📝 Submissions", "🔍 Evaluation"])
+    tab_topics, tab1, tab2, tab3, tab4 = st.tabs(["📑 Topics", "📋 Tasks", "📊 Quiz Scores", "📝 Submissions", "🔍 Evaluation"])
+    
+    # -------------------------------------------------------------------------
+    # TAB: TOPICS
+    # -------------------------------------------------------------------------
+    with tab_topics:
+        st.subheader("Course Topics")
+        
+        # Try to load from disk if not loaded
+        if st.session_state.topics_data is None:
+            disk_data = load_csv_from_disk(course['id'], f"topics_{course['id']}.csv")
+            if disk_data:
+                st.session_state.topics_data = disk_data
+                st.session_state.topics_loaded_from_disk = True
+        
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            if st.session_state.topics_loaded_from_disk and 'topics' in meta:
+                show_data_status(meta, 'topics', 'Topics')
+            elif st.session_state.topics_data:
+                show_fresh_status(len(st.session_state.topics_data))
+        
+        with col2:
+            fetch_topics = st.button(
+                "🔄 Refresh" if st.session_state.topics_data else "📥 Fetch",
+                key="fetch_topics",
+                use_container_width=True
+            )
+        
+        if fetch_topics:
+            with st.spinner("Fetching topics..."):
+                session = setup_session(st.session_state.session_id)
+                rows = get_topics(session, course['id'])
+                
+                if rows:
+                    st.session_state.topics_data = rows
+                    st.session_state.topics_loaded_from_disk = False
+                    
+                    # Save to disk
+                    save_csv_to_disk(course['id'], f"topics_{course['id']}.csv", rows)
+                    save_meta(course['id'], 'topics', len(rows))
+                    
+                    st.success(f"✓ Fetched {len(rows)} topics → Saved to `output/course_{course['id']}/`")
+                    time.sleep(0.5)
+                    st.rerun()
+                else:
+                    st.warning("No topics found")
+        
+        if st.session_state.topics_data:
+            # Display topics with management options
+            for i, row in enumerate(st.session_state.topics_data):
+                with st.expander(f"{'👁️ ' if row.get('Visible', True) else '🚫 '} {row['Topic Name']} (Activities: {row['Activity Count']})"):
+                    
+                    # Edit Form
+                    with st.form(key=f"edit_topic_{i}"):
+                        new_name = st.text_input("Topic Name", value=row['Topic Name'])
+                        new_summary = st.text_area("Summary", value=row.get('Summary', ''))
+                        
+                        col_e1, col_e2 = st.columns(2)
+                        with col_e1:
+                            submit_update = st.form_submit_button("💾 Save Changes")
+                        
+                    if submit_update:
+                        if row.get('DB ID'):
+                            session = setup_session(st.session_state.session_id)
+                            success = False
+                            
+                            # If only name changed, use the faster AJAX inplace rename
+                            if new_name != row['Topic Name'] and new_summary == row.get('Summary', ''):
+                                if rename_topic_inplace(session, row.get('Sesskey'), row['DB ID'], new_name):
+                                    success = True
+                            else:
+                                # If summary changed (or both), we must use the full form update
+                                if update_topic(session, row['DB ID'], new_name, new_summary):
+                                    success = True
+                                    
+                            if success:
+                                st.success("Topic updated!")
+                                # Trigger refresh
+                                session = setup_session(st.session_state.session_id)
+                                rows = get_topics(session, course['id'])
+                                if rows:
+                                    st.session_state.topics_data = rows
+                                    st.session_state.topics_loaded_from_disk = False
+                                    save_csv_to_disk(course['id'], f"topics_{course['id']}.csv", rows)
+                                    save_meta(course['id'], 'topics', len(rows))
+                                time.sleep(1)
+                                st.rerun()
+                            else:
+                                st.error("Failed to update topic")
+                        else:
+                            st.warning("Cannot edit this topic (No DB ID found)")
+
+                    st.divider()
+                    
+                    # Actions
+                    col_a1, col_a2, col_a3 = st.columns(3)
+                    
+                    with col_a1:
+                        # Visibility
+                        is_visible = row.get('Visible', True)
+                        btn_label = "🚫 Hide" if is_visible else "👁️ Show"
+                        if st.button(btn_label, key=f"vis_{i}"):
+                            session = setup_session(st.session_state.session_id)
+                            if toggle_topic_visibility(session, course['id'], row['Section ID'], row.get('Sesskey'), hide=is_visible):
+                                st.success(f"Topic {'hidden' if is_visible else 'shown'}!")
+                                session = setup_session(st.session_state.session_id)
+                                rows = get_topics(session, course['id'])
+                                if rows:
+                                    st.session_state.topics_data = rows
+                                    st.session_state.topics_loaded_from_disk = False
+                                    save_csv_to_disk(course['id'], f"topics_{course['id']}.csv", rows)
+                                    save_meta(course['id'], 'topics', len(rows))
+                                time.sleep(1)
+                                st.rerun()
+                            else:
+                                st.error("Failed to change visibility")
+                                
+                    with col_a3:
+                        # Delete
+                        if st.button("🗑️ Delete", key=f"del_{i}", type="primary"):
+                            if row.get('DB ID'):
+                                session = setup_session(st.session_state.session_id)
+                                if delete_topic(session, row['DB ID'], row.get('Sesskey')):
+                                    st.success("Topic deleted!")
+                                    session = setup_session(st.session_state.session_id)
+                                    rows = get_topics(session, course['id'])
+                                    if rows:
+                                        st.session_state.topics_data = rows
+                                        st.session_state.topics_loaded_from_disk = False
+                                        save_csv_to_disk(course['id'], f"topics_{course['id']}.csv", rows)
+                                        save_meta(course['id'], 'topics', len(rows))
+                                    time.sleep(1)
+                                    st.rerun()
+                                else:
+                                    st.error("Failed to delete topic")
+                            else:
+                                st.warning("Cannot delete this topic (No DB ID found)")
+
+            st.divider()
+            
+            # Add Topic
+            if st.button("➕ Add New Topic"):
+                session = setup_session(st.session_state.session_id)
+                # We need a sesskey. Use the one from the first topic if available
+                sesskey = st.session_state.topics_data[0].get('Sesskey') if st.session_state.topics_data else None
+                
+                if sesskey:
+                    if add_topic(session, course['id'], sesskey):
+                        st.success("Topic added!")
+                        session = setup_session(st.session_state.session_id)
+                        rows = get_topics(session, course['id'])
+                        if rows:
+                            st.session_state.topics_data = rows
+                            st.session_state.topics_loaded_from_disk = False
+                            save_csv_to_disk(course['id'], f"topics_{course['id']}.csv", rows)
+                            save_meta(course['id'], 'topics', len(rows))
+                        time.sleep(1)
+                        st.rerun()
+                    else:
+                        st.error("Failed to add topic")
+                else:
+                    st.error("Could not find session key. Please refresh topics first.")
+            
+            csv_data = dataframe_to_csv(st.session_state.topics_data)
+            st.download_button(
+                label="📥 Download CSV",
+                data=csv_data,
+                file_name=f"topics_{course['id']}.csv",
+                mime="text/csv"
+            )
     
     # -------------------------------------------------------------------------
     # TAB 1: TASKS
