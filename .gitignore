@@ -6,3 +6,4 @@ output/
 .config
 .last_session
 .debug*
+.git*
