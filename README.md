@@ -53,7 +53,7 @@ The GUI provides a browser-based interface with:
 
 ```bash
 pip install streamlit
-streamlit run app.py
+streamlit run app.py --browser.gatherUsageStats false
 ```
 
 Opens automatically at `http://localhost:8501`
