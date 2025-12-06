@@ -868,26 +868,54 @@ def update_topic_restriction(session, course_id, topic_id, sesskey, restriction_
             
         soup = BeautifulSoup(get_resp.text, "html.parser")
         
-        # Extract current name value
-        name_custom = "0"
+        # Extract current name value - field is name[customize] and name[value]
+        name_customize = "0"
         name_value = ""
         
-        # Look for name[custom] and name[value] fields (Moodle 4+ format)
-        name_custom_input = soup.find("input", {"name": "name[custom]"})
-        name_value_input = soup.find("input", {"name": "name[value]"})
+        # Look for name[customize] checkbox/hidden field
+        name_customize_input = soup.find("input", {"name": "name[customize]", "value": "1"})
+        if name_customize_input and name_customize_input.get("checked"):
+            name_customize = "1"
         
-        if name_custom_input:
-            name_custom = name_custom_input.get("value", "0")
+        # Also check hidden input with value="1"
+        for inp in soup.find_all("input", {"name": "name[customize]"}):
+            if inp.get("type") == "hidden" and inp.get("value") == "1":
+                # Check if the corresponding checkbox exists and is checked
+                pass
+            if inp.get("type") == "checkbox" and inp.get("checked"):
+                name_customize = "1"
+        
+        # Get the name value from the text input
+        name_value_input = soup.find("input", {"name": "name[value]"})
         if name_value_input:
             name_value = name_value_input.get("value", "")
+            logger.info(f"Found name[value] = '{name_value}'")
         
-        # Fallback: older Moodle format
-        if not name_value:
-            name_input = soup.find("input", {"name": "name"})
-            if name_input:
-                name_value = name_input.get("value", "")
+        # Extract summary_editor fields
+        summary_text = ""
+        summary_format = "1"
+        summary_itemid = ""
         
-        # Build payload with name preserved
+        summary_text_el = soup.find("textarea", {"name": "summary_editor[text]"})
+        if summary_text_el:
+            summary_text = summary_text_el.get_text() or ""
+        
+        summary_format_el = soup.find("input", {"name": "summary_editor[format]"})
+        if summary_format_el:
+            summary_format = summary_format_el.get("value", "1")
+            
+        summary_itemid_el = soup.find("input", {"name": "summary_editor[itemid]"})
+        if summary_itemid_el:
+            summary_itemid = summary_itemid_el.get("value", "")
+        
+        # If name[value] has a value, it means customize is enabled
+        if name_value:
+            name_customize = "1"
+        
+        logger.info(f"[DEBUG] topic_id={topic_id}, name_customize={name_customize}, name_value='{name_value[:50] if name_value else ''}'")
+        
+        # Build payload matching Moodle's actual form structure
+        # Note: Moodle sends name[customize] twice (0 and 1) when checkbox is checked
         payload = {
             "id": topic_id,
             "sr": "0", 
@@ -895,14 +923,31 @@ def update_topic_restriction(session, course_id, topic_id, sesskey, restriction_
             "_qf__editsection_form": "1",
             "mform_isexpanded_id_availabilityconditions": "1",
             "mform_isexpanded_id_generalhdr": "1",
-            "name[custom]": name_custom,
             "name[value]": name_value,
+            "summary_editor[text]": summary_text,
+            "summary_editor[format]": summary_format,
+            "summary_editor[itemid]": summary_itemid,
             "availabilityconditionsjson": restriction_json,
             "submitbutton": "Save changes"
         }
         
-        logger.info(f"Updating restriction for topic {topic_id} (name='{name_value[:30]}...')")
-        resp = session.post(url, data=payload, timeout=15)
+        # Handle name[customize] - Moodle expects it twice when checked
+        if name_customize == "1":
+            # When custom name is enabled, send both values
+            payload_list = list(payload.items())
+            # Insert name[customize]=0 and name[customize]=1 after sr
+            insert_idx = 2
+            payload_list.insert(insert_idx, ("name[customize]", "0"))
+            payload_list.insert(insert_idx + 1, ("name[customize]", "1"))
+            
+            # Use requests with a list of tuples to allow duplicate keys
+            logger.info(f"Updating restriction for topic {topic_id} (name='{name_value[:30] if name_value else 'EMPTY'}...')")
+            resp = session.post(url, data=payload_list, timeout=15)
+        else:
+            # Default section name - just send customize=0
+            payload["name[customize]"] = "0"
+            logger.info(f"Updating restriction for topic {topic_id} (default name)")
+            resp = session.post(url, data=payload, timeout=15)
         
         if resp.ok:
             logger.info("Restriction update successful (likely)")
@@ -1045,9 +1090,16 @@ def update_restrictions_batch(existing_json_str, group_ids=None, date_cond=None,
         
         if group_ids:
             if len(group_ids) == 1:
+                # Single group: Add directly
                 data['c'].append({"type": "group", "id": group_ids[0]})
+            elif operator == "|":
+                # Top-level is OR: Add each group directly (no nesting needed)
+                # Because "any of" already applies to all conditions
+                for gid in group_ids:
+                    data['c'].append({"type": "group", "id": gid})
             else:
-                # Multiple groups = nested OR set (any group grants access)
+                # Top-level is AND: Wrap groups in OR block
+                # "ALL conditions must be met, AND student must be in ANY of these groups"
                 nested_set = {
                     "op": "|",
                     "c": [{"type": "group", "id": gid} for gid in group_ids],
@@ -1073,8 +1125,21 @@ def update_restrictions_batch(existing_json_str, group_ids=None, date_cond=None,
         if completion_cond:
             data['c'].append(completion_cond)
 
-    # 6. Fix Showc
-    data['showc'] = [True] * len(data['c'])
+    # 6. Fix show/showc - Moodle uses different formats:
+    # - "show": true for flat structures (no nested sets)
+    # - "showc": [...] when there are nested condition sets
+    has_nested = any('c' in cond for cond in data['c'])
+    
+    if has_nested:
+        # Use showc array format for nested structures
+        data['showc'] = [True] * len(data['c'])
+        if 'show' in data:
+            del data['show']
+    else:
+        # Use simple show: true for flat structures
+        data['show'] = True
+        if 'showc' in data:
+            del data['showc']
     
     return json.dumps(data)
 
