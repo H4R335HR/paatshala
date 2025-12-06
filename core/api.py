@@ -853,31 +853,57 @@ def get_course_groups(session, course_id):
 def update_topic_restriction(session, course_id, topic_id, sesskey, restriction_json):
     """
     Update access restrictions for a topic.
-    Payload derived from Burp request analysis.
+    First fetches current section data to preserve the name.
     """
     url = f"{BASE}/course/editsection.php"
     
-    # Based on user's Burp request
-    payload = {
-        "id": topic_id,
-        "sr": "0", 
-        "sesskey": sesskey,
-        "_qf__editsection_form": "1",
-        "mform_isexpanded_id_availabilityconditions": "1",
-        "mform_isexpanded_id_generalhdr": "1",
-        # Defaulting name fields to avoid accidental renames if possible
-        # We rely on Moodle preserving values if not explicitly sent? 
-        # Actually, for x-www-form-urlencoded, missing keys might mean 'unchanged' or 'empty'.
-        # Safest is to NOT send name[...] keys if we aren't changing them.
-        "availabilityconditionsjson": restriction_json,
-        "submitbutton": "Save changes"
-    }
+    # First GET the edit form to extract current name and other values
+    get_url = f"{BASE}/course/editsection.php?id={topic_id}&sr=0"
     
     try:
-        logger.info(f"Updating restriction for topic {topic_id} in course {course_id}...")
+        get_resp = session.get(get_url, timeout=15)
+        if not get_resp.ok:
+            logger.warning(f"Could not GET section edit page: {get_resp.status_code}")
+            return False
+            
+        soup = BeautifulSoup(get_resp.text, "html.parser")
+        
+        # Extract current name value
+        name_custom = "0"
+        name_value = ""
+        
+        # Look for name[custom] and name[value] fields (Moodle 4+ format)
+        name_custom_input = soup.find("input", {"name": "name[custom]"})
+        name_value_input = soup.find("input", {"name": "name[value]"})
+        
+        if name_custom_input:
+            name_custom = name_custom_input.get("value", "0")
+        if name_value_input:
+            name_value = name_value_input.get("value", "")
+        
+        # Fallback: older Moodle format
+        if not name_value:
+            name_input = soup.find("input", {"name": "name"})
+            if name_input:
+                name_value = name_input.get("value", "")
+        
+        # Build payload with name preserved
+        payload = {
+            "id": topic_id,
+            "sr": "0", 
+            "sesskey": sesskey,
+            "_qf__editsection_form": "1",
+            "mform_isexpanded_id_availabilityconditions": "1",
+            "mform_isexpanded_id_generalhdr": "1",
+            "name[custom]": name_custom,
+            "name[value]": name_value,
+            "availabilityconditionsjson": restriction_json,
+            "submitbutton": "Save changes"
+        }
+        
+        logger.info(f"Updating restriction for topic {topic_id} (name='{name_value[:30]}...')")
         resp = session.post(url, data=payload, timeout=15)
         
-        # Success usually redirects or shows the course page
         if resp.ok:
             logger.info("Restriction update successful (likely)")
             return True
@@ -970,48 +996,50 @@ def add_or_update_group_restriction(existing_json_str, group_ids):
     
     return json.dumps(data)
 
-    return json.dumps(data)
 
-
-def update_restrictions_batch(existing_json_str, group_ids=None, date_cond=None, grade_cond=None):
+def update_restrictions_batch(existing_json_str, group_ids=None, date_cond=None, grade_cond=None, 
+                              completion_cond=None, operator="&"):
     """
-    Updates the JSON with new Group, Date, and Grade settings.
+    Updates the JSON with new restriction settings.
+    - operator: "&" for ALL conditions must be met, "|" for ANY condition
     - Groups: REPLACES all existing group restrictions with the new list (or removes if empty).
-    - Date: APPENDS the new date condition (if provided). Does NOT remove existing dates.
-    - Grade: APPENDS the new grade condition (if provided). Does NOT remove existing grades.
+    - Date: REPLACES any existing date restriction (if provided).
+    - Grade: REPLACES any existing grade restriction (if provided).
+    - Completion: REPLACES any existing completion restriction (if provided).
     """
     import json
     
     # 1. Parse or Init
-    data = {"op": "&", "c": [], "showc": [True]}
+    data = {"op": operator, "c": [], "showc": []}
     if existing_json_str:
         try:
             parsed = json.loads(existing_json_str)
             if isinstance(parsed, dict):
                 data = parsed
+                data["op"] = operator  # Update operator to user's choice
                 if 'c' not in data: data['c'] = []
         except: pass
 
-    # 2. Handle Groups (Replace Logic)
-    # We remove all old groups first because the UI "Select Groups" represents the full state of groups.
-    def remove_groups_recursive(cond_list):
+    # Helper to remove conditions by type (recursively)
+    def remove_type_recursive(cond_list, cond_type):
         kept = []
         for c in cond_list:
-            if 'c' in c: 
-                remove_groups_recursive(c['c'])
+            if 'c' in c:  # Nested set
+                remove_type_recursive(c['c'], cond_type)
                 if 'showc' in c: c['showc'] = [True] * len(c['c'])
-                kept.append(c)
-            elif c.get('type') == 'group':
-                continue 
+                # Only keep nested set if it still has conditions
+                if c['c']:
+                    kept.append(c)
+            elif c.get('type') == cond_type:
+                continue  # Remove this condition
             else:
                 kept.append(c)
         cond_list[:] = kept
 
+    # 2. Handle Groups (Replace Logic)
     if group_ids is not None:
-        # User interacted with groups, so we update the group state
-        remove_groups_recursive(data['c'])
+        remove_type_recursive(data['c'], 'group')
         
-        # Add new groups
         if not isinstance(group_ids, list): group_ids = [group_ids]
         group_ids = [int(g) for g in group_ids if g]
         
@@ -1019,6 +1047,7 @@ def update_restrictions_batch(existing_json_str, group_ids=None, date_cond=None,
             if len(group_ids) == 1:
                 data['c'].append({"type": "group", "id": group_ids[0]})
             else:
+                # Multiple groups = nested OR set (any group grants access)
                 nested_set = {
                     "op": "|",
                     "c": [{"type": "group", "id": gid} for gid in group_ids],
@@ -1026,15 +1055,25 @@ def update_restrictions_batch(existing_json_str, group_ids=None, date_cond=None,
                 }
                 data['c'].append(nested_set)
 
-    # 3. Handle Date (Append Logic)
-    if date_cond:
-        data['c'].append(date_cond)
+    # 3. Handle Date (Replace Logic)
+    if date_cond is not None:
+        remove_type_recursive(data['c'], 'date')
+        if date_cond:  # Only add if not empty dict
+            data['c'].append(date_cond)
 
-    # 4. Handle Grade (Append Logic)
-    if grade_cond:
-        data['c'].append(grade_cond)
+    # 4. Handle Grade (Replace Logic)
+    if grade_cond is not None:
+        remove_type_recursive(data['c'], 'grade')
+        if grade_cond:
+            data['c'].append(grade_cond)
 
-    # 5. Fix Showc
+    # 5. Handle Activity Completion (Replace Logic)
+    if completion_cond is not None:
+        remove_type_recursive(data['c'], 'completion')
+        if completion_cond:
+            data['c'].append(completion_cond)
+
+    # 6. Fix Showc
     data['showc'] = [True] * len(data['c'])
     
     return json.dumps(data)
@@ -1098,29 +1137,34 @@ def get_course_grade_items(session, course_id):
             
             items = {}
             
-            # Helper to recursively search for dicts with id/name in the 'grade' structure
-            def extract_items(obj):
+            # Helper to recursively search for dicts with id/name in a structure
+            def extract_items(obj, items_dict):
                 if isinstance(obj, dict):
                     if 'id' in obj and 'name' in obj:
-                        # Value of id can be int or string, Moodle varies.
-                        # For grade items, usually int.
-                        if obj['name']: # Ignore empty names
-                            items[str(obj['id'])] = obj['name']
+                        if obj['name']:  # Ignore empty names
+                            items_dict[str(obj['id'])] = obj['name']
                     return
                 if isinstance(obj, list):
                     for x in obj:
-                        extract_items(x)
+                        extract_items(x, items_dict)
 
+            grade_items = {}
+            completion_items = {}
+            
             if 'grade' in data:
-                extract_items(data['grade'])
+                extract_items(data['grade'], grade_items)
+            
+            # Extract completion activities (similar structure)
+            if 'completion' in data:
+                extract_items(data['completion'], completion_items)
                 
-            logger.info(f"Found {len(items)} Valid Grade Items (via Config)")
-            return items
+            logger.info(f"Found {len(grade_items)} Grade Items, {len(completion_items)} Completion Activities")
+            return grade_items, completion_items
             
         except Exception as e:
             logger.error(f"Error extracting grade items: {e}")
             
-    return {}
+    return {}, {}
 
 
 def get_restriction_summary(json_str, grade_items_map=None):
