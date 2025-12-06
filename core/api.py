@@ -1235,6 +1235,7 @@ def get_course_grade_items(session, course_id):
 def get_restriction_summary(json_str, grade_items_map=None):
     """
     Returns a list of descriptions for existing restrictions (Recursive).
+    Uses visual tree characters for nesting.
     """
     import json
     if not json_str: return []
@@ -1242,14 +1243,17 @@ def get_restriction_summary(json_str, grade_items_map=None):
     
     descriptions = []
     
-    def pars_cond(c_list, indent=0):
-        for c in c_list:
-            prefix = "  " * indent
+    def parse_cond(c_list, indent=0):
+        for i, c in enumerate(c_list):
+            is_last = (i == len(c_list) - 1)
+            prefix = "│  " * indent
+            bullet = "└─ " if is_last else "├─ "
+            
             if 'c' in c: # Nested operator
                 op = c.get('op', '&')
-                op_str = "Match ALL of:" if op == '&' else "Match ANY of:"
-                descriptions.append(f"{prefix}{op_str}")
-                pars_cond(c.get('c', []), indent + 1)
+                op_str = "[ALL of]:" if op == '&' else "[ANY of]:"
+                descriptions.append(f"{prefix}{bullet}{op_str}")
+                parse_cond(c.get('c', []), indent + 1)
                 continue
                 
             ctype = c.get('type')
@@ -1259,14 +1263,14 @@ def get_restriction_summary(json_str, grade_items_map=None):
                 from datetime import datetime
                 dt = datetime.fromtimestamp(int(t)).strftime('%Y-%m-%d %H:%M')
                 direction = "From" if ">" in d else "Until"
-                descriptions.append(f"{prefix}Date: {direction} {dt}")
+                descriptions.append(f"{prefix}{bullet}Date: {direction} {dt}")
                 
             elif ctype == 'completion':
                 cm = str(c.get('cm', ''))
                 name = grade_items_map.get(cm, f"Activity #{cm}")
                 state = c.get('e', 1)
                 state_str = "Complete" if state == 1 else "Incomplete"
-                descriptions.append(f"{prefix}Completion: '{name}' must be {state_str}")
+                descriptions.append(f"{prefix}{bullet}Completion: '{name}' → {state_str}")
                 
             elif ctype == 'grade':
                 gid = str(c.get('id', ''))
@@ -1276,27 +1280,27 @@ def get_restriction_summary(json_str, grade_items_map=None):
                 cond_str = ""
                 if min_g: cond_str += f" >= {min_g}%"
                 if max_g: cond_str += f" < {max_g}%"
-                descriptions.append(f"{prefix}Grade: '{name}' must be {cond_str}")
+                descriptions.append(f"{prefix}{bullet}Grade: '{name}'{cond_str}")
                 
             elif ctype == 'profile':
                 sf = c.get('sf', 'field')
                 op = c.get('op', 'is')
                 v = c.get('v', '')
-                descriptions.append(f"{prefix}Profile: {sf} {op} '{v}'")
+                descriptions.append(f"{prefix}{bullet}Profile: {sf} {op} '{v}'")
                 
             elif ctype == 'group':
                 gid = c.get('id')
-                # If we had a group map, we could show names too, but ID is what we have mostly or Shiny has names.
-                # Shiny will handle group visualization via selected values.
-                # But for summary, let's just say "Group Restriction"
-                descriptions.append(f"{prefix}Group (ID: {gid})")
+                descriptions.append(f"{prefix}{bullet}Group (ID: {gid})")
                 
     try:
         data = json.loads(json_str)
         if 'c' in data:
-            pars_cond(data['c'])
-        elif 'op' in data: 
-             pass 
+            # Show the TOP-LEVEL operator
+            top_op = data.get('op', '&')
+            top_op_str = "Match ALL of:" if top_op == '&' else "Match ANY of:"
+            descriptions.append(f"• {top_op_str}")
+            # Then parse conditions
+            parse_cond(data['c'], indent=0)
         return descriptions
     except:
         return ["Error parsing restriction JSON"]

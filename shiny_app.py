@@ -796,37 +796,63 @@ def server(input, output, session):
         current_data = get_topics(s, cid)
         topics_list.set(current_data)
         
-        # If we added multiple, we only operate on the LAST one for now (simplification)
-        # or we could loop. The requirement implies "Add a topic" (singular).
-        # We'll assume operation on the *newly added* topic(s).
-        # Use the LAST item as the target.
-        new_topic = current_data[-1]
-        new_topic_idx = len(current_data) - 1
-        new_sesskey = new_topic.get('Sesskey') # Might care about specific sesskey? Usually same.
+        # Calculate how many new topics were added (compare before/after counts)
+        original_count = len(data)
+        new_count = len(current_data)
+        added_count = new_count - original_count
         
-        # 2. RENAME (Optional)
-        if rename_text and rename_text.strip():
+        # The newly added topics are at the END of the list
+        # We'll operate on all of them
+        
+        # 2. RENAME (Optional) - only rename the FIRST newly added topic
+        if rename_text and rename_text.strip() and added_count > 0:
+            first_new_idx = original_count  # Index of first new topic
+            first_new_topic = current_data[first_new_idx]
             ui.notification_show(f"Renaming to '{rename_text}'...", duration=1)
-            if rename_topic_inplace(s, new_sesskey, new_topic['DB ID'], rename_text):
-                # Update local state to reflect rename immediately (for visual consistency if move fails)
-                current_data[-1]['Topic Name'] = rename_text
+            if rename_topic_inplace(s, first_new_topic.get('Sesskey'), first_new_topic['DB ID'], rename_text):
+                current_data[first_new_idx]['Topic Name'] = rename_text
                 topics_list.set(current_data) 
             else:
                  ui.notification_show("Rename failed", type="warning")
 
-        # 3. MOVE (Optional)
-        # Move to ABOVE the selection
-        if sel_idx is not None and sel_idx < new_topic_idx:
-             ui.notification_show("Moving to selection...", duration=1)
-             # Move 'new_topic_idx' (last) to 'sel_idx' (current selection)
-             if move_topic(s, new_topic_idx, new_sesskey, cid, target_section_number=sel_idx):
-                 # Final Refresh to ensure order is perfect
-                 final_data = get_topics(s, cid)
-                 topics_list.set(final_data)
-                 # Update selection to the new item?
-                 selected_idx.set(sel_idx) 
-             else:
-                 ui.notification_show("Move failed", type="warning")
+        # 3. MOVE (Optional) - move ALL newly added topics to above the selection
+        # Move from bottom to top, each time moving the last added topic to the target position
+        if sel_idx is not None and added_count > 0:
+            ui.notification_show(f"Moving {added_count} topic(s) to selection...", duration=1)
+            
+            # Move each new topic, starting from the last one
+            # After each move, the next topic to move will be at a different position
+            for i in range(added_count):
+                # After the i-th move, the next topic to move is at:
+                # (original_count + added_count - 1 - i) before move, but since we're moving from end,
+                # we always move from the current last position of "new topics"
+                # Actually simpler: always move from (len(current_data) - 1 - i) to (sel_idx + i)
+                
+                # Refetch current state after each move
+                if i > 0:
+                    current_data = get_topics(s, cid)
+                
+                # The topic to move is always the last one of the "unmoved" new topics
+                topic_to_move_idx = len(current_data) - 1 - i + i  # = len - 1 (always the last "new" one before it moves)
+                # Simpler: the last new topic that hasn't been moved yet is at position:
+                # original_count + (added_count - 1 - i) = len(current_data) - 1 - i
+                move_from_idx = len(current_data) - 1
+                
+                if move_from_idx <= sel_idx:
+                    continue  # Already above selection, skip
+                
+                topic_to_move = current_data[move_from_idx]
+                if move_topic(s, move_from_idx, topic_to_move.get('Sesskey'), cid, target_section_number=sel_idx):
+                    pass  # Success
+                else:
+                    ui.notification_show(f"Move {i+1} failed", type="warning")
+                    break
+            
+            # Final Refresh to ensure order is perfect
+            final_data = get_topics(s, cid)
+            topics_list.set(final_data)
+            # Update selection to the new items
+            selected_indices.set(list(range(sel_idx, sel_idx + added_count)))
         
         ui.notification_show("Done!", type="message")
 
@@ -1181,11 +1207,12 @@ def server(input, output, session):
         other_restrictions = get_restriction_summary(json_str, map_data)
         if not other_restrictions: return ui.div()
         
-        # Dedup and format
-        items = [ui.tags.li(x) for x in other_restrictions]
+        # Format as preformatted text to preserve tree structure
+        tree_text = "\n".join(other_restrictions)
         return ui.div(
              ui.tags.div("⚠️ Existing restriction structure:", class_="text-warning fw-bold small"),
-             ui.tags.ul(*items, class_="small text-muted")
+             ui.tags.pre(tree_text, class_="small text-muted bg-light p-2 rounded", 
+                         style="font-family: 'Consolas', 'Monaco', monospace; font-size: 0.85em; white-space: pre;")
         )
 
     @reactive.Effect
