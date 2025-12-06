@@ -1,7 +1,7 @@
 from shiny import App, render, ui, reactive
 import pandas as pd
 from core.auth import login_and_get_cookie, setup_session, validate_session
-from core.api import get_courses, get_topics, rename_topic_inplace, move_topic, toggle_topic_visibility, delete_topic, enable_edit_mode, add_topic, get_course_groups, update_topic_restriction, add_or_update_group_restriction, get_topic_restriction, get_restriction_summary, get_course_grade_items, update_restrictions_batch
+from core.api import get_courses, get_topics, rename_topic_inplace, move_topic, toggle_topic_visibility, delete_topic, enable_edit_mode, add_topic, get_course_groups, update_topic_restriction, add_or_update_group_restriction, get_topic_restriction, get_restriction_summary, get_course_grade_items, update_restrictions_batch, move_activity_to_section, duplicate_activity, reorder_activity_within_section, delete_activity
 from core.persistence import read_config
 import logging
 from faicons import icon_svg
@@ -146,7 +146,97 @@ body {
     font-size: 0.875rem;
     outline: none;
 }
+
+/* Activity Context Menu */
+.activity-context-menu {
+    position: fixed;
+    background: white;
+    border: 1px solid #e5e7eb;
+    border-radius: 8px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+    z-index: 10000;
+    min-width: 200px;
+    max-height: 400px;
+    overflow-y: auto;
+    padding: 4px 0;
+}
+.activity-context-menu .menu-header {
+    padding: 8px 12px;
+    font-weight: 600;
+    font-size: 0.75rem;
+    color: #6b7280;
+    text-transform: uppercase;
+    border-bottom: 1px solid #e5e7eb;
+}
+.activity-context-menu .menu-item {
+    padding: 8px 12px;
+    cursor: pointer;
+    font-size: 0.875rem;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+.activity-context-menu .menu-item:hover {
+    background: #f3f4f6;
+}
+.activity-context-menu .menu-item.current-section {
+    background: #e0f2fe;
+    color: #0369a1;
+    font-weight: 500;
+}
+
+/* Activity Drag Handle */
+.drag-handle {
+    cursor: grab;
+    color: #9ca3af;
+    padding: 4px 8px;
+    font-size: 1rem;
+}
+.drag-handle:hover {
+    color: #6b7280;
+}
+
+/* Sortable states */
+.sortable-ghost {
+    opacity: 0.4;
+    background: #e0f2fe !important;
+}
+.sortable-chosen {
+    background: #f0f9ff !important;
+}
+
+/* Duplicate Button */
+.btn-duplicate-activity {
+    background: none;
+    border: none;
+    color: #6b7280;
+    cursor: pointer;
+    padding: 4px 8px;
+    border-radius: 4px;
+    transition: all 0.15s;
+}
+.btn-duplicate-activity:hover {
+    background: #f3f4f6;
+    color: #3b82f6;
+}
+
+/* Delete Button */
+.btn-delete-activity {
+    background: none;
+    border: none;
+    color: #9ca3af;
+    cursor: pointer;
+    padding: 4px 8px;
+    border-radius: 4px;
+    transition: all 0.15s;
+}
+.btn-delete-activity:hover {
+    background: #fef2f2;
+    color: #ef4444;
+}
 """
+
+
 
 custom_js = """
 // Initialize Sortable
@@ -330,7 +420,200 @@ $(document).on('shiny:value', function(event) {
         setTimeout(initSortable, 100); // Wait for render
     }
 });
+
+// Activity Context Menu for Move
+let activeContextMenu = null;
+
+function hideActivityContextMenu() {
+    if (activeContextMenu) {
+        activeContextMenu.remove();
+        activeContextMenu = null;
+    }
+}
+
+document.addEventListener('click', function(e) {
+    if (!e.target.closest('.activity-context-menu')) {
+        hideActivityContextMenu();
+    }
+});
+
+document.addEventListener('contextmenu', function(e) {
+    const row = e.target.closest('tr[data-activity-id]');
+    if (row) {
+        e.preventDefault();
+        showActivityContextMenu(e.clientX, e.clientY, row);
+    }
+});
+
+function showActivityContextMenu(x, y, row) {
+    hideActivityContextMenu();
+    
+    const activityId = row.dataset.activityId;
+    const activityName = row.dataset.activityName;
+    const currentSectionId = row.dataset.sectionId;
+    
+    // Get topics from global variable (set by Shiny)
+    const topicsData = window.activityModalTopics || [];
+    if (!topicsData.length) {
+        console.log('No topics data available');
+        return;
+    }
+    
+    // Create menu
+    const menu = document.createElement('div');
+    menu.className = 'activity-context-menu';
+    
+    // Header
+    menu.innerHTML = `<div class="menu-header">Move "${activityName}" to:</div>`;
+    
+    // Topic items
+    topicsData.forEach(function(topic) {
+        const item = document.createElement('div');
+        item.className = 'menu-item' + (topic.sectionId == currentSectionId ? ' current-section' : '');
+        item.innerHTML = topic.sectionId == currentSectionId 
+            ? `📍 ${topic.name} (current)` 
+            : `📁 ${topic.name}`;
+        
+        if (topic.sectionId != currentSectionId) {
+            item.onclick = function() {
+                hideActivityContextMenu();
+                Shiny.setInputValue('activity_move_to_topic', {
+                    activityId: activityId,
+                    activityName: activityName,
+                    targetSectionId: topic.sectionId,
+                    targetSectionDbId: topic.dbId,
+                    targetSectionName: topic.name,
+                    nonce: Math.random()
+                }, {priority: 'event'});
+            };
+        }
+        menu.appendChild(item);
+    });
+    
+    // Position menu
+    menu.style.left = x + 'px';
+    menu.style.top = y + 'px';
+    
+    document.body.appendChild(menu);
+    activeContextMenu = menu;
+    
+    // Adjust if off screen
+    const rect = menu.getBoundingClientRect();
+    if (rect.right > window.innerWidth) {
+        menu.style.left = (window.innerWidth - rect.width - 10) + 'px';
+    }
+    if (rect.bottom > window.innerHeight) {
+        menu.style.top = (window.innerHeight - rect.height - 10) + 'px';
+    }
+}
+
+// Sortable for Activities Table (drag-drop reordering)
+let activitySortableInstance = null;
+
+function initActivitySortable() {
+    const el = document.getElementById('activities_table_body');
+    if (!el) return;
+    
+    if (activitySortableInstance) activitySortableInstance.destroy();
+    
+    activitySortableInstance = new Sortable(el, {
+        animation: 150,
+        ghostClass: 'sortable-ghost',
+        chosenClass: 'sortable-chosen',
+        handle: '.drag-handle',
+        onEnd: function(evt) {
+            const rows = el.querySelectorAll('tr[data-activity-id]');
+            const activityIds = Array.from(rows).map(r => r.dataset.activityId);
+            const movedId = evt.item.dataset.activityId;
+            const newIndex = evt.newIndex;
+            const beforeId = (newIndex < activityIds.length - 1) ? activityIds[newIndex + 1] : null;
+            
+            Shiny.setInputValue("activity_reorder", {
+                activityId: movedId,
+                newIndex: newIndex,
+                beforeId: beforeId,
+                nonce: Math.random()
+            }, {priority: "event"});
+        }
+    });
+}
+
+// Duplicate button click handler
+document.addEventListener('click', function(e) {
+    const dupBtn = e.target.closest('.btn-duplicate-activity');
+    if (dupBtn) {
+        e.preventDefault();
+        e.stopPropagation();
+        const activityId = dupBtn.dataset.activityId;
+        const activityName = dupBtn.dataset.activityName;
+        
+        Shiny.setInputValue("activity_duplicate", {
+            activityId: activityId,
+            activityName: activityName,
+            nonce: Math.random()
+        }, {priority: "event"});
+    }
+    
+    // Delete button handler - with optimistic UI update
+    const delBtn = e.target.closest('.btn-delete-activity');
+    if (delBtn) {
+        e.preventDefault();
+        e.stopPropagation();
+        const activityId = delBtn.dataset.activityId;
+        const activityName = delBtn.dataset.activityName;
+        const row = delBtn.closest('tr');
+        
+        if (confirm(`Are you sure you want to delete "${activityName}"?`)) {
+            // Optimistic UI: fade out and remove the row immediately
+            if (row) {
+                row.style.transition = 'opacity 0.3s';
+                row.style.opacity = '0.3';
+            }
+            
+            Shiny.setInputValue("activity_delete", {
+                activityId: activityId,
+                activityName: activityName,
+                nonce: Math.random()
+            }, {priority: "event"});
+        }
+    }
+});
+
+// Listen for successful delete to fully remove row
+Shiny.addCustomMessageHandler('activity_deleted', function(data) {
+    const row = document.querySelector(`tr[data-activity-id="${data.activityId}"]`);
+    if (row) {
+        row.style.transition = 'all 0.3s';
+        row.style.opacity = '0';
+        row.style.transform = 'translateX(-20px)';
+        setTimeout(() => row.remove(), 300);
+    }
+});
+
+// Listen for successful duplicate to add a new row
+Shiny.addCustomMessageHandler('activity_duplicated', function(data) {
+    const originalRow = document.querySelector(`tr[data-activity-id="${data.originalId}"]`);
+    if (originalRow && data.newRowHtml) {
+        // Insert the new row after the original
+        originalRow.insertAdjacentHTML('afterend', data.newRowHtml);
+        const newRow = originalRow.nextElementSibling;
+        if (newRow) {
+            newRow.style.opacity = '0';
+            newRow.style.transition = 'opacity 0.3s';
+            setTimeout(() => newRow.style.opacity = '1', 10);
+        }
+    }
+});
+
+// Initialize activity sortable when modal opens
+$(document).on('shiny:value', function(event) {
+    if (event.name === 'activities_modal_content') {
+        setTimeout(initActivitySortable, 100);
+    }
+});
 """
+
+
 
 # ============================================================================
 # APP UI
@@ -998,6 +1281,7 @@ def server(input, output, session):
                 act_name = act.get('name', 'Unnamed')
                 act_url = act.get('url', '')
                 act_visible = act.get('visible', True)
+                act_id = act.get('id', '')
                 
                 # Type icon/badge
                 type_icons = {
@@ -1025,12 +1309,21 @@ def server(input, output, session):
                 else:
                     name_html = act_name
                 
+                # Escape name for data attribute
+                escaped_name = act_name.replace('"', '&quot;')
+                section_id = row.get('Section ID', '')
+                
                 activity_rows.append(f"""
-                <tr>
+                <tr data-activity-id="{act_id}" data-activity-name="{escaped_name}" data-section-id="{section_id}">
+                    <td class="text-center drag-handle" title="Drag to reorder">⋮⋮</td>
                     <td class="text-center">{type_icon}</td>
                     <td>{name_html}</td>
                     <td><span class="badge bg-secondary">{act_type}</span></td>
                     <td class="text-center {vis_class}">{vis_badge}</td>
+                    <td class="text-center" style="white-space: nowrap;">
+                        <button class="btn-duplicate-activity" data-activity-id="{act_id}" data-activity-name="{escaped_name}" title="Duplicate">⧉</button>
+                        <button class="btn-delete-activity" data-activity-id="{act_id}" data-activity-name="{escaped_name}" title="Delete">🗑️</button>
+                    </td>
                 </tr>
                 """)
             
@@ -1038,27 +1331,57 @@ def server(input, output, session):
             <table class="table table-sm table-hover">
                 <thead>
                     <tr>
+                        <th style="width: 30px;"></th>
                         <th style="width: 40px;"></th>
                         <th>Activity Name</th>
                         <th style="width: 100px;">Type</th>
                         <th style="width: 60px;" class="text-center">Visible</th>
+                        <th style="width: 50px;"></th>
                     </tr>
                 </thead>
-                <tbody>
+                <tbody id="activities_table_body">
                     {''.join(activity_rows)}
                 </tbody>
             </table>
             """
             content = ui.HTML(table_html)
         
+        # Build topics data for context menu (JavaScript global)
+        import json
+        topics_for_js = []
+        for t in current:
+            topics_for_js.append({
+                "sectionId": t.get('Section ID', ''),
+                "dbId": t.get('DB ID', ''),
+                "name": t.get('Topic Name', 'Untitled')
+            })
+        topics_json = json.dumps(topics_for_js)
+        
+        # Script to inject topics data and initialize sortable
+        inject_script = ui.HTML(f"""
+        <script>
+            window.activityModalTopics = {topics_json};
+            window.activityModalSesskey = "{row.get('Sesskey', '')}";
+            // Initialize sortable after DOM is ready
+            setTimeout(function() {{
+                if (typeof initActivitySortable === 'function') {{
+                    initActivitySortable();
+                }}
+            }}, 100);
+        </script>
+        """)
+        
         m = ui.modal(
+            inject_script,
             content,
             title=f"Activities in: {topic_name}",
             size="l",
             easy_close=True,
             footer=ui.div(
+                ui.span("💡 Drag to reorder • Right-click to move • 📋 to duplicate", 
+                        class_="text-muted small", style="margin-right: auto;"),
                 ui.input_action_button("close_activities_modal", "Close", class_="btn-secondary"),
-                class_="d-flex justify-content-end"
+                class_="d-flex align-items-center w-100"
             )
         )
         ui.modal_show(m)
@@ -1067,6 +1390,181 @@ def server(input, output, session):
     @reactive.event(input.close_activities_modal)
     def on_close_activities():
         ui.modal_remove()
+
+    @reactive.Effect
+    @reactive.event(input.activity_move_to_topic)
+    def on_activity_move():
+        """Handle moving an activity to a different topic via context menu"""
+        evt = input.activity_move_to_topic()
+        if not evt: return
+        
+        activity_id = evt.get('activityId')
+        activity_name = evt.get('activityName', 'Activity')
+        target_section_id = evt.get('targetSectionId')
+        target_section_name = evt.get('targetSectionName', 'Target')
+        
+        if not activity_id or not target_section_id:
+            ui.notification_show("Missing activity or section information", type="error")
+            return
+        
+        s = setup_session(user_session_id())
+        cid = input.course_id()
+        
+        # Get sesskey from topics
+        current = list(topics_list())
+        if not current:
+            ui.notification_show("No topics loaded", type="error")
+            return
+        sesskey = current[0].get('Sesskey', '')
+        
+        # Ensure edit mode
+        ensure_edit_mode(s, cid, sesskey)
+        
+        # Move the activity
+        ui.notification_show(f"Moving '{activity_name}' to '{target_section_name}'...", duration=1)
+        success = move_activity_to_section(s, cid, activity_id, target_section_id, sesskey)
+        
+        if success:
+            ui.notification_show(f"✅ Moved '{activity_name}' to '{target_section_name}'", type="message")
+            # Refresh topics to reflect the change
+            new_topics = get_topics(s, cid)
+            topics_list.set(new_topics)
+            # Close the current modal (activity will be in different topic now)
+            ui.modal_remove()
+        else:
+            ui.notification_show(f"❌ Failed to move '{activity_name}'", type="error")
+
+    @reactive.Effect
+    @reactive.event(input.activity_reorder)
+    def on_activity_reorder():
+        """Handle drag-drop reordering of activities within a topic"""
+        evt = input.activity_reorder()
+        if not evt: return
+        
+        activity_id = evt.get('activityId')
+        before_id = evt.get('beforeId')  # Can be None if moved to end
+        
+        if not activity_id:
+            return
+        
+        s = setup_session(user_session_id())
+        cid = input.course_id()
+        
+        current = list(topics_list())
+        if not current: return
+        sesskey = current[0].get('Sesskey', '')
+        
+        # Find the section ID for this activity
+        section_id = None
+        for topic in current:
+            for act in topic.get('Activities', []):
+                if str(act.get('id')) == str(activity_id):
+                    section_id = topic.get('Section ID')
+                    break
+            if section_id:
+                break
+        
+        if not section_id:
+            ui.notification_show("Could not find activity section", type="error")
+            return
+        
+        ensure_edit_mode(s, cid, sesskey)
+        
+        success = reorder_activity_within_section(s, cid, activity_id, section_id, before_id, sesskey)
+        
+        if success:
+            ui.notification_show("✅ Activity reordered", type="message", duration=2)
+            # Refresh topics to reflect the change
+            new_topics = get_topics(s, cid)
+            topics_list.set(new_topics)
+        else:
+            ui.notification_show("❌ Failed to reorder activity", type="error")
+
+    @reactive.Effect
+    @reactive.event(input.activity_duplicate)
+    def on_activity_duplicate():
+        """Handle duplicating an activity"""
+        evt = input.activity_duplicate()
+        if not evt: return
+        
+        activity_id = evt.get('activityId')
+        activity_name = evt.get('activityName', 'Activity')
+        
+        if not activity_id:
+            return
+        
+        s = setup_session(user_session_id())
+        cid = input.course_id()
+        
+        current = list(topics_list())
+        if not current: return
+        sesskey = current[0].get('Sesskey', '')
+        
+        ensure_edit_mode(s, cid, sesskey)
+        
+        ui.notification_show(f"Duplicating '{activity_name}'...", duration=1)
+        success = duplicate_activity(s, activity_id, sesskey)
+        
+        if success:
+            ui.notification_show(f"✅ Duplicated '{activity_name}'", type="message")
+            # Refresh topics (background) and send message to update UI
+            new_topics = get_topics(s, cid)
+            topics_list.set(new_topics)
+            # Find the new duplicated activity's info to render new row
+            # For simplicity, just close and reopen the modal
+            # (full optimistic UI for duplicate requires finding new activity ID)
+            ui.modal_remove()
+        else:
+            ui.notification_show(f"❌ Failed to duplicate '{activity_name}'", type="error")
+
+    @reactive.Effect
+    @reactive.event(input.activity_delete)
+    def on_activity_delete():
+        """Handle deleting an activity"""
+        evt = input.activity_delete()
+        if not evt: return
+        
+        activity_id = evt.get('activityId')
+        activity_name = evt.get('activityName', 'Activity')
+        
+        if not activity_id:
+            return
+        
+        s = setup_session(user_session_id())
+        cid = input.course_id()
+        
+        current = list(topics_list())
+        if not current: return
+        sesskey = current[0].get('Sesskey', '')
+        
+        ensure_edit_mode(s, cid, sesskey)
+        
+        ui.notification_show(f"Deleting '{activity_name}'...", duration=1)
+        success = delete_activity(s, activity_id, sesskey)
+        
+        if success:
+            ui.notification_show(f"✅ Deleted '{activity_name}'", type="message")
+            # Refresh topics
+            new_topics = get_topics(s, cid)
+            topics_list.set(new_topics)
+            # Remove row via JS - inject a script to remove it
+            ui.insert_ui(
+                ui.HTML(f"""<script>
+                    var row = document.querySelector('tr[data-activity-id="{activity_id}"]');
+                    if (row) row.remove();
+                </script>"""),
+                selector="body"
+            )
+        else:
+            ui.notification_show(f"❌ Failed to delete '{activity_name}'", type="error")
+            # Restore row opacity via JS
+            ui.insert_ui(
+                ui.HTML(f"""<script>
+                    var row = document.querySelector('tr[data-activity-id="{activity_id}"]');
+                    if (row) row.style.opacity = '1';
+                </script>"""),
+                selector="body"
+            )
 
     # -------------------------------------------------------------------------
     # RESTRICTION MODAL LOGIC

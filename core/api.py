@@ -463,6 +463,148 @@ def move_topic(session, section_number, sesskey, course_id, target_section_numbe
         
     return False
 
+def move_activity_to_section(session, course_id, activity_id, section_id, sesskey, before_id=None):
+    """
+    Move an activity (course module) to a different section.
+    
+    Args:
+        session: Requests session
+        course_id: The course ID
+        activity_id: The course module ID (from module-{id} in HTML)
+        section_id: The target section ID (the visible section number, e.g. 36)
+        sesskey: Session key
+        before_id: Optional - place the activity before this activity ID
+    
+    Returns:
+        bool: Success status
+    """
+    # API captured from Burp:
+    # POST /course/rest.php
+    # sesskey=...&courseId=345&class=resource&field=move&id=32008&sectionId=36&beforeId=22924
+    
+    url = f"{BASE}/course/rest.php"
+    payload = {
+        "sesskey": sesskey,
+        "courseId": course_id,
+        "class": "resource",
+        "field": "move",
+        "id": activity_id,
+        "sectionId": section_id
+    }
+    
+    if before_id:
+        payload["beforeId"] = before_id
+    
+    logger.info(f"Moving activity {activity_id} to section {section_id}")
+    resp = session.post(url, data=payload)
+    return resp.ok
+
+def duplicate_activity(session, activity_id, sesskey):
+    """
+    Duplicate an activity (course module).
+    
+    Args:
+        session: Requests session
+        activity_id: The course module ID to duplicate
+        sesskey: Session key
+    
+    Returns:
+        bool: Success status
+    """
+    # API captured from Burp:
+    # POST /lib/ajax/service.php?sesskey=...&info=core_course_edit_module
+    # [{"index":0,"methodname":"core_course_edit_module","args":{"id":23222,"action":"duplicate","sectionreturn":"0"}}]
+    
+    url = f"{BASE}/lib/ajax/service.php"
+    params = {
+        "sesskey": sesskey,
+        "info": "core_course_edit_module"
+    }
+    
+    payload = [{
+        "index": 0,
+        "methodname": "core_course_edit_module",
+        "args": {
+            "id": int(activity_id),
+            "action": "duplicate",
+            "sectionreturn": "0"
+        }
+    }]
+    
+    logger.info(f"Duplicating activity {activity_id}")
+    resp = session.post(url, params=params, json=payload)
+    
+    if resp.ok:
+        try:
+            data = resp.json()
+            if isinstance(data, list) and data and not data[0].get("error"):
+                return True
+        except:
+            pass
+    return False
+
+def reorder_activity_within_section(session, course_id, activity_id, section_id, before_id, sesskey):
+    """
+    Reorder an activity within the same section by placing it before another activity.
+    This is a convenience wrapper around move_activity_to_section.
+    
+    Args:
+        session: Requests session
+        course_id: The course ID
+        activity_id: The activity to move
+        section_id: The section ID (stays the same)
+        before_id: The activity ID to place before (or None to place at end)
+        sesskey: Session key
+    
+    Returns:
+        bool: Success status
+    """
+    return move_activity_to_section(session, course_id, activity_id, section_id, sesskey, before_id)
+
+def delete_activity(session, activity_id, sesskey):
+    """
+    Delete an activity (course module).
+    
+    Args:
+        session: Requests session
+        activity_id: The course module ID to delete
+        sesskey: Session key
+    
+    Returns:
+        bool: Success status
+    """
+    # Uses the same API as duplicate but with action=delete
+    # POST /lib/ajax/service.php?sesskey=...&info=core_course_edit_module
+    # [{"index":0,"methodname":"core_course_edit_module","args":{"id":..., "action":"delete"}}]
+    
+    url = f"{BASE}/lib/ajax/service.php"
+    params = {
+        "sesskey": sesskey,
+        "info": "core_course_edit_module"
+    }
+    
+    payload = [{
+        "index": 0,
+        "methodname": "core_course_edit_module",
+        "args": {
+            "id": int(activity_id),
+            "action": "delete",
+            "sectionreturn": "0"
+        }
+    }]
+    
+    logger.info(f"Deleting activity {activity_id}")
+    resp = session.post(url, params=params, json=payload)
+    
+    if resp.ok:
+        try:
+            data = resp.json()
+            if isinstance(data, list) and data and not data[0].get("error"):
+                return True
+        except:
+            pass
+    return False
+
 def toggle_topic_visibility(session, course_id, section_id, sesskey, hide=True):
     """Hide or Show a topic"""
     # course/view.php?id=237&sesskey=...&hide=59
