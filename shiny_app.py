@@ -216,6 +216,17 @@ document.addEventListener('click', function(e) {
          return;
     }
     
+    // Check if clicked activities button
+    const actionActivities = e.target.closest('.action-activities');
+    if (actionActivities) {
+         e.stopPropagation();
+         Shiny.setInputValue("row_action_activities", {
+             index: parseInt(actionActivities.dataset.index),
+             nonce: Math.random()
+         }, {priority: "event"});
+         return;
+    }
+    
     // Check if clicked editable name
     const editableName = e.target.closest('.editable-topic-name');
     if (editableName) {
@@ -516,6 +527,8 @@ def server(input, output, session):
         icon_eye_slash = str(icon_svg("eye-slash"))
         icon_grip = str(icon_svg("grip-vertical"))
         icon_lock = str(icon_svg("lock"))
+        icon_unlock = str(icon_svg("unlock"))
+        icon_list = str(icon_svg("list"))
 
         for i, row in enumerate(data):
             # Icons
@@ -523,6 +536,20 @@ def server(input, output, session):
             vis_svg = icon_eye if vis else icon_eye_slash
             vis_class = "text-success" if vis else "text-muted-light"
             vis_title = "Hide" if vis else "Show"
+            
+            # Restriction info for tooltip
+            restriction_summary = row.get('Restriction Summary', '').strip()
+            has_restriction = bool(restriction_summary)
+            lock_icon = icon_lock if has_restriction else icon_unlock
+            lock_class = "text-warning" if has_restriction else "text-muted-light"
+            
+            # Escape for HTML title attribute
+            restriction_tooltip = restriction_summary.replace('"', '&quot;').replace("'", "&#39;") if restriction_summary else "No restrictions"
+            lock_title = f"Restrictions: {restriction_tooltip}" if has_restriction else "No restrictions - Click to add"
+            
+            # Activity count display
+            activity_count = row.get('Activity Count', 0)
+            activities_text = f"{activity_count} activities" if activity_count != 1 else "1 activity"
             
             # Use i as data-index
             tr = f"""
@@ -536,13 +563,17 @@ def server(input, output, session):
                         {row['Topic Name']}
                     </span>
                 </td>
-                <td>{row['Activity Count']} activities</td>
+                <td>
+                    <button class="btn-link-subtle action-activities" data-index="{i}" title="View activities">
+                        {activities_text}
+                    </button>
+                </td>
                 <td class="text-end" style="white-space: nowrap;">
                     <button class="btn-icon-action action-vis {vis_class}" data-index="{i}" title="{vis_title}">
                         {vis_svg}
                     </button>
-                    <button class="btn-icon-action action-lock text-muted-light" data-index="{i}" title="Restrict Access">
-                        {icon_lock}
+                    <button class="btn-icon-action action-lock {lock_class}" data-index="{i}" title="{lock_title}">
+                        {lock_icon}
                     </button>
                     <button class="btn-icon-action action-del text-danger" data-index="{i}" title="Delete">
                         {icon_trash}
@@ -553,6 +584,24 @@ def server(input, output, session):
             html_rows.append(tr)
         
         html = f"""
+        <style>
+            .btn-link-subtle {{
+                background: none;
+                border: none;
+                color: #6c757d;
+                cursor: pointer;
+                padding: 2px 6px;
+                font-size: 0.9em;
+                text-decoration: none;
+            }}
+            .btn-link-subtle:hover {{
+                color: #495057;
+                text-decoration: underline;
+            }}
+            .text-warning {{
+                color: #ffc107 !important;
+            }}
+        </style>
         <table class="topics-table">
             <thead>
                 <tr>
@@ -918,6 +967,106 @@ def server(input, output, session):
         cid = input.course_id()
         ensure_edit_mode(s, cid, row.get('Sesskey'))
         rename_topic_inplace(s, row.get('Sesskey'), row['DB ID'], new_name)
+
+    # -------------------------------------------------------------------------
+    # ACTIVITIES MODAL LOGIC
+    # -------------------------------------------------------------------------
+    @reactive.Effect
+    @reactive.event(input.row_action_activities)
+    def on_open_activities():
+        evt = input.row_action_activities()
+        if not evt: return
+        idx = evt['index']
+        
+        current = list(topics_list())
+        if idx >= len(current): return
+        
+        row = current[idx]
+        topic_name = row.get('Topic Name', 'Topic')
+        activities = row.get('Activities', [])
+        
+        # Build activities table
+        if not activities:
+            content = ui.div(
+                ui.p("No activities found in this topic.", class_="text-muted text-center p-4")
+            )
+        else:
+            # Build table rows
+            activity_rows = []
+            for act in activities:
+                act_type = act.get('type', 'unknown')
+                act_name = act.get('name', 'Unnamed')
+                act_url = act.get('url', '')
+                act_visible = act.get('visible', True)
+                
+                # Type icon/badge
+                type_icons = {
+                    'quiz': '📝',
+                    'assign': '📋',
+                    'page': '📄',
+                    'resource': '📁',
+                    'url': '🔗',
+                    'forum': '💬',
+                    'folder': '📂',
+                    'book': '📖',
+                    'scorm': '🎓',
+                    'lesson': '📚',
+                    'label': '🏷️',
+                    'certificate': '🏆'
+                }
+                type_icon = type_icons.get(act_type, '📦')
+                
+                vis_badge = "✓" if act_visible else "👁️‍🗨️"
+                vis_class = "text-success" if act_visible else "text-muted"
+                
+                # Make name clickable link if URL exists
+                if act_url:
+                    name_html = f'<a href="{act_url}" target="_blank" class="text-primary">{act_name}</a>'
+                else:
+                    name_html = act_name
+                
+                activity_rows.append(f"""
+                <tr>
+                    <td class="text-center">{type_icon}</td>
+                    <td>{name_html}</td>
+                    <td><span class="badge bg-secondary">{act_type}</span></td>
+                    <td class="text-center {vis_class}">{vis_badge}</td>
+                </tr>
+                """)
+            
+            table_html = f"""
+            <table class="table table-sm table-hover">
+                <thead>
+                    <tr>
+                        <th style="width: 40px;"></th>
+                        <th>Activity Name</th>
+                        <th style="width: 100px;">Type</th>
+                        <th style="width: 60px;" class="text-center">Visible</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {''.join(activity_rows)}
+                </tbody>
+            </table>
+            """
+            content = ui.HTML(table_html)
+        
+        m = ui.modal(
+            content,
+            title=f"Activities in: {topic_name}",
+            size="l",
+            easy_close=True,
+            footer=ui.div(
+                ui.input_action_button("close_activities_modal", "Close", class_="btn-secondary"),
+                class_="d-flex justify-content-end"
+            )
+        )
+        ui.modal_show(m)
+    
+    @reactive.Effect
+    @reactive.event(input.close_activities_modal)
+    def on_close_activities():
+        ui.modal_remove()
 
     # -------------------------------------------------------------------------
     # RESTRICTION MODAL LOGIC

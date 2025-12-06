@@ -225,15 +225,73 @@ def get_topics(session, course_id, max_retries=3):
                 if label:
                     name = label
             
-            # Count activities
+            # Count activities and extract details
             activities = section.find_all("li", class_=lambda c: c and "activity" in c)
             activity_count = len(activities)
+            
+            # Extract activity details
+            activity_list = []
+            for act in activities:
+                # Get activity ID
+                act_id = act.get("id", "").replace("module-", "")
+                
+                # Get activity name
+                act_name = ""
+                act_instance = act.find(class_="activityinstance") or act.find(class_="activity-instance")
+                if act_instance:
+                    act_name_el = act_instance.find("span", class_="instancename") or act_instance.find("a")
+                    if act_name_el:
+                        act_name = act_name_el.get_text(strip=True)
+                        # Remove trailing " Quiz", " Assignment" etc from instancename
+                        if act_name.count(' ') > 0:
+                            parts = act_name.rsplit(' ', 1)
+                            if parts[-1] in ['Quiz', 'Assignment', 'File', 'URL', 'Forum', 'Page', 'Folder', 'Book', 'Lesson', 'SCORM', 'Certificate', 'Label']:
+                                act_name = parts[0]
+                
+                # Get activity type from class
+                act_type = ""
+                act_classes = act.get("class", [])
+                for cls in act_classes:
+                    if cls.startswith("modtype_"):
+                        act_type = cls.replace("modtype_", "")
+                        break
+                
+                # Get activity URL
+                act_url = ""
+                act_link = act.find("a", href=lambda h: h and "/mod/" in h)
+                if act_link:
+                    act_url = act_link.get("href", "")
+                
+                # Get visibility
+                act_visible = True
+                if "dimmed" in act_classes or "hidden" in act_classes:
+                    act_visible = False
+                dimmed_text = act.find(class_="dimmed_text")
+                if dimmed_text:
+                    act_visible = False
+                
+                if act_id:
+                    activity_list.append({
+                        "id": act_id,
+                        "name": act_name,
+                        "type": act_type,
+                        "url": act_url,
+                        "visible": act_visible
+                    })
             
             # Extract summary text if available
             summary = ""
             summary_node = section.find(class_="summary")
             if summary_node:
                 summary = summary_node.get_text(" ", strip=True)[:100] + "..." if len(summary_node.get_text(strip=True)) > 100 else summary_node.get_text(" ", strip=True)
+            
+            # Extract restriction summary (look for availability info)
+            restriction_summary = ""
+            availability_info = section.find(class_="availabilityinfo") or section.find(class_="availability-info")
+            if availability_info:
+                restriction_summary = availability_info.get_text(" ", strip=True)[:150]
+                # Clean up common phrases
+                restriction_summary = restriction_summary.replace("Not available unless:", "").strip()
     
             # Find the DB ID for editing (often in the edit link or inplace editable attributes)
             db_id = ""
@@ -270,7 +328,9 @@ def get_topics(session, course_id, max_retries=3):
                     "DB ID": db_id,
                     "Topic Name": name,
                     "Activity Count": activity_count,
+                    "Activities": activity_list,
                     "Summary": summary,
+                    "Restriction Summary": restriction_summary,
                     "Visible": visible,
                     "Sesskey": sesskey # Include sesskey in each row for convenience
                 })
