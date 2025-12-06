@@ -6,6 +6,9 @@ from collections import defaultdict
 from bs4 import BeautifulSoup
 from datetime import datetime
 from pathlib import Path
+import logging
+
+logger = logging.getLogger(__name__)
 
 from .auth import setup_session, PAATSHALA_HOST, BASE
 from .parser import parse_assign_view, parse_grading_table
@@ -27,8 +30,11 @@ def get_courses(session):
     """Fetch all courses using Moodle's AJAX APIs"""
     courses_dict = {}
     
+    logger.info("Function get_courses called")
     try:
+        logger.info("Making request to /my/ ...")
         resp = session.get(f"{BASE}/my/", timeout=15)
+        logger.info(f"Response: status={resp.status_code}, url={resp.url[:80]}")
         if not resp.ok:
             return []
         
@@ -145,8 +151,10 @@ def get_tasks(session, course_id):
     
     return tasks
 
-def get_topics(session, course_id):
+def get_topics(session, course_id, max_retries=3):
     """Get all topics (sections) from course page with robust ID extraction"""
+    import time
+    logger.info(f"Fetching topics for course {course_id}")
     base_url = f"{BASE}/course/view.php"
     params = {"id": course_id}
     
@@ -158,10 +166,24 @@ def get_topics(session, course_id):
             # If we found a sesskey in the first attempt (even if IDs were missing), use it
             # But usually sesskey is in the page we just fetched. 
             # We'll rely on the fact that 'edit=on' usually works or redirects to a link with sesskey
-            
-        resp = session.get(base_url, params=params)
-        if not resp.ok:
-            return []
+        
+        # Retry with backoff for connection errors
+        for retry in range(max_retries):
+            try:
+                resp = session.get(base_url, params=params, timeout=30)
+                if not resp.ok:
+                    logger.warning(f"get_topics: Response not OK: {resp.status_code}")
+                    return []
+                break  # Success, exit retry loop
+            except Exception as e:
+                logger.warning(f"get_topics: Attempt {retry+1}/{max_retries} failed: {e}")
+                if retry < max_retries - 1:
+                    wait_time = (2 ** retry)  # 1s, 2s, 4s
+                    logger.info(f"Waiting {wait_time}s before retry...")
+                    time.sleep(wait_time)
+                else:
+                    logger.error(f"get_topics: All retries exhausted")
+                    return []
         
         soup = BeautifulSoup(resp.text, "html.parser")
         
@@ -276,7 +298,7 @@ def get_topics(session, course_id):
             
         # If we are here, either we have all IDs, or we are on attempt 1 (gave up), or no topics found.
         return topics
-
+    
     return []
 
 def add_topic(session, course_id, sesskey, count=1):
@@ -300,6 +322,7 @@ def add_topic(session, course_id, sesskey, count=1):
 
 def delete_topic(session, db_id, sesskey):
     """Delete a topic"""
+    logger.info(f"Deleting topic {db_id}")
     # course/editsection.php?id=5431&sr&delete=1&sesskey=...
     url = f"{BASE}/course/editsection.php"
     params = {
@@ -310,6 +333,75 @@ def delete_topic(session, db_id, sesskey):
     }
     resp = session.get(url, params=params)
     return resp.ok
+
+def enable_edit_mode(session, course_id, sesskey):
+    """
+    Enable edit mode for the course using POST request.
+    """
+    url = f"{BASE}/course/view.php"
+    data = {
+        "id": course_id,
+        "sesskey": sesskey,
+        "edit": "on"
+    }
+    resp = session.post(url, data=data)
+    return resp.ok
+
+def move_topic(session, section_number, sesskey, course_id, target_section_number=None, direction=None):
+    """
+    Move a topic using the REST API.
+    
+    Args:
+        session: Requests session
+        section_number: The Section Number (e.g. 68) to move. NOT the DB ID.
+        sesskey: The session key
+        course_id: The course ID
+        target_section_number: The Section Number to move BEFORE (swapping/reordering).
+        direction: (Deprecated) 'up' or 'down' - kept for backward compatibility.
+    """
+    # New API based on Burp capture:
+    # POST /course/rest.php
+    # sesskey=...&courseId=345&class=section&field=move&id=68&value=66
+    # Note: 'id' and 'value' here refer to the visible Section Numbers (1, 2, 3...), not the internal DB IDs.
+    
+    url = f"{BASE}/course/rest.php"
+    
+    if target_section_number is not None:
+        logger.info(f"Moving section {section_number} before {target_section_number}")
+        payload = {
+            "class": "section",
+            "field": "move",
+            "id": section_number,
+            "value": target_section_number,
+            "courseId": course_id,
+            "sesskey": sesskey
+        }
+        
+        resp = session.post(url, data=payload)
+        return resp.ok
+        
+    # Fallback to old method if no target_id provided (legacy support)
+    # Note: The old method used DB ID. This might be confusing if we renamed the param.
+    # But for now, we assume if direction is used, the caller might be using DB ID or we might need to handle it.
+    # However, since we are moving to the new API, we focus on that.
+    if direction:
+        # Warning: The old API expected DB ID. If section_number is passed, this might fail.
+        # We'll assume for legacy calls, the caller knows what they are doing or we should deprecate this path.
+        url = f"{BASE}/course/editsection.php"
+        params = {
+            "id": section_number, # This might need to be DB ID for this specific endpoint
+            "sesskey": sesskey
+        }
+        
+        if direction == "up":
+            params["moveup"] = 1
+        else:
+            params["movedown"] = 1
+            
+        resp = session.get(url, params=params)
+        return resp.ok
+        
+    return False
 
 def toggle_topic_visibility(session, course_id, section_id, sesskey, hide=True):
     """Hide or Show a topic"""
@@ -329,6 +421,7 @@ def toggle_topic_visibility(session, course_id, section_id, sesskey, hide=True):
 
 def rename_topic_inplace(session, sesskey, itemid, new_name):
     """Rename topic using Moodle's inplace editable AJAX API"""
+    logger.info(f"Renaming topic {itemid} to '{new_name}'")
     # POST /lib/ajax/service.php?sesskey=...&info=core_update_inplace_editable
     url = f"{BASE}/lib/ajax/service.php"
     params = {
@@ -359,6 +452,7 @@ def rename_topic_inplace(session, sesskey, itemid, new_name):
             return False # Unexpected response format
         return False
     except Exception as e:
+        logger.error(f"Error renaming topic: {e}")
         print(f"Error renaming topic: {e}")
         return False
 
@@ -420,10 +514,12 @@ def fetch_task_details(session_id, name, mid, url):
 
 def fetch_tasks_list(session_id, course_id, progress_callback=None):
     """Fetch all tasks for a course with details"""
+    logger.info(f"Fetching full task list for course {course_id}")
     main_session = setup_session(session_id)
     tasks = get_tasks(main_session, course_id)
     
     if not tasks:
+        logger.warning("No tasks found locally on course page")
         return []
     
     rows = []
@@ -451,7 +547,8 @@ def fetch_tasks_list(session_id, course_id, progress_callback=None):
                     "Needs Grading": info.get("needs_grading", ""),
                     "URL": returned_url
                 })
-            except:
+            except Exception as e:
+                logger.error(f"Error fetching task detail: {e}")
                 pass
             
             completed += 1
@@ -528,10 +625,12 @@ def fetch_quiz_scores(session_id, module_id, group_id=None):
 
 def fetch_quiz_scores_all(session_id, course_id, group_id=None, progress_callback=None):
     """Fetch all quiz scores for a course"""
+    logger.info(f"Fetching all quiz scores for course {course_id} (Group: {group_id})")
     main_session = setup_session(session_id)
     quizzes = get_quizzes(main_session, course_id)
     
     if not quizzes:
+        logger.warning("No quizzes found")
         return None, []
     
     all_scores = defaultdict(dict)
@@ -717,6 +816,429 @@ def download_file(session, url, course_id, student_name, filename):
             return str(local_path)
         else:
             return None
+        return None
     except Exception as e:
         print(f"Download error: {e}")
+        return None
+
+def get_course_groups(session, course_id):
+    """
+    Fetch all groups for a given course.
+    Returns: List of dicts [{'id': '123', 'name': 'Group A'}, ...]
+    """
+    groups_url = f"{BASE}/group/index.php?id={course_id}"
+    try:
+        resp = session.get(groups_url, timeout=10)
+        if not resp.ok:
+            logger.error(f"Failed to fetch groups: {resp.status_code}")
+            return []
+        
+        soup = BeautifulSoup(resp.text, "html.parser")
+        select = soup.find("select", {"id": "groups"})
+        if not select:
+            # Maybe there are no groups or no access?
+            return []
+            
+        groups = []
+        for option in select.find_all("option"):
+            groups.append({
+                "id": option.get("value"),
+                "name": option.text.strip()
+            })
+        return groups
+    except Exception as e:
+        logger.error(f"Error fetching course groups: {e}")
+        return []
+
+def update_topic_restriction(session, course_id, topic_id, sesskey, restriction_json):
+    """
+    Update access restrictions for a topic.
+    Payload derived from Burp request analysis.
+    """
+    url = f"{BASE}/course/editsection.php"
+    
+    # Based on user's Burp request
+    payload = {
+        "id": topic_id,
+        "sr": "0", 
+        "sesskey": sesskey,
+        "_qf__editsection_form": "1",
+        "mform_isexpanded_id_availabilityconditions": "1",
+        "mform_isexpanded_id_generalhdr": "1",
+        # Defaulting name fields to avoid accidental renames if possible
+        # We rely on Moodle preserving values if not explicitly sent? 
+        # Actually, for x-www-form-urlencoded, missing keys might mean 'unchanged' or 'empty'.
+        # Safest is to NOT send name[...] keys if we aren't changing them.
+        "availabilityconditionsjson": restriction_json,
+        "submitbutton": "Save changes"
+    }
+    
+    try:
+        logger.info(f"Updating restriction for topic {topic_id} in course {course_id}...")
+        resp = session.post(url, data=payload, timeout=15)
+        
+        # Success usually redirects or shows the course page
+        if resp.ok:
+            logger.info("Restriction update successful (likely)")
+            return True
+        else:
+             logger.warning(f"Restriction update failed: {resp.status_code}")
+             return False
+    except Exception as e:
+        logger.error(f"Error updating restriction: {e}")
+        return False
+
+
+def add_or_update_group_restriction(existing_json_str, group_ids):
+    """
+    Safely adds or updates group restrictions.
+    - If multiple groups are provided, creates a nested OR restriction set (Access Set).
+    - Preserves other conditions.
+    - Ensures showc array matches 'c' length.
+    
+    Args:
+        existing_json_str: Current JSON string.
+        group_ids: List of group IDs (strings or ints).
+    """
+    import json
+    
+    # Identify groups
+    if group_ids is None: group_ids = []
+    if not isinstance(group_ids, list): group_ids = [group_ids]
+    group_ids = [int(g) for g in group_ids if g]
+    
+    # 1. Parse or Init
+    data = {"op": "&", "c": [], "showc": [True]}
+    if existing_json_str:
+        try:
+            parsed = json.loads(existing_json_str)
+            if isinstance(parsed, dict):
+                data = parsed
+                if 'c' not in data: data['c'] = []
+        except:
+            pass
+
+    # 2. Recursively remove ALL existing group conditions
+    # This is a simplification: we assume we want to replace ALL group rules with the new selection.
+    # To be safer, maybe we only remove top-level? 
+    # But usually, if managing groups via this UI, we want to control the 'Group' aspect fully.
+    
+    def remove_groups_recursive(cond_list):
+        kept = []
+        for c in cond_list:
+            if 'c' in c: # Nested
+                # Recurse
+                remove_groups_recursive(c['c'])
+                # If nested block becomes empty/useless, maybe drop it? 
+                # For now let's keep it to be safe, unless empty.
+                # Update showc for the nested block too
+                if 'showc' in c:
+                     c['showc'] = [True] * len(c['c'])
+                kept.append(c)
+            elif c.get('type') == 'group':
+                continue # Skip groups
+            else:
+                kept.append(c)
+        
+        # Modify list in place? No, we need to return new list or modify the passed one.
+        # Since we are iterating, let's just clear and extend.
+        cond_list[:] = kept
+
+    remove_groups_recursive(data['c'])
+
+    # 3. Construct New Group Condition(s)
+    if group_ids:
+        if len(group_ids) == 1:
+            # Single group: Add directly to root
+            data['c'].append({
+                "type": "group",
+                "id": group_ids[0]
+            })
+        else:
+            # Multiple groups: Wrap in OR block (Nested Restriction Set)
+            # "Student must match ANY of the following groups"
+            nested_set = {
+                "op": "|",
+                "c": [{"type": "group", "id": gid} for gid in group_ids],
+                "showc": [True] * len(group_ids)
+            }
+            data['c'].append(nested_set)
+
+    # 4. CRITICAL: Fix root 'showc' length
+    # The user warned us: showc must match c length.
+    data['showc'] = [True] * len(data['c'])
+    
+    return json.dumps(data)
+
+    return json.dumps(data)
+
+
+def update_restrictions_batch(existing_json_str, group_ids=None, date_cond=None, grade_cond=None):
+    """
+    Updates the JSON with new Group, Date, and Grade settings.
+    - Groups: REPLACES all existing group restrictions with the new list (or removes if empty).
+    - Date: APPENDS the new date condition (if provided). Does NOT remove existing dates.
+    - Grade: APPENDS the new grade condition (if provided). Does NOT remove existing grades.
+    """
+    import json
+    
+    # 1. Parse or Init
+    data = {"op": "&", "c": [], "showc": [True]}
+    if existing_json_str:
+        try:
+            parsed = json.loads(existing_json_str)
+            if isinstance(parsed, dict):
+                data = parsed
+                if 'c' not in data: data['c'] = []
+        except: pass
+
+    # 2. Handle Groups (Replace Logic)
+    # We remove all old groups first because the UI "Select Groups" represents the full state of groups.
+    def remove_groups_recursive(cond_list):
+        kept = []
+        for c in cond_list:
+            if 'c' in c: 
+                remove_groups_recursive(c['c'])
+                if 'showc' in c: c['showc'] = [True] * len(c['c'])
+                kept.append(c)
+            elif c.get('type') == 'group':
+                continue 
+            else:
+                kept.append(c)
+        cond_list[:] = kept
+
+    if group_ids is not None:
+        # User interacted with groups, so we update the group state
+        remove_groups_recursive(data['c'])
+        
+        # Add new groups
+        if not isinstance(group_ids, list): group_ids = [group_ids]
+        group_ids = [int(g) for g in group_ids if g]
+        
+        if group_ids:
+            if len(group_ids) == 1:
+                data['c'].append({"type": "group", "id": group_ids[0]})
+            else:
+                nested_set = {
+                    "op": "|",
+                    "c": [{"type": "group", "id": gid} for gid in group_ids],
+                    "showc": [True] * len(group_ids)
+                }
+                data['c'].append(nested_set)
+
+    # 3. Handle Date (Append Logic)
+    if date_cond:
+        data['c'].append(date_cond)
+
+    # 4. Handle Grade (Append Logic)
+    if grade_cond:
+        data['c'].append(grade_cond)
+
+    # 5. Fix Showc
+    data['showc'] = [True] * len(data['c'])
+    
+    return json.dumps(data)
+
+
+def get_course_grade_items(session, course_id):
+    """
+    Fetch valid GRADE ITEM IDs from the Moodle Availability Configuration.
+    This requires fetching a Topic Edit page to access the M.core_availability.form.init JSON.
+    Returns a dict: { '4602': 'Practice Quiz 15', ... } (Keys are Grade Item IDs, NOT Module IDs)
+    """
+    import re
+    import json
+    import time
+    
+    logger.info(f"Fetching grade items for course {course_id} via Availability Config")
+    
+    # 1. We need a valid Topic ID to access the editsection page.
+    # We'll try to get topics first.
+    topics = get_topics(session, course_id)
+    if not topics:
+        logger.warning("No topics found. Cannot fetch grade configuration.")
+        return {}
+        
+    # Use the first available topic that has a valid DB ID
+    valid_topic_id = None
+    for t in topics:
+        if t.get("DB ID"):
+            valid_topic_id = t["DB ID"]
+            break
+            
+    if not valid_topic_id:
+        logger.warning("No topic with valid DB ID found. Cannot fetch grade config.")
+        return {}
+    
+    url = f"{BASE}/course/editsection.php?id={valid_topic_id}"
+    
+    for attempt in range(2):
+        try:
+            resp = session.get(url, timeout=30)
+            if not resp.ok:
+                logger.warning(f"Failed to fetch edit page: {resp.status_code}")
+                continue
+                
+            # 2. Extract M.core_availability.form.init({...})
+            # This JSON contains the "grade" plugin configuration with ID mapping.
+            pattern = r"M\.core_availability\.form\.init\((.*?)\);"
+            match = re.search(pattern, resp.text, re.DOTALL)
+            
+            if not match:
+                logger.warning("Availability Init JSON not found in edit page.")
+                continue # Retry or fail
+                
+            json_text = match.group(1)
+            data = json.loads(json_text)
+            
+            # 3. Parse 'grade' items
+            # Structure: data['grade'] -> [plugin_name, is_enabled, [ [ {id: ..., name: ...}, ... ] ]]
+            # The structure is deeply nested lists.
+            # We look for the list containing dicts with "id" and "name".
+            
+            items = {}
+            
+            # Helper to recursively search for dicts with id/name in the 'grade' structure
+            def extract_items(obj):
+                if isinstance(obj, dict):
+                    if 'id' in obj and 'name' in obj:
+                        # Value of id can be int or string, Moodle varies.
+                        # For grade items, usually int.
+                        if obj['name']: # Ignore empty names
+                            items[str(obj['id'])] = obj['name']
+                    return
+                if isinstance(obj, list):
+                    for x in obj:
+                        extract_items(x)
+
+            if 'grade' in data:
+                extract_items(data['grade'])
+                
+            logger.info(f"Found {len(items)} Valid Grade Items (via Config)")
+            return items
+            
+        except Exception as e:
+            logger.error(f"Error extracting grade items: {e}")
+            
+    return {}
+
+
+def get_restriction_summary(json_str, grade_items_map=None):
+    """
+    Returns a list of descriptions for existing restrictions (Recursive).
+    """
+    import json
+    if not json_str: return []
+    if grade_items_map is None: grade_items_map = {}
+    
+    descriptions = []
+    
+    def pars_cond(c_list, indent=0):
+        for c in c_list:
+            prefix = "  " * indent
+            if 'c' in c: # Nested operator
+                op = c.get('op', '&')
+                op_str = "Match ALL of:" if op == '&' else "Match ANY of:"
+                descriptions.append(f"{prefix}{op_str}")
+                pars_cond(c.get('c', []), indent + 1)
+                continue
+                
+            ctype = c.get('type')
+            if ctype == 'date':
+                d = c.get('d', '')
+                t = c.get('t', 0)
+                from datetime import datetime
+                dt = datetime.fromtimestamp(int(t)).strftime('%Y-%m-%d %H:%M')
+                direction = "From" if ">" in d else "Until"
+                descriptions.append(f"{prefix}Date: {direction} {dt}")
+                
+            elif ctype == 'completion':
+                cm = str(c.get('cm', ''))
+                name = grade_items_map.get(cm, f"Activity #{cm}")
+                state = c.get('e', 1)
+                state_str = "Complete" if state == 1 else "Incomplete"
+                descriptions.append(f"{prefix}Completion: '{name}' must be {state_str}")
+                
+            elif ctype == 'grade':
+                gid = str(c.get('id', ''))
+                name = grade_items_map.get(gid, f"Item #{gid}")
+                min_g = c.get('min', '')
+                max_g = c.get('max', '')
+                cond_str = ""
+                if min_g: cond_str += f" >= {min_g}%"
+                if max_g: cond_str += f" < {max_g}%"
+                descriptions.append(f"{prefix}Grade: '{name}' must be {cond_str}")
+                
+            elif ctype == 'profile':
+                sf = c.get('sf', 'field')
+                op = c.get('op', 'is')
+                v = c.get('v', '')
+                descriptions.append(f"{prefix}Profile: {sf} {op} '{v}'")
+                
+            elif ctype == 'group':
+                gid = c.get('id')
+                # If we had a group map, we could show names too, but ID is what we have mostly or Shiny has names.
+                # Shiny will handle group visualization via selected values.
+                # But for summary, let's just say "Group Restriction"
+                descriptions.append(f"{prefix}Group (ID: {gid})")
+                
+    try:
+        data = json.loads(json_str)
+        if 'c' in data:
+            pars_cond(data['c'])
+        elif 'op' in data: 
+             pass 
+        return descriptions
+    except:
+        return ["Error parsing restriction JSON"]
+
+def get_topic_restriction(session, topic_id):
+    """
+    Fetch the existing availability restriction JSON for a topic.
+    GET /course/editsection.php?id=...
+    """
+    url = f"{BASE}/course/editsection.php?id={topic_id}"
+    try:
+        resp = session.get(url, timeout=10)
+        if not resp.ok: 
+            logger.error(f"Failed to fetch restriction page: {resp.status_code}")
+            return None
+        
+        soup = BeautifulSoup(resp.text, "html.parser")
+        
+        # 1. Try hidden input (Standard Moodle) or Textarea (Some themes)
+        inp = soup.find("input", {"name": "availabilityconditionsjson"})
+        if not inp:
+            inp = soup.find("textarea", {"name": "availabilityconditionsjson"})
+            
+        if inp:
+            val = inp.get("value", "") if inp.name == "input" else inp.text
+            logger.info(f"Fetched restriction JSON for {topic_id} ({inp.name}): {val:.100}...")
+            return val
+            
+        # 2. Try JavaScript Init (Newer Moodle / Theme)
+        # Search for M.core_availability.form.init(...)
+        import json
+        pattern = r"M\.core_availability\.form\.init\((.*?)\);"
+        logger.info(f"Searching for pattern in {len(resp.text)} chars")
+        matches = re.findall(pattern, resp.text, re.DOTALL)
+        logger.info(f"Found {len(matches)} matches")
+        
+        for i, m in enumerate(matches):
+            logger.info(f"Checking match {i} length {len(m)}")
+            try:
+                data = json.loads(m)
+                # Structure: {"fields": {"availabilityconditionsjson": {"value": "..."}}}
+                if 'fields' in data and 'availabilityconditionsjson' in data['fields']:
+                     val = data['fields']['availabilityconditionsjson'].get('value', '')
+                     logger.info(f"Fetched restriction JSON for {topic_id} (JS): {val:.100}...")
+                     return val
+            except Exception as e:
+                logger.error(f"JSON load error in get_topic_restriction: {e}")
+                pass
+        
+        logger.warning(f"No availability input found for topic {topic_id}")
+        return None
+    except Exception as e:
+        logger.error(f"Error fetching restriction: {e}")
         return None
