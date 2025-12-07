@@ -1,8 +1,8 @@
 from shiny import App, render, ui, reactive
 import pandas as pd
 from core.auth import login_and_get_cookie, setup_session, validate_session
-from core.api import get_courses, get_topics, rename_topic_inplace, move_topic, toggle_topic_visibility, delete_topic, enable_edit_mode, add_topic, get_course_groups, update_topic_restriction, add_or_update_group_restriction, get_topic_restriction, get_restriction_summary, get_course_grade_items, update_restrictions_batch, move_activity_to_section, duplicate_activity, reorder_activity_within_section, delete_activity
-from core.persistence import read_config
+from core.api import get_courses, get_topics, rename_topic_inplace, move_topic, toggle_topic_visibility, delete_topic, enable_edit_mode, add_topic, get_course_groups, update_topic_restriction, add_or_update_group_restriction, get_topic_restriction, get_restriction_summary, get_course_grade_items, update_restrictions_batch, move_activity_to_section, duplicate_activity, reorder_activity_within_section, delete_activity, rename_activity, get_fresh_sesskey
+from core.persistence import read_config, write_config, save_cache, load_cache
 import logging
 from faicons import icon_svg
 
@@ -203,6 +203,21 @@ body {
 }
 .sortable-chosen {
     background: #f0f9ff !important;
+}
+
+/* Rename Button */
+.btn-rename-activity {
+    background: none;
+    border: none;
+    color: #6b7280;
+    cursor: pointer;
+    padding: 4px 8px;
+    border-radius: 4px;
+    transition: all 0.15s;
+}
+.btn-rename-activity:hover {
+    background: #fef3c7;
+    color: #d97706;
 }
 
 /* Duplicate Button */
@@ -554,6 +569,27 @@ document.addEventListener('click', function(e) {
         }, {priority: "event"});
     }
     
+    // Rename button handler
+    const renameBtn = e.target.closest('.btn-rename-activity');
+    if (renameBtn) {
+        e.preventDefault();
+        e.stopPropagation();
+        const activityId = renameBtn.dataset.activityId;
+        const activityName = renameBtn.dataset.activityName;
+        const activityType = renameBtn.dataset.activityType;
+        
+        const newName = prompt(`Rename activity:`, activityName);
+        if (newName && newName.trim() && newName.trim() !== activityName) {
+            Shiny.setInputValue("activity_rename", {
+                activityId: activityId,
+                oldName: activityName,
+                newName: newName.trim(),
+                activityType: activityType,
+                nonce: Math.random()
+            }, {priority: "event"});
+        }
+    }
+    
     // Delete button handler - with optimistic UI update
     const delBtn = e.target.closest('.btn-delete-activity');
     if (delBtn) {
@@ -678,11 +714,41 @@ def server(input, output, session):
         loaded_cookie, loaded_user, loaded_pwd = read_config()
         
         if loaded_cookie:
+            # Check if we validated recently (within 1 hour) - skip network call
+            from datetime import datetime, timedelta
+            cached_validation = load_cache("session_validation")
+            skip_validation = False
+            
+            if cached_validation:
+                try:
+                    last_validated = datetime.fromisoformat(cached_validation.get("timestamp", ""))
+                    cached_cookie = cached_validation.get("cookie", "")
+                    # Skip if same cookie and validated within 1 hour
+                    if cached_cookie == loaded_cookie and datetime.now() - last_validated < timedelta(hours=1):
+                        skip_validation = True
+                        logger.info("Session validated recently, skipping network check")
+                except:
+                    pass
+            
+            if skip_validation:
+                # Trust the cached validation
+                user_session_id.set(loaded_cookie)
+                user_authenticated.set(True)
+                current_username.set(loaded_user if loaded_user else "User")
+                ui.notification_show("Session restored!", type="message", duration=2)
+                return
+            
+            # Need to validate via network
             ui.notification_show("Validating saved session...", duration=2)
             if validate_session(loaded_cookie):
                 user_session_id.set(loaded_cookie)
                 user_authenticated.set(True)
                 current_username.set(loaded_user if loaded_user else "User")
+                # Cache this validation
+                save_cache("session_validation", {
+                    "timestamp": datetime.now().isoformat(),
+                    "cookie": loaded_cookie
+                })
                 ui.notification_show("Session restored!", type="message", duration=2)
                 return
         
@@ -693,6 +759,14 @@ def server(input, output, session):
                 user_session_id.set(sid)
                 user_authenticated.set(True)
                 current_username.set(loaded_user)
+                # Save the new cookie for faster startup next time
+                write_config(cookie=sid)
+                # Also cache this validation
+                from datetime import datetime
+                save_cache("session_validation", {
+                    "timestamp": datetime.now().isoformat(),
+                    "cookie": sid
+                })
                 ui.notification_show("Login successful!", type="message", duration=2)
                 return
         
@@ -711,12 +785,55 @@ def server(input, output, session):
             else:
                 ui.notification_show("Invalid credentials", type="error")
 
+    # Reactive value for courses (to allow background updates)
+    courses_data = reactive.Value([])
+    courses_loaded_from_cache = reactive.Value(False)
+    
+    @reactive.Effect
+    @reactive.event(user_authenticated)
+    def load_courses_from_cache():
+        """Load courses from cache on auth (instant, non-blocking)"""
+        if not user_authenticated():
+            courses_data.set([])
+            return
+        
+        cached = load_cache("courses")
+        if cached:
+            logger.info("Loaded courses from cache (instant)")
+            courses_data.set(cached)
+            courses_loaded_from_cache.set(True)
+        else:
+            # No cache - must fetch live
+            logger.info("No cached courses, fetching live...")
+            try:
+                s = setup_session(user_session_id())
+                live = get_courses(s)
+                courses_data.set(live)
+                save_cache("courses", live)
+            except Exception as e:
+                logger.error(f"Error fetching courses: {e}")
+    
+    @reactive.Effect
+    @reactive.event(input.refresh_courses)
+    def refresh_courses_live():
+        """Refresh courses from live data (only on explicit refresh click)"""
+        if not user_authenticated():
+            return
+        
+        logger.info("Refreshing courses from live data...")
+        try:
+            s = setup_session(user_session_id())
+            live = get_courses(s)
+            courses_data.set(live)
+            save_cache("courses", live)
+            ui.notification_show("Courses refreshed", type="message", duration=2)
+        except Exception as e:
+            logger.error(f"Error refreshing courses: {e}")
+            ui.notification_show("Failed to refresh courses", type="error")
+    
     @reactive.Calc
     def available_courses():
-        input.refresh_courses()
-        if not user_authenticated(): return []
-        s = setup_session(user_session_id())
-        return get_courses(s)
+        return courses_data()
 
     @output
     @render.ui
@@ -780,18 +897,101 @@ def server(input, output, session):
         is_edit_mode_on.set(False)
         selected_indices.set([]) # Reset selection
         
+        # Cache keys for this course
+        topics_key = f"course_{cid}_topics"
+        groups_key = f"course_{cid}_groups"
+        grade_items_key = f"course_{cid}_grade_items"
+        
+        # Load from cache first (instant display)
+        cached_topics = load_cache(topics_key)
+        cached_groups = load_cache(groups_key)
+        cached_grade_items = load_cache(grade_items_key)
+        
+        has_cache = cached_topics is not None
+        
+        if cached_topics:
+            logger.info(f"Loaded {len(cached_topics)} topics from cache for course {cid} (instant)")
+            topics_list.set(cached_topics)
+        
+        if cached_groups:
+            groups_cache = course_groups_cache()
+            groups_cache[cid] = cached_groups
+            course_groups_cache.set(groups_cache)
+            logger.info(f"Loaded {len(cached_groups)} groups from cache")
+        
+        if cached_grade_items:
+            grade_items_cache = course_grade_items_cache()
+            grade_items_cache[cid] = cached_grade_items
+            course_grade_items_cache.set(grade_items_cache)
+            logger.info(f"Loaded grade items from cache")
+        
+        # Trigger background refresh (after showing cache)
+        # This fetches fresh data silently and updates if different
+        background_refresh_trigger.set(cid)
+        
+        # If no cache, fetch immediately (blocking)
+        if not has_cache:
+            logger.info(f"No cache for course {cid}, fetching live data...")
+            do_background_refresh(cid)
+
+    # Background refresh trigger
+    background_refresh_trigger = reactive.Value(None)
+    
+    @reactive.Effect
+    @reactive.event(background_refresh_trigger)
+    def on_background_refresh():
+        """Background refresh: fetch live data and update silently"""
+        cid = background_refresh_trigger.get()
+        if not cid: return
+        
+        # Small delay to let UI finish rendering first
+        import time
+        reactive.invalidate_later(0.5)  # Schedule re-run after 0.5s
+        
+        # Only run the actual fetch once (not on re-invalidation)
+        if hasattr(on_background_refresh, '_last_cid') and on_background_refresh._last_cid == cid:
+            do_background_refresh(cid)
+            on_background_refresh._last_cid = None
+            return
+        on_background_refresh._last_cid = cid
+
+    def do_background_refresh(cid):
+        """Actually fetch live data and update"""
         try:
-            with ui.Progress(min=0, max=1) as p:
-                p.set(message="Loading topics...")
-                s = setup_session(user_session_id())
-                data = get_topics(s, cid)
-                topics_list.set(data)
-                if not data:
-                    ui.notification_show("No topics found (or connection issue)", type="warning")
+            s = setup_session(user_session_id())
+            
+            topics_key = f"course_{cid}_topics"
+            groups_key = f"course_{cid}_groups"
+            grade_items_key = f"course_{cid}_grade_items"
+            
+            logger.info(f"Background refresh: fetching live data for course {cid}...")
+            
+            # Fetch topics
+            live_topics = get_topics(s, cid)
+            if live_topics:
+                topics_list.set(live_topics)
+                save_cache(topics_key, live_topics)
+                logger.info(f"Background refresh: updated {len(live_topics)} topics")
+            
+            # Fetch groups
+            live_groups = get_course_groups(s, cid)
+            groups_cache = course_groups_cache()
+            groups_cache[cid] = live_groups
+            course_groups_cache.set(groups_cache)
+            save_cache(groups_key, live_groups)
+            
+            # Fetch grade items
+            live_grade_items = get_course_grade_items(s, cid)
+            grade_items_cache = course_grade_items_cache()
+            grade_items_cache[cid] = live_grade_items
+            course_grade_items_cache.set(grade_items_cache)
+            save_cache(grade_items_key, live_grade_items)
+            
+            logger.info(f"Background refresh complete for course {cid}")
+                
         except Exception as e:
-            logger.error(f"Error loading topics: {e}")
-            ui.notification_show(f"Failed to load topics: Connection error", type="error")
-            topics_list.set([])
+            logger.error(f"Background refresh error: {e}")
+
 
     # -------------------------------------------------------------------------
     # TABLE RENDERER
@@ -963,6 +1163,36 @@ def server(input, output, session):
                  vis_label = "Hide" if vis else "Show"
                  vis_icon = "eye-slash" if vis else "eye"
 
+        # Get available groups for the current course
+        cid = input.course_id()
+        groups_cache = course_groups_cache()
+        available_groups = groups_cache.get(cid, []) if cid else []
+        
+        # Extract existing group names from selected topics' restrictions
+        # Moodle displays: "You belong to GROUP_NAME" in the restriction summary
+        import re
+        existing_group_names = set()
+        data = topics_list()
+        for idx in indices:
+            if idx < len(data):
+                summary = data[idx].get('Restriction Summary', '').lower()
+                # Check each available group name against the summary text
+                for g in available_groups:
+                    # Strip member count suffix like "(5)" from group names
+                    group_name_clean = re.sub(r'\s*\(\d+\)$', '', g['name'])
+                    if group_name_clean.lower() in summary:
+                        existing_group_names.add(str(g['id']))
+        
+        # Build dropdown choices, marking existing groups with ✓
+        group_choices = {"": "-- Select Group --"}
+        for g in available_groups:
+            gid = str(g['id'])
+            name = g['name']
+            if gid in existing_group_names:
+                group_choices[gid] = f"✓ {name}"
+            else:
+                group_choices[gid] = name
+
         return ui.div(
              # Add (Always available)
              ui.div(
@@ -982,6 +1212,15 @@ def server(input, output, session):
             # Batch Actions
             ui.input_action_button("act_vis", vis_label, icon=icon_svg(vis_icon), disabled=not can_batch, class_="toolbar-btn"),
             ui.input_action_button("act_del", "Delete", icon=icon_svg("trash"), disabled=not can_batch, class_="toolbar-btn text-danger ms-2"),
+            # Group Restriction (Batch)
+            ui.div(
+                ui.div(
+                    ui.input_select("toolbar_group_select", None, choices=group_choices, width="150px"),
+                    style="margin-bottom: -15px;"
+                ),
+                ui.input_action_button("act_add_group", "Add Grp", icon=icon_svg("users"), disabled=not can_batch, class_="toolbar-btn"),
+                class_="d-flex gap-1 align-items-center ms-3", style="border-left: 1px solid #e5e7eb; padding-left: 16px;"
+            ),
             class_="d-flex align-items-center"
         )
 
@@ -1094,6 +1333,116 @@ def server(input, output, session):
         topics_list.set(current)
         selected_indices.set([])
         ui.notification_show("Batch delete complete")
+
+    # -------------------------------------------------------------------------
+    # HELPER: Extract Group IDs from Restriction JSON
+    # -------------------------------------------------------------------------
+    def extract_group_ids_from_json(json_str):
+        """
+        Recursively extracts all group IDs from restriction JSON.
+        Returns a list of group ID strings.
+        """
+        import json
+        if not json_str:
+            return []
+        
+        try:
+            data = json.loads(json_str)
+        except:
+            return []
+        
+        groups_found = []
+        
+        def find_groups(c_list):
+            for cond in c_list:
+                if 'c' in cond:  # Nested restriction set
+                    find_groups(cond['c'])
+                elif cond.get('type') == 'group':
+                    groups_found.append(str(cond.get('id')))
+            return groups_found
+        
+        if isinstance(data, dict) and 'c' in data:
+            find_groups(data['c'])
+        
+        return groups_found
+
+    # -------------------------------------------------------------------------
+    # BATCH ADD GROUP RESTRICTION
+    # -------------------------------------------------------------------------
+    @reactive.Effect
+    @reactive.event(input.act_add_group)
+    def do_add_group():
+        indices = selected_indices()
+        if not indices:
+            ui.notification_show("No topics selected", type="warning")
+            return
+        
+        group_id = input.toolbar_group_select()
+        if not group_id:
+            ui.notification_show("Please select a group", type="warning")
+            return
+        
+        cid = input.course_id()
+        if not cid:
+            return
+        
+        current = list(topics_list())
+        s = setup_session(user_session_id())
+        
+        # Ensure groups cache is populated
+        groups_cache = course_groups_cache()
+        if cid not in groups_cache:
+            from core.api import get_course_groups
+            groups = get_course_groups(s, cid)
+            groups_cache[cid] = groups
+            course_groups_cache.set(groups_cache)
+        
+        # Get group name for notification
+        available_groups = groups_cache.get(cid, [])
+        group_name = next((g['name'] for g in available_groups if str(g['id']) == group_id), f"Group {group_id}")
+        
+        success_count = 0
+        with ui.Progress(min=0, max=len(indices)) as p:
+            p.set(message=f"Adding '{group_name}' restriction...")
+            
+            for i, idx in enumerate(indices):
+                if idx >= len(current):
+                    continue
+                
+                row = current[idx]
+                topic_id = row['DB ID']
+                sesskey = row.get('Sesskey')
+                
+                try:
+                    # 1. Fetch current restriction JSON
+                    current_json = get_topic_restriction(s, topic_id)
+                    
+                    # 2. Extract existing group IDs
+                    existing_groups = extract_group_ids_from_json(current_json)
+                    
+                    # 3. Add new group ID if not present
+                    if group_id not in existing_groups:
+                        existing_groups.append(group_id)
+                    
+                    # 4. Build updated restriction JSON (merges with OR for groups)
+                    updated_json = add_or_update_group_restriction(current_json, existing_groups)
+                    
+                    # 5. Update topic restriction
+                    ensure_edit_mode(s, cid, sesskey)
+                    if update_topic_restriction(s, cid, topic_id, sesskey, updated_json):
+                        success_count += 1
+                        # Update local restriction summary
+                        new_summary_list = get_restriction_summary(updated_json)
+                        current[idx]['Restriction Summary'] = '\n'.join(new_summary_list) if new_summary_list else ''
+                    
+                except Exception as e:
+                    logger.error(f"Error adding group to topic {topic_id}: {e}")
+                
+                p.set(i + 1, message=f"Processed {i + 1}/{len(indices)}")
+        
+        # Refresh UI
+        topics_list.set(current)
+        ui.notification_show(f"Added '{group_name}' to {success_count}/{len(indices)} topics", type="message")
 
     @reactive.Effect
     @reactive.event(input.act_add)
@@ -1321,6 +1670,7 @@ def server(input, output, session):
                     <td><span class="badge bg-secondary">{act_type}</span></td>
                     <td class="text-center {vis_class}">{vis_badge}</td>
                     <td class="text-center" style="white-space: nowrap;">
+                        <button class="btn-rename-activity" data-activity-id="{act_id}" data-activity-name="{escaped_name}" data-activity-type="{act_type}" title="Rename">✏️</button>
                         <button class="btn-duplicate-activity" data-activity-id="{act_id}" data-activity-name="{escaped_name}" title="Duplicate">⧉</button>
                         <button class="btn-delete-activity" data-activity-id="{act_id}" data-activity-name="{escaped_name}" title="Delete">🗑️</button>
                     </td>
@@ -1496,9 +1846,11 @@ def server(input, output, session):
         s = setup_session(user_session_id())
         cid = input.course_id()
         
-        current = list(topics_list())
-        if not current: return
-        sesskey = current[0].get('Sesskey', '')
+        # Get fresh sesskey (cached one may be stale)
+        sesskey = get_fresh_sesskey(s, cid)
+        if not sesskey:
+            ui.notification_show("❌ Could not get session key", type="error")
+            return
         
         ensure_edit_mode(s, cid, sesskey)
         
@@ -1533,9 +1885,11 @@ def server(input, output, session):
         s = setup_session(user_session_id())
         cid = input.course_id()
         
-        current = list(topics_list())
-        if not current: return
-        sesskey = current[0].get('Sesskey', '')
+        # Get fresh sesskey (cached one may be stale)
+        sesskey = get_fresh_sesskey(s, cid)
+        if not sesskey:
+            ui.notification_show("❌ Could not get session key", type="error")
+            return
         
         ensure_edit_mode(s, cid, sesskey)
         
@@ -1557,14 +1911,57 @@ def server(input, output, session):
             )
         else:
             ui.notification_show(f"❌ Failed to delete '{activity_name}'", type="error")
-            # Restore row opacity via JS
+
+    @reactive.Effect
+    @reactive.event(input.activity_rename)
+    def on_activity_rename():
+        """Handle renaming an activity"""
+        evt = input.activity_rename()
+        if not evt: return
+        
+        activity_id = evt.get('activityId')
+        old_name = evt.get('oldName', 'Activity')
+        new_name = evt.get('newName', '')
+        activity_type = evt.get('activityType', '')
+        
+        if not activity_id or not new_name:
+            return
+        
+        s = setup_session(user_session_id())
+        cid = input.course_id()
+        
+        # Get fresh sesskey (cached one may be stale)
+        sesskey = get_fresh_sesskey(s, cid)
+        if not sesskey:
+            ui.notification_show("❌ Could not get session key", type="error")
+            return
+        
+        ensure_edit_mode(s, cid, sesskey)
+        
+        ui.notification_show(f"Renaming '{old_name}'...", duration=1)
+        success = rename_activity(s, sesskey, activity_id, new_name, activity_type)
+        
+        if success:
+            ui.notification_show(f"✅ Renamed to '{new_name}'", type="message")
+            # Refresh topics to update the name
+            new_topics = get_topics(s, cid)
+            topics_list.set(new_topics)
+            save_cache(f"course_{cid}_topics", new_topics)
+            # Update the row name via JS
+            escaped_new_name = new_name.replace('"', '\\"')
             ui.insert_ui(
                 ui.HTML(f"""<script>
                     var row = document.querySelector('tr[data-activity-id="{activity_id}"]');
-                    if (row) row.style.opacity = '1';
+                    if (row) {{
+                        var nameCell = row.querySelector('td:nth-child(3) a');
+                        if (nameCell) nameCell.textContent = "{escaped_new_name}";
+                        row.dataset.activityName = "{escaped_new_name}";
+                    }}
                 </script>"""),
                 selector="body"
             )
+        else:
+            ui.notification_show(f"❌ Failed to rename '{old_name}'", type="error")
 
     # -------------------------------------------------------------------------
     # RESTRICTION MODAL LOGIC

@@ -205,3 +205,74 @@ def dataframe_to_csv(rows, columns=None):
     writer.writerows(rows_clean)
     
     return output.getvalue()
+
+# =============================================================================
+# DISK CACHE SYSTEM
+# =============================================================================
+CACHE_DIR = Path(OUTPUT_DIR) / ".cache"
+
+def get_cache_dir():
+    """Get or create cache directory"""
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    return CACHE_DIR
+
+def save_cache(key, data):
+    """
+    Save data to cache with timestamp.
+    Key examples: 'courses', 'course_123_topics', 'course_123_groups'
+    """
+    cache_dir = get_cache_dir()
+    cache_file = cache_dir / f"{key}.json"
+    
+    cache_entry = {
+        "timestamp": datetime.now().isoformat(),
+        "data": data
+    }
+    
+    try:
+        with open(cache_file, 'w', encoding='utf-8') as f:
+            json.dump(cache_entry, f, indent=2, ensure_ascii=False)
+        return True
+    except Exception as e:
+        print(f"Error saving cache for {key}: {e}")
+        return False
+
+def load_cache(key):
+    """
+    Load data from cache.
+    Returns the data if found, None otherwise.
+    """
+    cache_dir = get_cache_dir()
+    cache_file = cache_dir / f"{key}.json"
+    
+    if not cache_file.exists():
+        return None
+    
+    try:
+        with open(cache_file, 'r', encoding='utf-8') as f:
+            cache_entry = json.load(f)
+            return cache_entry.get("data")
+    except Exception as e:
+        print(f"Error loading cache for {key}: {e}")
+        return None
+
+def clear_cache(key=None):
+    """
+    Clear cache. If key is provided, only clear that key.
+    If key is None, clear all cache.
+    """
+    cache_dir = get_cache_dir()
+    
+    try:
+        if key:
+            cache_file = cache_dir / f"{key}.json"
+            if cache_file.exists():
+                cache_file.unlink()
+        else:
+            # Clear all cache files
+            for f in cache_dir.glob("*.json"):
+                f.unlink()
+        return True
+    except Exception as e:
+        print(f"Error clearing cache: {e}")
+        return False

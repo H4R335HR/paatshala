@@ -15,6 +15,24 @@ from .parser import parse_assign_view, parse_grading_table
 
 DEFAULT_THREADS = 4
 
+def get_fresh_sesskey(session, course_id):
+    """Fetch a fresh sesskey from the course page (needed for AJAX operations)"""
+    url = f"{BASE}/course/view.php?id={course_id}"
+    try:
+        resp = session.get(url, timeout=10)
+        if resp.ok:
+            # Extract sesskey from page
+            match = re.search(r'"sesskey":"([^"]+)"', resp.text)
+            if match:
+                return match.group(1)
+            # Fallback: look in logout link
+            match = re.search(r'sesskey=([a-zA-Z0-9]+)', resp.text)
+            if match:
+                return match.group(1)
+    except Exception as e:
+        logger.error(f"Error getting fresh sesskey: {e}")
+    return None
+
 # Thread-local storage for sessions
 thread_local = threading.local()
 
@@ -242,11 +260,11 @@ def get_topics(session, course_id, max_retries=3):
                     act_name_el = act_instance.find("span", class_="instancename") or act_instance.find("a")
                     if act_name_el:
                         act_name = act_name_el.get_text(strip=True)
-                        # Remove trailing " Quiz", " Assignment" etc from instancename
-                        if act_name.count(' ') > 0:
-                            parts = act_name.rsplit(' ', 1)
-                            if parts[-1] in ['Quiz', 'Assignment', 'File', 'URL', 'Forum', 'Page', 'Folder', 'Book', 'Lesson', 'SCORM', 'Certificate', 'Label']:
-                                act_name = parts[0]
+                        # Remove trailing type suffixes (with or without space)
+                        # e.g. "Pre-Learning DiaryURL" -> "Pre-Learning Diary"
+                        # e.g. "Practice Quiz 1 Quiz" -> "Practice Quiz 1"
+                        type_suffixes = r'(Quiz|Assignment|File|URL|Forum|Page|Folder|Book|Lesson|SCORM|Certificate|Label)$'
+                        act_name = re.sub(r'\s*' + type_suffixes, '', act_name, flags=re.IGNORECASE)
                 
                 # Get activity type from class
                 act_type = ""
@@ -537,10 +555,16 @@ def duplicate_activity(session, activity_id, sesskey):
     if resp.ok:
         try:
             data = resp.json()
-            if isinstance(data, list) and data and not data[0].get("error"):
+            logger.info(f"Duplicate response: {str(data)[:200]}")
+            if isinstance(data, list) and data:
+                if data[0].get("error"):
+                    logger.error(f"Duplicate error: {data[0].get('exception', {}).get('message', 'Unknown')}")
+                    return False
                 return True
-        except:
-            pass
+        except Exception as e:
+            logger.error(f"Error parsing duplicate response: {e}")
+    else:
+        logger.error(f"Duplicate request failed: {resp.status_code}")
     return False
 
 def reorder_activity_within_section(session, course_id, activity_id, section_id, before_id, sesskey):
@@ -620,6 +644,46 @@ def toggle_topic_visibility(session, course_id, section_id, sesskey, hide=True):
         
     resp = session.get(url, params=params)
     return resp.ok
+
+def rename_activity(session, sesskey, module_id, new_name, mod_type):
+    """Rename activity using Moodle's inplace editable AJAX API"""
+    logger.info(f"Renaming activity {module_id} to '{new_name}'")
+    
+    url = f"{BASE}/lib/ajax/service.php"
+    params = {
+        "sesskey": sesskey,
+        "info": "core_update_inplace_editable"
+    }
+    
+    # Component is core_course for activity names (not mod_{type})
+    payload = [{
+        "index": 0,
+        "methodname": "core_update_inplace_editable",
+        "args": {
+            "itemid": str(module_id),
+            "component": "core_course",
+            "itemtype": "activityname",
+            "value": new_name
+        }
+    }]
+    
+    try:
+        resp = session.post(url, params=params, json=payload)
+        if resp.ok:
+            data = resp.json()
+            logger.info(f"Rename response: {data}")
+            if isinstance(data, list) and data:
+                if data[0].get("error"):
+                    logger.error(f"Rename error: {data[0].get('exception', {}).get('message', 'Unknown')}")
+                    return False
+                return True
+            return False
+        else:
+            logger.error(f"Rename failed: {resp.status_code}")
+            return False
+    except Exception as e:
+        logger.error(f"Error renaming activity: {e}")
+        return False
 
 def rename_topic_inplace(session, sesskey, itemid, new_name):
     """Rename topic using Moodle's inplace editable AJAX API"""
@@ -1114,6 +1178,13 @@ def update_topic_restriction(session, course_id, topic_id, sesskey, restriction_
         if name_value:
             name_customize = "1"
         
+        # CRITICAL: Extract fresh sesskey from the form page (passed sesskey may be stale)
+        fresh_sesskey = sesskey  # Fallback to passed value
+        sesskey_input = soup.find("input", {"name": "sesskey"})
+        if sesskey_input and sesskey_input.get("value"):
+            fresh_sesskey = sesskey_input.get("value")
+            logger.info(f"Using fresh sesskey from form: {fresh_sesskey[:8]}...")
+        
         logger.info(f"[DEBUG] topic_id={topic_id}, name_customize={name_customize}, name_value='{name_value[:50] if name_value else ''}'")
         
         # Build payload matching Moodle's actual form structure
@@ -1121,7 +1192,7 @@ def update_topic_restriction(session, course_id, topic_id, sesskey, restriction_
         payload = {
             "id": topic_id,
             "sr": "0", 
-            "sesskey": sesskey,
+            "sesskey": fresh_sesskey,  # Use fresh sesskey
             "_qf__editsection_form": "1",
             "mform_isexpanded_id_availabilityconditions": "1",
             "mform_isexpanded_id_generalhdr": "1",
