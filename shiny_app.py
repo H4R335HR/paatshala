@@ -44,14 +44,89 @@ body {
 .toolbar {
     background: #ffffff;
     border-bottom: 1px solid #e5e7eb;
-    padding: 12px 20px;
+    padding: 8px 20px;
     display: flex;
-    gap: 12px;
+    gap: 8px;
     align-items: center;
     flex-wrap: wrap;
     flex-shrink: 0;
+    height: 56px;
+    box-sizing: border-box;
 }
 
+/* Icon-Only Toolbar Buttons - Full Height */
+.toolbar-icon-btn {
+    width: 40px;
+    height: 40px;
+    border: none;
+    background: transparent;
+    color: #6b7280;
+    border-radius: 6px;
+    padding: 0;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.15s;
+    flex-shrink: 0;
+}
+.toolbar-icon-btn:hover:not(:disabled) {
+    background: #f3f4f6;
+    color: #374151;
+}
+.toolbar-icon-btn:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
+}
+.toolbar-icon-btn-primary {
+    background: var(--primary-color);
+    color: white;
+}
+.toolbar-icon-btn-primary:hover:not(:disabled) {
+    background: var(--primary-hover);
+}
+.toolbar-icon-btn-danger {
+    color: #dc2626;
+}
+.toolbar-icon-btn-danger:hover:not(:disabled) {
+    background: #fef2f2;
+    color: #991b1b;
+}
+
+/* Toolbar Inputs - Full Height */
+#toolbar_actions input[type="number"],
+#toolbar_actions input[type="text"],
+#toolbar_actions select {
+    height: 40px !important;
+    border: 1px solid #d1d5db !important;
+    border-radius: 6px !important;
+    padding: 0 10px !important;
+    font-size: 0.875rem !important;
+    background: white !important;
+    transition: all 0.15s !important;
+    box-sizing: border-box !important;
+}
+#toolbar_actions input[type="number"]:focus,
+#toolbar_actions input[type="text"]:focus,
+#toolbar_actions select:focus {
+    outline: none !important;
+    border-color: var(--primary-color) !important;
+    box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.1) !important;
+}
+#toolbar_actions input[type="number"] {
+    width: 55px !important;
+    text-align: center !important;
+}
+
+/* Toolbar Divider - Full Height */
+.toolbar-divider {
+    width: 1px;
+    height: 40px;
+    background: #e5e7eb;
+    flex-shrink: 0;
+}
+
+/* Legacy toolbar button styles (for backwards compatibility) */
 .toolbar-btn {
     border: 1px solid #d1d5db;
     background: white;
@@ -1316,8 +1391,15 @@ def server(input, output, session):
                     if group_name_clean.lower() in summary:
                         existing_group_names.add(str(g['id']))
         
-        # Build dropdown choices, marking existing groups with ✓
-        group_choices = {"": "-- Select Group --"}
+        # Build dropdown choices with special actions and groups
+        group_choices = {"": "-- Select Action --"}
+
+        # Add special actions at the top (always visible)
+        group_choices["__clear_groups__"] = "[Clear All Groups]"
+        group_choices["__clear_all__"] = "[Clear All Restrictions]"
+        group_choices["__divider__"] = "-------------------"
+
+        # Add group options
         for g in available_groups:
             gid = str(g['id'])
             name = g['name']
@@ -1327,36 +1409,90 @@ def server(input, output, session):
                 group_choices[gid] = name
 
         return ui.div(
-             # Refresh button (Always available)
-             ui.input_action_button("act_refresh_topics", "", icon=icon_svg("arrow-rotate-right"), class_="toolbar-btn me-3", title="Refresh topics from server"),
-             # Add (Always available)
-             ui.div(
-                ui.div(
-                     ui.input_numeric("add_count", None, value=1, min=1, width="70px"),
-                     style="margin-bottom: -15px;"
-                ),
-                ui.input_action_button("act_add", "Add", icon=icon_svg("plus"), class_="toolbar-btn-primary"),
-                class_="d-flex gap-2 align-items-center me-4", style="border-right: 1px solid #e5e7eb; padding-right: 16px;"
+            # Refresh
+            ui.input_action_button(
+                "act_refresh_topics",
+                "",
+                icon=icon_svg("arrow-rotate-right"),
+                class_="toolbar-icon-btn",
+                title="Refresh topics from server"
             ),
-            # Edit (Single Check Only)
+
+            # Divider
+            ui.div(class_="toolbar-divider"),
+
+            # Add topic section
             ui.div(
-                ui.div(ui.input_text("edit_name_float", None, placeholder="Rename...", width="200px"), style="margin-bottom: -15px;"),
-                ui.input_action_button("act_rename", "Rename", icon=icon_svg("pen"), disabled=not can_rename, class_="toolbar-btn"),
-                class_="d-flex gap-1 align-items-center me-3"
-            ),
-            # Batch Actions
-            ui.input_action_button("act_vis", vis_label, icon=icon_svg(vis_icon), disabled=not can_batch, class_="toolbar-btn"),
-            ui.input_action_button("act_del", "Delete", icon=icon_svg("trash"), disabled=not can_batch, class_="toolbar-btn text-danger ms-2"),
-            # Group Restriction (Batch)
-            ui.div(
-                ui.div(
-                    ui.input_select("toolbar_group_select", None, choices=group_choices, width="150px"),
-                    style="margin-bottom: -15px;"
+                ui.input_numeric("add_count", None, value=1, min=1, width="60px"),
+                ui.input_action_button(
+                    "act_add",
+                    "",
+                    icon=icon_svg("plus"),
+                    class_="toolbar-icon-btn toolbar-icon-btn-primary",
+                    title="Add topic(s)"
                 ),
-                ui.input_action_button("act_add_group", "Add Grp", icon=icon_svg("users"), disabled=not can_batch, class_="toolbar-btn"),
-                class_="d-flex gap-1 align-items-center ms-3", style="border-left: 1px solid #e5e7eb; padding-left: 16px;"
+                class_="d-flex gap-2 align-items-center"
             ),
-            class_="d-flex align-items-center"
+
+            # Divider
+            ui.div(class_="toolbar-divider"),
+
+            # Rename section
+            ui.div(
+                ui.input_text("edit_name_float", None, placeholder="New name...", width="150px"),
+                ui.input_action_button(
+                    "act_rename",
+                    "",
+                    icon=icon_svg("pen"),
+                    disabled=not can_rename,
+                    class_="toolbar-icon-btn",
+                    title="Rename selected topic"
+                ),
+                class_="d-flex gap-2 align-items-center"
+            ),
+
+            # Divider
+            ui.div(class_="toolbar-divider"),
+
+            # Visibility & Delete
+            ui.div(
+                ui.input_action_button(
+                    "act_vis",
+                    "",
+                    icon=icon_svg(vis_icon),
+                    disabled=not can_batch,
+                    class_="toolbar-icon-btn",
+                    title=f"{vis_label} selected topic(s)"
+                ),
+                ui.input_action_button(
+                    "act_del",
+                    "",
+                    icon=icon_svg("trash"),
+                    disabled=not can_batch,
+                    class_="toolbar-icon-btn toolbar-icon-btn-danger",
+                    title="Delete selected topic(s)"
+                ),
+                class_="d-flex gap-2 align-items-center"
+            ),
+
+            # Divider
+            ui.div(class_="toolbar-divider"),
+
+            # Group restrictions section
+            ui.div(
+                ui.input_select("toolbar_group_select", None, choices=group_choices, width="220px"),
+                ui.input_action_button(
+                    "act_apply_group_action",
+                    "",
+                    icon=icon_svg("circle-check"),
+                    disabled=not can_batch,
+                    class_="toolbar-icon-btn toolbar-icon-btn-primary",
+                    title="Apply selected action"
+                ),
+                class_="d-flex gap-2 align-items-center"
+            ),
+
+            class_="d-flex align-items-center gap-2"
         )
 
     # -------------------------------------------------------------------------
@@ -1523,16 +1659,32 @@ def server(input, output, session):
     # BATCH ADD GROUP RESTRICTION
     # -------------------------------------------------------------------------
     @reactive.Effect
-    @reactive.event(input.act_add_group)
-    def do_add_group():
+    @reactive.event(input.act_apply_group_action)
+    def do_apply_group_action():
+        """Unified handler for all group restriction operations"""
+        selection = input.toolbar_group_select()
+
+        if not selection or selection == "__divider__":
+            ui.notification_show("Please select an action or group", type="warning")
+            return
+
+        # Route to appropriate handler based on selection
+        if selection == "__clear_groups__":
+            do_clear_groups_batch()
+        elif selection == "__clear_all__":
+            do_clear_all_restrictions_batch()
+        else:
+            # It's a group ID - add the group
+            do_add_group_batch(selection)
+
+        # Reset dropdown to default
+        ui.update_select("toolbar_group_select", selected="")
+
+    def do_add_group_batch(group_id):
+        """Add a group restriction to selected topics"""
         indices = selected_indices()
         if not indices:
             ui.notification_show("No topics selected", type="warning")
-            return
-        
-        group_id = input.toolbar_group_select()
-        if not group_id:
-            ui.notification_show("Please select a group", type="warning")
             return
         
         cid = input.course_id()
@@ -1595,7 +1747,113 @@ def server(input, output, session):
         
         # Refresh UI
         topics_list.set(current)
+        save_cache(f"course_{cid}_topics", current)
         ui.notification_show(f"Added '{group_name}' to {success_count}/{len(indices)} topics", type="message")
+
+        # Trigger background refresh
+        trigger_background_refresh(cid)
+
+    def do_clear_groups_batch():
+        """Clear all group restrictions from selected topics"""
+        indices = selected_indices()
+        if not indices:
+            ui.notification_show("No topics selected", type="warning")
+            return
+
+        cid = input.course_id()
+        if not cid:
+            return
+
+        current = list(topics_list())
+        s = setup_session(user_session_id())
+
+        success_count = 0
+        with ui.Progress(min=0, max=len(indices)) as p:
+            p.set(message="Clearing group restrictions...")
+
+            for i, idx in enumerate(indices):
+                if idx >= len(current):
+                    continue
+
+                row = current[idx]
+                topic_id = row['DB ID']
+                sesskey = row.get('Sesskey')
+
+                try:
+                    # 1. Fetch current restriction JSON
+                    current_json = get_topic_restriction(s, topic_id)
+
+                    # 2. Remove all group restrictions (pass empty list)
+                    updated_json = add_or_update_group_restriction(current_json, [])
+
+                    # 3. Update topic restriction
+                    ensure_edit_mode(s, cid, sesskey)
+                    if update_topic_restriction(s, cid, topic_id, sesskey, updated_json):
+                        success_count += 1
+                        # Update local restriction summary
+                        new_summary_list = get_restriction_summary(updated_json)
+                        current[idx]['Restriction Summary'] = '\n'.join(new_summary_list) if new_summary_list else ''
+
+                except Exception as e:
+                    logger.error(f"Error clearing groups from topic {topic_id}: {e}")
+
+                p.set(i + 1, message=f"Processed {i + 1}/{len(indices)}")
+
+        # Refresh UI
+        topics_list.set(current)
+        save_cache(f"course_{cid}_topics", current)
+        ui.notification_show(f"Cleared group restrictions from {success_count}/{len(indices)} topics", type="message")
+
+        # Trigger background refresh
+        trigger_background_refresh(cid)
+
+    def do_clear_all_restrictions_batch():
+        """Clear ALL restrictions from selected topics"""
+        indices = selected_indices()
+        if not indices:
+            ui.notification_show("No topics selected", type="warning")
+            return
+
+        cid = input.course_id()
+        if not cid:
+            return
+
+        current = list(topics_list())
+        s = setup_session(user_session_id())
+
+        empty_json = '{"op":"&","c":[],"showc":[]}'
+
+        success_count = 0
+        with ui.Progress(min=0, max=len(indices)) as p:
+            p.set(message="Clearing all restrictions...")
+
+            for i, idx in enumerate(indices):
+                if idx >= len(current):
+                    continue
+
+                row = current[idx]
+                topic_id = row['DB ID']
+                sesskey = row.get('Sesskey')
+
+                try:
+                    ensure_edit_mode(s, cid, sesskey)
+                    if update_topic_restriction(s, cid, topic_id, sesskey, empty_json):
+                        success_count += 1
+                        # Clear local restriction summary
+                        current[idx]['Restriction Summary'] = ''
+
+                except Exception as e:
+                    logger.error(f"Error clearing restrictions from topic {topic_id}: {e}")
+
+                p.set(i + 1, message=f"Processed {i + 1}/{len(indices)}")
+
+        # Refresh UI
+        topics_list.set(current)
+        save_cache(f"course_{cid}_topics", current)
+        ui.notification_show(f"Cleared all restrictions from {success_count}/{len(indices)} topics", type="message")
+
+        # Trigger background refresh
+        trigger_background_refresh(cid)
 
     @reactive.Effect
     @reactive.event(input.act_add)
