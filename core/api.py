@@ -1368,8 +1368,8 @@ def add_or_update_group_restriction(existing_json_str, group_ids):
     return json.dumps(data)
 
 
-def update_restrictions_batch(existing_json_str, group_ids=None, date_cond=None, grade_cond=None, 
-                              completion_cond=None, operator="&"):
+def update_restrictions_batch(existing_json_str, group_ids=None, date_cond=None, grade_cond=None,
+                              completion_cond=None, operator="&", hide_on_restriction_not_met=False):
     """
     Updates the JSON with new restriction settings.
     - operator: "&" for ALL conditions must be met, "|" for ANY condition
@@ -1377,9 +1377,10 @@ def update_restrictions_batch(existing_json_str, group_ids=None, date_cond=None,
     - Date: REPLACES any existing date restriction (if provided).
     - Grade: REPLACES any existing grade restriction (if provided).
     - Completion: REPLACES any existing completion restriction (if provided).
+    - hide_on_restriction_not_met: If True, sets showc to [false] to hide content when restriction not met
     """
     import json
-    
+
     # 1. Parse or Init
     data = {"op": operator, "c": [], "showc": []}
     if existing_json_str:
@@ -1451,22 +1452,24 @@ def update_restrictions_batch(existing_json_str, group_ids=None, date_cond=None,
         if completion_cond:
             data['c'].append(completion_cond)
 
-    # 6. Fix show/showc - Moodle uses different formats:
-    # - "show": true for flat structures (no nested sets)
-    # - "showc": [...] when there are nested condition sets
-    has_nested = any('c' in cond for cond in data['c'])
-    
-    if has_nested:
-        # Use showc array format for nested structures
-        data['showc'] = [True] * len(data['c'])
-        if 'show' in data:
-            del data['show']
+    # 6. Fix showc - Moodle always uses showc as an array (one boolean per condition)
+    # Based on real Burp requests, Moodle expects showc=[true/false, true/false, ...]
+    # where each element corresponds to whether that condition should be shown when not met
+
+    # Determine visibility value based on hide_on_restriction_not_met parameter
+    visibility_value = not hide_on_restriction_not_met
+
+    # Always use showc array format (one per condition)
+    if len(data['c']) > 0:
+        data['showc'] = [visibility_value] * len(data['c'])
     else:
-        # Use simple show: true for flat structures
-        data['show'] = True
-        if 'showc' in data:
-            del data['showc']
-    
+        # No conditions - remove showc
+        data['showc'] = []
+
+    # Remove 'show' if it exists (old format, not used by Moodle in restriction context)
+    if 'show' in data:
+        del data['show']
+
     return json.dumps(data)
 
 

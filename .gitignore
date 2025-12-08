@@ -7,3 +7,4 @@ output/
 .last_session
 .debug*
 .git*
+.claude/

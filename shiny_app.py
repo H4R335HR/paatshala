@@ -2244,6 +2244,7 @@ def server(input, output, session):
         existing_completion_item = None
         existing_completion_state = 1
         existing_operator = "&"  # Default to AND
+        hide_on_restriction_not_met = False  # Default to showing content even when restrictions not met
         
         try:
             if existing_json:
@@ -2251,7 +2252,14 @@ def server(input, output, session):
                 
                 # Get the top-level operator
                 existing_operator = data.get('op', '&')
-                
+
+                # Parse showc to determine if content should be hidden when restriction not met
+                # Based on Burp requests, showc is always an array: [true/false, true/false, ...]
+                # If ALL conditions have showc=false, the topic is hidden when restrictions not met
+                if 'showc' in data and data['showc']:
+                    # Check if all values are False (meaning hide for all conditions)
+                    hide_on_restriction_not_met = all(not val for val in data['showc'])
+
                 # Recursive finder for all restriction types
                 def find_restrictions(c_list):
                     nonlocal has_date_restriction, existing_date_val, existing_date_dir, existing_time_val
@@ -2297,13 +2305,23 @@ def server(input, output, session):
                 ui.div(
                     ui.p("Condition Logic:", class_="fw-bold mb-1"),
                     ui.input_radio_buttons(
-                        "restriction_operator", 
+                        "restriction_operator",
                         None,
                         choices={"&": "ALL conditions must be met (AND)", "|": "ANY condition grants access (OR)"},
                         selected=existing_operator,
                         inline=True
                     ),
                     class_="mb-3 p-2 border rounded bg-light"
+                ),
+                # Hide when restriction not met toggle
+                ui.div(
+                    ui.input_checkbox(
+                        "hide_on_restriction_not_met",
+                        "🚫 Hide topic when restriction not met (students won't see it unless they meet the conditions)",
+                        value=hide_on_restriction_not_met
+                    ),
+                    class_="mb-3 p-2 border rounded",
+                    style="background-color: #fff3cd;"
                 ),
                 ui.accordion(
                     ui.accordion_panel("Group Access",
@@ -2417,15 +2435,19 @@ def server(input, output, session):
         
         # Get the operator selection
         operator = input.restriction_operator()
-        
+
+        # Get the hide-on-restriction-not-met toggle state
+        hide_on_not_met = input.hide_on_restriction_not_met()
+
         from core.api import update_restrictions_batch
         json_data = update_restrictions_batch(
-            existing_json, 
-            grp_ids, 
-            date_cond, 
-            grade_cond, 
+            existing_json,
+            grp_ids,
+            date_cond,
+            grade_cond,
             completion_cond=completion_cond,
-            operator=operator
+            operator=operator,
+            hide_on_restriction_not_met=hide_on_not_met
         )
         
         ui.notification_show("Applying restrictions...", duration=1)
