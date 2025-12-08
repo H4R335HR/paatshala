@@ -972,7 +972,7 @@ def server(input, output, session):
         
         # Trigger background refresh (after showing cache)
         # This fetches fresh data silently and updates if different
-        background_refresh_trigger.set(cid)
+        trigger_background_refresh(cid)
         
         # If no cache, fetch immediately (blocking)
         if not has_cache:
@@ -981,13 +981,26 @@ def server(input, output, session):
 
     # Background refresh trigger
     background_refresh_trigger = reactive.Value(None)
+    background_refresh_counter = reactive.Value(0)
+
+    def trigger_background_refresh(cid):
+        """Helper to trigger background refresh with counter to ensure it always fires"""
+        counter = background_refresh_counter.get() + 1
+        background_refresh_counter.set(counter)
+        background_refresh_trigger.set((cid, counter))
 
     @reactive.Effect
     @reactive.event(background_refresh_trigger)
     def on_background_refresh():
         """Background refresh: fetch live data and update silently in a separate thread"""
-        cid = background_refresh_trigger.get()
-        if not cid: return
+        trigger_data = background_refresh_trigger.get()
+        if not trigger_data: return
+
+        # Extract cid from tuple (cid, counter) to ensure trigger always fires
+        if isinstance(trigger_data, tuple):
+            cid, _ = trigger_data
+        else:
+            cid = trigger_data
 
         logger.info(f"[MAIN THREAD] Scheduling background refresh for course {cid}...")
 
@@ -1017,8 +1030,8 @@ def server(input, output, session):
             # Fetch groups
             live_groups = get_course_groups(s, cid)
 
-            # Fetch grade items
-            live_grade_items = get_course_grade_items(s, cid)
+            # Fetch grade items (pass topics to avoid redundant fetch)
+            live_grade_items = get_course_grade_items(s, cid, topics=live_topics)
 
             # Save to disk cache (safe from any thread)
             if live_topics:
@@ -1100,8 +1113,8 @@ def server(input, output, session):
             course_groups_cache.set(groups_cache)
             save_cache(groups_key, live_groups)
 
-            # Fetch grade items
-            live_grade_items = get_course_grade_items(s, cid)
+            # Fetch grade items (pass topics to avoid redundant fetch)
+            live_grade_items = get_course_grade_items(s, cid, topics=live_topics)
             grade_items_cache = course_grade_items_cache()
             grade_items_cache[cid] = live_grade_items
             course_grade_items_cache.set(grade_items_cache)
@@ -2216,7 +2229,9 @@ def server(input, output, session):
             grade_items_map, completion_items_map = grade_cache[cid]
         else:
             ui.notification_show("Loading gradable activities...", duration=1)
-            result = get_course_grade_items(s, cid)
+            # Pass current topics to avoid redundant fetch
+            current_topics = list(topics_list())
+            result = get_course_grade_items(s, cid, topics=current_topics)
             # Handle both old (dict) and new (tuple) return formats
             if isinstance(result, tuple):
                 grade_items_map, completion_items_map = result
@@ -2453,9 +2468,20 @@ def server(input, output, session):
         ui.notification_show("Applying restrictions...", duration=1)
         if update_topic_restriction(s, cid, row['DB ID'], sesskey, json_data):
             ui.notification_show("Restrictions applied!", type="message")
+
+            # Optimistic update: Update local cache immediately with new restriction summary
+            new_summary_list = get_restriction_summary(json_data)
+            current[idx]['Restriction Summary'] = '\n'.join(new_summary_list) if new_summary_list else ''
+            topics_list.set(current)
+
+            # Also update disk cache immediately (background refresh will confirm later)
+            save_cache(f"course_{cid}_topics", current)
+
+            # Trigger background refresh to fetch fresh data and confirm changes
+            trigger_background_refresh(cid)
         else:
             ui.notification_show("Failed to apply restrictions", type="error")
-            
+
         ui.modal_remove()
 
     @output
@@ -2500,7 +2526,7 @@ def server(input, output, session):
         ui.notification_show("Clearing restrictions...", duration=1)
         if update_topic_restriction(s, cid, row['DB ID'], sesskey, empty_json):
             ui.notification_show("Restrictions cleared! You can now set new ones.", type="message")
-            
+
             # Reset UI Inputs to reflect cleared state
             ui.update_checkbox("enable_group_restriction", value=False)
             ui.update_select("restrict_group_id", selected=[])
@@ -2514,10 +2540,14 @@ def server(input, output, session):
             ui.update_checkbox("enable_completion_restriction", value=False)
             ui.update_select("restrict_completion_item", selected=None)
             ui.update_radio_buttons("restriction_operator", selected="&")
-            
+            ui.update_checkbox("hide_on_restriction_not_met", value=False)
+
             # Update internal state so subsequent Save builds on empty
             current_restriction_json.set(empty_json)
-            
+
+            # Trigger background refresh to update topic data after clearing restrictions
+            trigger_background_refresh(cid)
+
         else:
             ui.notification_show("Failed to clear restrictions", type="error")
             

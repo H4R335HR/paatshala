@@ -1473,32 +1473,39 @@ def update_restrictions_batch(existing_json_str, group_ids=None, date_cond=None,
     return json.dumps(data)
 
 
-def get_course_grade_items(session, course_id):
+def get_course_grade_items(session, course_id, topics=None):
     """
     Fetch valid GRADE ITEM IDs from the Moodle Availability Configuration.
     This requires fetching a Topic Edit page to access the M.core_availability.form.init JSON.
     Returns a dict: { '4602': 'Practice Quiz 15', ... } (Keys are Grade Item IDs, NOT Module IDs)
+
+    Args:
+        session: Requests session
+        course_id: Course ID
+        topics: Optional pre-fetched topics list to avoid redundant fetch
     """
     import re
     import json
     import time
-    
+
     logger.info(f"Fetching grade items for course {course_id} via Availability Config")
-    
+
     # 1. We need a valid Topic ID to access the editsection page.
-    # We'll try to get topics first.
-    topics = get_topics(session, course_id)
+    # Use provided topics or fetch if not provided
+    if topics is None:
+        topics = get_topics(session, course_id)
+
     if not topics:
         logger.warning("No topics found. Cannot fetch grade configuration.")
         return {}
-        
+
     # Use the first available topic that has a valid DB ID
     valid_topic_id = None
     for t in topics:
         if t.get("DB ID"):
             valid_topic_id = t["DB ID"]
             break
-            
+
     if not valid_topic_id:
         logger.warning("No topic with valid DB ID found. Cannot fetch grade config.")
         return {}
