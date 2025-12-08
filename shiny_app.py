@@ -1,10 +1,12 @@
 from shiny import App, render, ui, reactive
 import pandas as pd
 from core.auth import login_and_get_cookie, setup_session, validate_session
-from core.api import get_courses, get_topics, rename_topic_inplace, move_topic, toggle_topic_visibility, delete_topic, enable_edit_mode, add_topic, get_course_groups, update_topic_restriction, add_or_update_group_restriction, get_topic_restriction, get_restriction_summary, get_course_grade_items, update_restrictions_batch, move_activity_to_section, duplicate_activity, reorder_activity_within_section, delete_activity, rename_activity, get_fresh_sesskey
+from core.api import get_courses, get_topics, rename_topic_inplace, move_topic, toggle_topic_visibility, delete_topic, enable_edit_mode, add_topic, get_course_groups, update_topic_restriction, add_or_update_group_restriction, get_topic_restriction, get_restriction_summary, get_course_grade_items, update_restrictions_batch, move_activity_to_section, duplicate_activity, reorder_activity_within_section, delete_activity, rename_activity, get_fresh_sesskey, toggle_activity_visibility
 from core.persistence import read_config, write_config, save_cache, load_cache
 import logging
 from faicons import icon_svg
+import threading
+from queue import Queue
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
@@ -248,6 +250,20 @@ body {
 .btn-delete-activity:hover {
     background: #fef2f2;
     color: #ef4444;
+}
+
+/* Visibility Toggle Button */
+.btn-toggle-visibility-activity {
+    background: none;
+    border: none;
+    cursor: pointer;
+    padding: 4px 8px;
+    border-radius: 4px;
+    transition: all 0.15s;
+    font-size: 1.1rem;
+}
+.btn-toggle-visibility-activity:hover {
+    background: #e0f2fe;
 }
 """
 
@@ -590,6 +606,32 @@ document.addEventListener('click', function(e) {
         }
     }
     
+    // Visibility toggle button handler
+    const visBtn = e.target.closest('.btn-toggle-visibility-activity');
+    if (visBtn) {
+        e.preventDefault();
+        e.stopPropagation();
+        const activityId = visBtn.dataset.activityId;
+        const isVisible = visBtn.dataset.visible === 'true';
+        const row = visBtn.closest('tr');
+
+        // Optimistic UI update
+        if (row) {
+            const newVisible = !isVisible;
+            row.dataset.visible = newVisible.toString();
+            visBtn.dataset.visible = newVisible.toString();
+            visBtn.textContent = newVisible ? '👁️' : '🚫';
+            visBtn.title = newVisible ? 'Hide' : 'Show';
+        }
+
+        Shiny.setInputValue("activity_toggle_visibility", {
+            activityId: activityId,
+            hide: isVisible,
+            nonce: Math.random()
+        }, {priority: "event"});
+        return;
+    }
+
     // Delete button handler - with optimistic UI update
     const delBtn = e.target.closest('.btn-delete-activity');
     if (delBtn) {
@@ -598,14 +640,14 @@ document.addEventListener('click', function(e) {
         const activityId = delBtn.dataset.activityId;
         const activityName = delBtn.dataset.activityName;
         const row = delBtn.closest('tr');
-        
+
         if (confirm(`Are you sure you want to delete "${activityName}"?`)) {
             // Optimistic UI: fade out and remove the row immediately
             if (row) {
                 row.style.transition = 'opacity 0.3s';
                 row.style.opacity = '0.3';
             }
-            
+
             Shiny.setInputValue("activity_delete", {
                 activityId: activityId,
                 activityName: activityName,
@@ -688,15 +730,18 @@ def server(input, output, session):
     user_session_id = reactive.Value(None)
     user_authenticated = reactive.Value(False)
     current_username = reactive.Value("")
-    topics_list = reactive.Value([]) 
+    topics_list = reactive.Value([])
     is_edit_mode_on = reactive.Value(False)
-    
+
     # State for selection (List of indices)
     selected_indices = reactive.Value([])
-    
+
     # Cache for course-level data (keyed by course_id)
     course_groups_cache = reactive.Value({})      # {course_id: [{id, name}, ...]}
     course_grade_items_cache = reactive.Value({}) # {course_id: {item_id: name, ...}}
+
+    # Thread-safe queue for background refresh results
+    refresh_queue = Queue()
 
     # -------------------------------------------------------------------------
     # AUTH & LOAD - Now done reactively, not during server init
@@ -936,61 +981,136 @@ def server(input, output, session):
 
     # Background refresh trigger
     background_refresh_trigger = reactive.Value(None)
-    
+
     @reactive.Effect
     @reactive.event(background_refresh_trigger)
     def on_background_refresh():
-        """Background refresh: fetch live data and update silently"""
+        """Background refresh: fetch live data and update silently in a separate thread"""
         cid = background_refresh_trigger.get()
         if not cid: return
-        
-        # Small delay to let UI finish rendering first
-        import time
-        reactive.invalidate_later(0.5)  # Schedule re-run after 0.5s
-        
-        # Only run the actual fetch once (not on re-invalidation)
-        if hasattr(on_background_refresh, '_last_cid') and on_background_refresh._last_cid == cid:
-            do_background_refresh(cid)
-            on_background_refresh._last_cid = None
-            return
-        on_background_refresh._last_cid = cid
 
-    def do_background_refresh(cid):
-        """Actually fetch live data and update"""
+        logger.info(f"[MAIN THREAD] Scheduling background refresh for course {cid}...")
+
+        # Launch background thread (non-blocking)
+        thread = threading.Thread(
+            target=do_background_refresh_threaded,
+            args=(cid, user_session_id()),
+            daemon=True
+        )
+        thread.start()
+        logger.info(f"[MAIN THREAD] Background thread started, UI remains responsive")
+
+    def do_background_refresh_threaded(cid, session_id):
+        """Actually fetch live data and update (runs in background thread)"""
         try:
-            s = setup_session(user_session_id())
-            
+            logger.info(f"[BACKGROUND THREAD] Starting refresh for course {cid}...")
+
+            s = setup_session(session_id)
+
             topics_key = f"course_{cid}_topics"
             groups_key = f"course_{cid}_groups"
             grade_items_key = f"course_{cid}_grade_items"
-            
-            logger.info(f"Background refresh: fetching live data for course {cid}...")
-            
+
+            # Fetch topics
+            live_topics = get_topics(s, cid)
+
+            # Fetch groups
+            live_groups = get_course_groups(s, cid)
+
+            # Fetch grade items
+            live_grade_items = get_course_grade_items(s, cid)
+
+            # Save to disk cache (safe from any thread)
+            if live_topics:
+                save_cache(topics_key, live_topics)
+                logger.info(f"[BACKGROUND THREAD] Cached {len(live_topics)} topics")
+            save_cache(groups_key, live_groups)
+            save_cache(grade_items_key, live_grade_items)
+
+            # Put data in thread-safe queue (no reactive updates here!)
+            refresh_queue.put({
+                'cid': cid,
+                'topics': live_topics,
+                'groups': live_groups,
+                'grade_items': live_grade_items
+            })
+
+            logger.info(f"[BACKGROUND THREAD] Refresh complete for course {cid}")
+
+        except Exception as e:
+            logger.error(f"[BACKGROUND THREAD] Refresh error: {e}")
+
+    # Polling mechanism to check queue and apply updates on main thread
+    @reactive.Effect
+    def poll_refresh_queue():
+        """Poll the queue for background refresh results (runs on main thread)"""
+        # Use reactive.invalidate_later to create a polling loop
+        reactive.invalidate_later(0.5)  # Check every 500ms
+
+        # Try to get data from queue without blocking
+        try:
+            while not refresh_queue.empty():
+                data = refresh_queue.get_nowait()
+
+                cid = data.get('cid')
+                live_topics = data.get('topics')
+                live_groups = data.get('groups')
+                live_grade_items = data.get('grade_items')
+
+                # Update reactive values (safe on main thread)
+                if live_topics:
+                    topics_list.set(live_topics)
+                    logger.info(f"[MAIN THREAD] Applied {len(live_topics)} topics from background refresh")
+
+                if live_groups:
+                    groups_cache = course_groups_cache()
+                    groups_cache[cid] = live_groups
+                    course_groups_cache.set(groups_cache)
+
+                if live_grade_items:
+                    grade_items_cache = course_grade_items_cache()
+                    grade_items_cache[cid] = live_grade_items
+                    course_grade_items_cache.set(grade_items_cache)
+
+        except:
+            pass  # Queue was empty, that's fine
+
+    def do_background_refresh(cid):
+        """Synchronous version for manual refresh button (blocking)"""
+        try:
+            s = setup_session(user_session_id())
+
+            topics_key = f"course_{cid}_topics"
+            groups_key = f"course_{cid}_groups"
+            grade_items_key = f"course_{cid}_grade_items"
+
+            logger.info(f"Manual refresh: fetching live data for course {cid}...")
+
             # Fetch topics
             live_topics = get_topics(s, cid)
             if live_topics:
                 topics_list.set(live_topics)
                 save_cache(topics_key, live_topics)
-                logger.info(f"Background refresh: updated {len(live_topics)} topics")
-            
+                logger.info(f"Manual refresh: updated {len(live_topics)} topics")
+
             # Fetch groups
             live_groups = get_course_groups(s, cid)
             groups_cache = course_groups_cache()
             groups_cache[cid] = live_groups
             course_groups_cache.set(groups_cache)
             save_cache(groups_key, live_groups)
-            
+
             # Fetch grade items
             live_grade_items = get_course_grade_items(s, cid)
             grade_items_cache = course_grade_items_cache()
             grade_items_cache[cid] = live_grade_items
             course_grade_items_cache.set(grade_items_cache)
             save_cache(grade_items_key, live_grade_items)
-            
-            logger.info(f"Background refresh complete for course {cid}")
-                
+
+            logger.info(f"Manual refresh complete for course {cid}")
+
         except Exception as e:
-            logger.error(f"Background refresh error: {e}")
+            logger.error(f"Manual refresh error: {e}")
 
 
     # -------------------------------------------------------------------------
@@ -1194,6 +1314,8 @@ def server(input, output, session):
                 group_choices[gid] = name
 
         return ui.div(
+             # Refresh button (Always available)
+             ui.input_action_button("act_refresh_topics", "", icon=icon_svg("arrow-rotate-right"), class_="toolbar-btn me-3", title="Refresh topics from server"),
              # Add (Always available)
              ui.div(
                 ui.div(
@@ -1201,7 +1323,7 @@ def server(input, output, session):
                      style="margin-bottom: -15px;"
                 ),
                 ui.input_action_button("act_add", "Add", icon=icon_svg("plus"), class_="toolbar-btn-primary"),
-                class_="d-flex gap-2 align-items-center me-4", style="border-right: 1px solid #e5e7eb; padding-right: 16px;" 
+                class_="d-flex gap-2 align-items-center me-4", style="border-right: 1px solid #e5e7eb; padding-right: 16px;"
             ),
             # Edit (Single Check Only)
             ui.div(
@@ -1227,6 +1349,24 @@ def server(input, output, session):
     # -------------------------------------------------------------------------
     # ACTION HANDLERS
     # -------------------------------------------------------------------------
+    @reactive.Effect
+    @reactive.event(input.act_refresh_topics)
+    def on_refresh_topics():
+        """Manually refresh topics for the current course"""
+        cid = input.course_id()
+        if not cid:
+            return
+
+        logger.info(f"Manual refresh: fetching topics for course {cid}...")
+        ui.notification_show("Refreshing topics...", duration=2)
+
+        try:
+            do_background_refresh(cid)
+            ui.notification_show("✅ Topics refreshed", type="message", duration=2)
+        except Exception as e:
+            logger.error(f"Error refreshing topics: {e}")
+            ui.notification_show("❌ Failed to refresh topics", type="error")
+
     @reactive.Effect
     @reactive.event(input.drag_move)
     def on_drag_drop():
@@ -1648,10 +1788,7 @@ def server(input, output, session):
                     'certificate': '🏆'
                 }
                 type_icon = type_icons.get(act_type, '📦')
-                
-                vis_badge = "✓" if act_visible else "👁️‍🗨️"
-                vis_class = "text-success" if act_visible else "text-muted"
-                
+
                 # Make name clickable link if URL exists
                 if act_url:
                     name_html = f'<a href="{act_url}" target="_blank" class="text-primary">{act_name}</a>'
@@ -1661,14 +1798,20 @@ def server(input, output, session):
                 # Escape name for data attribute
                 escaped_name = act_name.replace('"', '&quot;')
                 section_id = row.get('Section ID', '')
-                
+
+                # Visibility toggle icon
+                vis_icon = "👁️" if act_visible else "🚫"
+                vis_toggle_title = "Hide" if act_visible else "Show"
+
                 activity_rows.append(f"""
-                <tr data-activity-id="{act_id}" data-activity-name="{escaped_name}" data-section-id="{section_id}">
+                <tr data-activity-id="{act_id}" data-activity-name="{escaped_name}" data-section-id="{section_id}" data-visible="{str(act_visible).lower()}">
                     <td class="text-center drag-handle" title="Drag to reorder">⋮⋮</td>
                     <td class="text-center">{type_icon}</td>
                     <td>{name_html}</td>
                     <td><span class="badge bg-secondary">{act_type}</span></td>
-                    <td class="text-center {vis_class}">{vis_badge}</td>
+                    <td class="text-center">
+                        <button class="btn-toggle-visibility-activity" data-activity-id="{act_id}" data-visible="{str(act_visible).lower()}" title="{vis_toggle_title}">{vis_icon}</button>
+                    </td>
                     <td class="text-center" style="white-space: nowrap;">
                         <button class="btn-rename-activity" data-activity-id="{act_id}" data-activity-name="{escaped_name}" data-activity-type="{act_type}" title="Rename">✏️</button>
                         <button class="btn-duplicate-activity" data-activity-id="{act_id}" data-activity-name="{escaped_name}" title="Duplicate">⧉</button>
@@ -1962,6 +2105,62 @@ def server(input, output, session):
             )
         else:
             ui.notification_show(f"❌ Failed to rename '{old_name}'", type="error")
+
+    @reactive.Effect
+    @reactive.event(input.activity_toggle_visibility)
+    def on_activity_toggle_visibility():
+        """Handle toggling activity visibility"""
+        evt = input.activity_toggle_visibility()
+        if not evt: return
+
+        activity_id = evt.get('activityId')
+        hide = evt.get('hide', True)
+
+        if not activity_id:
+            return
+
+        s = setup_session(user_session_id())
+        cid = input.course_id()
+
+        # Get fresh sesskey (cached one may be stale)
+        sesskey = get_fresh_sesskey(s, cid)
+        if not sesskey:
+            ui.notification_show("❌ Could not get session key", type="error")
+            return
+
+        ensure_edit_mode(s, cid, sesskey)
+
+        action_text = "Hiding" if hide else "Showing"
+        ui.notification_show(f"{action_text} activity...", duration=1)
+        success = toggle_activity_visibility(s, activity_id, sesskey, hide)
+
+        if success:
+            emoji = "👁️‍🗨️" if hide else "✅"
+            status_text = "hidden" if hide else "visible"
+            ui.notification_show(f"{emoji} Activity {status_text}", type="message")
+            # Refresh topics to update visibility status
+            new_topics = get_topics(s, cid)
+            topics_list.set(new_topics)
+            save_cache(f"course_{cid}_topics", new_topics)
+        else:
+            ui.notification_show(f"❌ Failed to toggle visibility", type="error")
+            # Revert optimistic UI update
+            new_visible = not hide
+            ui.insert_ui(
+                ui.HTML(f"""<script>
+                    var row = document.querySelector('tr[data-activity-id="{activity_id}"]');
+                    if (row) {{
+                        var visBtn = row.querySelector('.btn-toggle-visibility-activity');
+                        if (visBtn) {{
+                            visBtn.dataset.visible = "{str(new_visible).lower()}";
+                            visBtn.textContent = "{('👁️' if new_visible else '🚫')}";
+                            visBtn.title = "{'Hide' if new_visible else 'Show'}";
+                        }}
+                        row.dataset.visible = "{str(new_visible).lower()}";
+                    }}
+                </script>"""),
+                selector="body"
+            )
 
     # -------------------------------------------------------------------------
     # RESTRICTION MODAL LOGIC

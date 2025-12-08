@@ -645,16 +645,69 @@ def toggle_topic_visibility(session, course_id, section_id, sesskey, hide=True):
     resp = session.get(url, params=params)
     return resp.ok
 
+def toggle_activity_visibility(session, activity_id, sesskey, hide=True):
+    """
+    Toggle visibility of an activity (course module).
+
+    Args:
+        session: Requests session
+        activity_id: The course module ID to show/hide
+        sesskey: Session key
+        hide: True to hide, False to show
+
+    Returns:
+        bool: Success status
+    """
+    # API captured from Burp:
+    # POST /lib/ajax/service.php?sesskey=C1cd8L2Nmn&info=core_course_edit_module
+    # [{"index":0,"methodname":"core_course_edit_module","args":{"id":32032,"action":"hide","sectionreturn":0}}]
+    # For unhide, action is "show"
+
+    url = f"{BASE}/lib/ajax/service.php"
+    params = {
+        "sesskey": sesskey,
+        "info": "core_course_edit_module"
+    }
+
+    action = "hide" if hide else "show"
+    payload = [{
+        "index": 0,
+        "methodname": "core_course_edit_module",
+        "args": {
+            "id": int(activity_id),
+            "action": action,
+            "sectionreturn": 0
+        }
+    }]
+
+    logger.info(f"{'Hiding' if hide else 'Showing'} activity {activity_id}")
+    resp = session.post(url, params=params, json=payload)
+
+    if resp.ok:
+        try:
+            data = resp.json()
+            logger.info(f"Toggle visibility response: {str(data)[:200]}")
+            if isinstance(data, list) and data:
+                if data[0].get("error"):
+                    logger.error(f"Toggle visibility error: {data[0].get('exception', {}).get('message', 'Unknown')}")
+                    return False
+                return True
+        except Exception as e:
+            logger.error(f"Error parsing toggle visibility response: {e}")
+    else:
+        logger.error(f"Toggle visibility request failed: {resp.status_code}")
+    return False
+
 def rename_activity(session, sesskey, module_id, new_name, mod_type):
     """Rename activity using Moodle's inplace editable AJAX API"""
     logger.info(f"Renaming activity {module_id} to '{new_name}'")
-    
+
     url = f"{BASE}/lib/ajax/service.php"
     params = {
         "sesskey": sesskey,
         "info": "core_update_inplace_editable"
     }
-    
+
     # Component is core_course for activity names (not mod_{type})
     payload = [{
         "index": 0,
@@ -666,7 +719,7 @@ def rename_activity(session, sesskey, module_id, new_name, mod_type):
             "value": new_name
         }
     }]
-    
+
     try:
         resp = session.post(url, params=params, json=payload)
         if resp.ok:
