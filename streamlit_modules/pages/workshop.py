@@ -41,13 +41,15 @@ def render_workshop_tab(course, meta):
                 
                 if workshops:
                     # Convert to list of dicts for consistency
+                    # Now includes Restricted Group field
                     workshop_rows = [
                         {
                             "Workshop Name": name,
                             "Module ID": mid,
-                            "URL": url
+                            "URL": url,
+                            "Restricted Group": restricted_group or ""
                         }
-                        for name, mid, url in workshops
+                        for name, mid, url, restricted_group in workshops
                     ]
                     st.session_state.workshops_data = workshop_rows
                     st.session_state.workshops_loaded_from_disk = False
@@ -62,10 +64,35 @@ def render_workshop_tab(course, meta):
                     st.warning("No workshops found in this course")
         return
     
+    # Filter workshops based on selected group
+    all_workshops = st.session_state.workshops_data
+    
+    # Get selected group name for filtering
+    selected_group_name = None
+    if st.session_state.selected_group:
+        selected_group_name = st.session_state.selected_group['name']
+    
+    # Filter: show only workshops that are either unrestricted OR match the selected group
+    if selected_group_name:
+        # Use substring matching since group names may have slight variations
+        filtered_workshops = [
+            w for w in all_workshops
+            if not w.get('Restricted Group') or 
+               selected_group_name in w.get('Restricted Group', '') or
+               w.get('Restricted Group', '') in selected_group_name
+        ]
+    else:
+        # No group selected - show all workshops
+        filtered_workshops = all_workshops
+    
+    if not filtered_workshops:
+        st.warning("No workshops available for the selected group.")
+        return
+    
     # Workshop selector
     workshop_options = {
         f"{w['Workshop Name']} (ID: {w['Module ID']})": w
-        for w in st.session_state.workshops_data
+        for w in filtered_workshops
     }
     
     # Try to pre-select from last session

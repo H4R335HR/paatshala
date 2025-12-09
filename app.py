@@ -204,10 +204,18 @@ def main():
                 
                 # 👥 Group Dropdown (compact, shows "All" by default)
                 if st.session_state.selected_course:
-                    # Load groups if not loaded
-                    if not st.session_state.course_groups:
+                    current_course_id = st.session_state.selected_course['id']
+                    
+                    # Load groups if not loaded OR if they're for a different course
+                    groups_need_refresh = (
+                        not st.session_state.course_groups or
+                        st.session_state.get('_groups_course_id') != current_course_id
+                    )
+                    
+                    if groups_need_refresh:
                         session = setup_session(st.session_state.session_id)
-                        st.session_state.course_groups = get_course_groups(session, st.session_state.selected_course['id'])
+                        st.session_state.course_groups = get_course_groups(session, current_course_id)
+                        st.session_state._groups_course_id = current_course_id  # Track which course these belong to
                     
                     if st.session_state.course_groups:
                         group_options = {"All": None}

@@ -1087,16 +1087,27 @@ def fetch_submissions(session_id, module_id, group_id=None):
 
 
 def get_workshops(session, course_id):
-    """Get list of workshop activities from course page"""
+    """
+    Get list of workshop activities from course page.
+    
+    Returns list of tuples: (name, module_id, href, restricted_group)
+    where restricted_group is the group name if the parent topic has a group restriction,
+    or None if the workshop is available to all groups.
+    """
     url = f"{BASE}/course/view.php?id={course_id}"
     resp = session.get(url)
     if not resp.ok:
         return []
     
     soup = BeautifulSoup(resp.text, "html.parser")
+    
+    # Find all topic sections that might contain workshops
+    # The structure is: <li class="section"> contains topic info and activities
+    workshops = []
+    
+    # Find all workshop items
     items = soup.find_all("li", class_=lambda c: c and "modtype_workshop" in c)
     
-    workshops = []
     for item in items:
         link = item.find("a", href=re.compile(r"mod/workshop/view\.php\?id=\d+"))
         if not link:
@@ -1110,9 +1121,34 @@ def get_workshops(session, course_id):
                 href = BASE + href
             elif not href.startswith("http"):
                 href = BASE + "/" + href.lstrip("/")
-            workshops.append((name, module_id, href))
+            
+            # Try to find the parent topic's group restriction
+            # Navigate up to find the section container
+            restricted_group = None
+            parent = item.parent
+            
+            # Keep going up until we find a section with availabilityinfo
+            for _ in range(10):  # Limit depth to avoid infinite loop
+                if parent is None:
+                    break
+                
+                # Check if this parent has section_availability info
+                avail_div = parent.find("div", class_="section_availability")
+                if avail_div:
+                    # Extract group name from <strong> tag inside availabilityinfo
+                    avail_info = avail_div.find("div", class_="availabilityinfo")
+                    if avail_info:
+                        strong = avail_info.find("strong")
+                        if strong:
+                            restricted_group = strong.get_text(strip=True)
+                            break
+                
+                parent = parent.parent
+            
+            workshops.append((name, module_id, href, restricted_group))
     
     return workshops
+
 
 
 def fetch_workshop_submissions(session_id, module_id, group_id=None):
