@@ -1363,6 +1363,66 @@ def add_or_update_group_restriction(existing_json_str, group_ids):
     return json.dumps(data)
 
 
+def add_grade_restriction_to_json(existing_json_str, grade_item_id, min_grade=50, max_grade=None):
+    """
+    Add a grade restriction to existing restriction JSON.
+    Preserves other conditions (groups, dates, etc).
+    
+    Args:
+        existing_json_str: Current JSON string (can be None or empty)
+        grade_item_id: The grade item ID (from get_course_grade_items)
+        min_grade: Minimum grade percentage (default 50)
+        max_grade: Maximum grade percentage (optional)
+    
+    Returns:
+        Updated JSON string
+    """
+    import json
+    
+    # Parse or initialize
+    data = {"op": "&", "c": [], "showc": []}
+    if existing_json_str:
+        try:
+            parsed = json.loads(existing_json_str)
+            if isinstance(parsed, dict):
+                data = parsed
+                if 'c' not in data: data['c'] = []
+                if 'showc' not in data: data['showc'] = []
+        except:
+            pass
+    
+    # Remove any existing grade restrictions (we'll add the new one)
+    # We want to ADD, not replace, so let's just add without removing
+    # But if the same grade item already exists, update it
+    existing_grade_idx = None
+    for i, c in enumerate(data['c']):
+        if c.get('type') == 'grade' and str(c.get('id')) == str(grade_item_id):
+            existing_grade_idx = i
+            break
+    
+    # Build the grade condition
+    grade_cond = {
+        "type": "grade",
+        "id": int(grade_item_id)
+    }
+    if min_grade is not None:
+        grade_cond["min"] = float(min_grade)
+    if max_grade is not None:
+        grade_cond["max"] = float(max_grade)
+    
+    if existing_grade_idx is not None:
+        # Update existing
+        data['c'][existing_grade_idx] = grade_cond
+    else:
+        # Add new
+        data['c'].append(grade_cond)
+    
+    # Fix showc to match c length
+    data['showc'] = [True] * len(data['c'])
+    
+    return json.dumps(data)
+
+
 def update_restrictions_batch(existing_json_str, group_ids=None, date_cond=None, grade_cond=None,
                               completion_cond=None, operator="&", hide_on_restriction_not_met=False):
     """

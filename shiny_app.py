@@ -350,6 +350,7 @@ def server(input, output, session):
         # Add special actions at the top (always visible)
         group_choices["__clear_groups__"] = "[Clear All Groups]"
         group_choices["__clear_all__"] = "[Clear All Restrictions]"
+        group_choices["__chain_quiz__"] = "[Chain with Previous Quiz]"
         group_choices["__divider__"] = "-------------------"
 
         # Add group options
@@ -626,6 +627,8 @@ def server(input, output, session):
             do_clear_groups_batch()
         elif selection == "__clear_all__":
             do_clear_all_restrictions_batch()
+        elif selection == "__chain_quiz__":
+            do_chain_with_previous_quiz()
         else:
             # It's a group ID - add the group
             do_add_group_batch(selection)
@@ -804,6 +807,148 @@ def server(input, output, session):
         topics_list.set(current)
         save_cache(f"course_{cid}_topics", current)
         ui.notification_show(f"Cleared all restrictions from {success_count}/{len(indices)} topics", type="message")
+
+        # Trigger background refresh
+        trigger_background_refresh(cid)
+
+    def do_chain_with_previous_quiz():
+        """Chain selected topics with previous quiz (require 50% grade)"""
+        indices = selected_indices()
+        if not indices:
+            ui.notification_show("No topics selected", type="warning")
+            return
+
+        cid = input.course_id()
+        if not cid:
+            return
+
+        current = list(topics_list())
+        s = setup_session(user_session_id())
+
+        # Fetch grade items for the course (Option A: batch fetch)
+        grade_items_cache = course_grade_items_cache()
+        if cid not in grade_items_cache:
+            ui.notification_show("Loading grade items...", duration=2)
+            from core.api import get_course_grade_items
+            result = get_course_grade_items(s, cid, current)
+            # get_course_grade_items returns (grade_items_dict, completion_items_dict)
+            grade_items_cache[cid] = result
+            course_grade_items_cache.set(grade_items_cache)
+        
+        # Handle both tuple (grade_items, completion_items) and raw dict formats
+        cached = grade_items_cache.get(cid, {})
+        if isinstance(cached, tuple):
+            grade_items = cached[0] if cached else {}
+        else:
+            grade_items = cached
+        
+        # Build module_id -> grade_item_id mapping
+        # Grade items are keyed by grade_item_id with quiz name as value
+        # We need to match quiz module_id to grade_item_id
+        # Unfortunately, the mapping isn't direct - we need to match by name
+        
+        success_count = 0
+        skip_count = 0
+        warnings = []
+        
+        with ui.Progress(min=0, max=len(indices)) as p:
+            p.set(message="Chaining with previous quizzes...")
+
+            for i, idx in enumerate(indices):
+                if idx >= len(current):
+                    continue
+
+                row = current[idx]
+                topic_name = row['Topic Name']
+                topic_id = row['DB ID']
+                sesskey = row.get('Sesskey')
+
+                # Edge case: First topic (index 0)
+                if idx == 0:
+                    warnings.append(f"'{topic_name}': First topic, skipped")
+                    skip_count += 1
+                    p.set(i + 1, message=f"Processed {i + 1}/{len(indices)}")
+                    continue
+
+                # Find previous quiz - walk backwards
+                quiz_found = None
+                quiz_topic_name = None
+                
+                for prev_idx in range(idx - 1, -1, -1):
+                    prev_topic = current[prev_idx]
+                    activities = prev_topic.get('Activities', [])
+                    
+                    # Find last visible quiz in this topic (iterate in reverse)
+                    for act in reversed(activities):
+                        if act.get('type') == 'quiz' and act.get('visible', True):
+                            quiz_found = act
+                            quiz_topic_name = prev_topic['Topic Name']
+                            break
+                    
+                    if quiz_found:
+                        break
+
+                if not quiz_found:
+                    warnings.append(f"'{topic_name}': No preceding quiz found")
+                    skip_count += 1
+                    p.set(i + 1, message=f"Processed {i + 1}/{len(indices)}")
+                    continue
+
+                # Find grade item ID for this quiz
+                # Match by name (grade items are stored as {grade_item_id: name})
+                quiz_name = quiz_found.get('name', '')
+                quiz_module_id = quiz_found.get('id', '')
+                grade_item_id = None
+                
+                for gid, gname in grade_items.items():
+                    # Match by name (case-insensitive, partial match)
+                    if quiz_name.lower() in gname.lower() or gname.lower() in quiz_name.lower():
+                        grade_item_id = gid
+                        break
+                
+                if not grade_item_id:
+                    warnings.append(f"'{topic_name}': Could not find grade item for '{quiz_name}'")
+                    skip_count += 1
+                    p.set(i + 1, message=f"Processed {i + 1}/{len(indices)}")
+                    continue
+
+                try:
+                    # Fetch current restriction JSON
+                    current_json = get_topic_restriction(s, topic_id)
+                    
+                    # Add grade restriction (min 50%)
+                    from core.api import add_grade_restriction_to_json
+                    updated_json = add_grade_restriction_to_json(current_json, grade_item_id, min_grade=50)
+                    
+                    # Apply restriction
+                    ensure_edit_mode(s, cid, sesskey)
+                    if update_topic_restriction(s, cid, topic_id, sesskey, updated_json):
+                        success_count += 1
+                        # Update local restriction summary
+                        new_summary_list = get_restriction_summary(updated_json)
+                        current[idx]['Restriction Summary'] = '\n'.join(new_summary_list) if new_summary_list else ''
+                    else:
+                        warnings.append(f"'{topic_name}': Failed to update restriction")
+
+                except Exception as e:
+                    logger.error(f"Error chaining topic {topic_id}: {e}")
+                    warnings.append(f"'{topic_name}': Error - {str(e)[:50]}")
+
+                p.set(i + 1, message=f"Processed {i + 1}/{len(indices)}")
+
+        # Refresh UI
+        topics_list.set(current)
+        save_cache(f"course_{cid}_topics", current)
+        
+        # Show result notification
+        if warnings:
+            # Show first few warnings
+            warn_text = "; ".join(warnings[:3])
+            if len(warnings) > 3:
+                warn_text += f" (+{len(warnings)-3} more)"
+            ui.notification_show(f"Chained {success_count}/{len(indices)} topics. Warnings: {warn_text}", type="warning", duration=8)
+        else:
+            ui.notification_show(f"Chained {success_count}/{len(indices)} topics with previous quiz (≥50%)", type="message")
 
         # Trigger background refresh
         trigger_background_refresh(cid)
