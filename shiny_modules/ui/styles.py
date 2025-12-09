@@ -1,225 +1,314 @@
 """
 Custom CSS styles for the Shiny application
+Minimalistic design with dark/light theme support
 """
 
 def get_custom_css():
     """Returns the custom CSS for the Shiny application"""
     return """
+/* ============================================================================
+   THEME SYSTEM - Light (default) and Dark modes
+   ============================================================================ */
 :root {
-    --primary-color: #4f46e5;
-    --primary-hover: #4338ca;
-    --bg-color: #f3f4f6;
-    --card-bg: #ffffff;
-    --text-main: #1f2937;
-    --selected-bg: #e0e7ff;
+    /* Light Theme Colors */
+    --bg-primary: #f8fafc;
+    --bg-secondary: #ffffff;
+    --bg-tertiary: #f1f5f9;
+    --text-primary: #0f172a;
+    --text-secondary: #475569;
+    --text-muted: #94a3b8;
+    --border-color: #e2e8f0;
+    --accent: #6366f1;
+    --accent-hover: #4f46e5;
+    --accent-soft: #e0e7ff;
+    --success: #10b981;
+    --danger: #ef4444;
+    --danger-soft: #fef2f2;
+    --warning: #f59e0b;
+    --shadow: 0 1px 3px rgba(0,0,0,0.1);
+    --shadow-lg: 0 4px 6px -1px rgba(0,0,0,0.1);
 }
+
+[data-theme="dark"] {
+    --bg-primary: #0f172a;
+    --bg-secondary: #1e293b;
+    --bg-tertiary: #334155;
+    --text-primary: #f1f5f9;
+    --text-secondary: #cbd5e1;
+    --text-muted: #64748b;
+    --border-color: #334155;
+    --accent: #818cf8;
+    --accent-hover: #a5b4fc;
+    --accent-soft: rgba(99,102,241,0.2);
+    --success: #34d399;
+    --danger: #f87171;
+    --danger-soft: rgba(239,68,68,0.15);
+    --warning: #fbbf24;
+    --shadow: 0 1px 3px rgba(0,0,0,0.3);
+    --shadow-lg: 0 4px 6px -1px rgba(0,0,0,0.4);
+}
+
+/* ============================================================================
+   BASE STYLES
+   ============================================================================ */
+* { transition: background-color 0.2s, border-color 0.2s, color 0.2s; }
 
 body {
-    background-color: var(--bg-color);
+    background: var(--bg-primary);
     font-family: 'Inter', system-ui, -apple-system, sans-serif;
-    color: var(--text-main);
+    color: var(--text-primary);
 }
 
+/* ============================================================================
+   NAVBAR (Bootstrap override)
+   ============================================================================ */
+.navbar, .navbar-nav, .nav-link {
+    background: var(--bg-secondary) !important;
+    color: var(--text-primary) !important;
+}
+.navbar {
+    border-bottom: 1px solid var(--border-color);
+}
+.navbar .form-select, .navbar select {
+    background: var(--bg-secondary) !important;
+    color: var(--text-primary) !important;
+    border-color: var(--border-color) !important;
+}
+.navbar .btn-light {
+    background: var(--bg-tertiary) !important;
+    color: var(--text-primary) !important;
+    border: none;
+}
+.navbar .btn-light:hover {
+    background: var(--border-color) !important;
+}
+
+/* ============================================================================
+   APP CARD & LAYOUT
+   ============================================================================ */
 .app-card {
-    background: var(--card-bg);
+    background: var(--bg-secondary);
     border-radius: 12px;
-    box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+    box-shadow: var(--shadow-lg);
     overflow: hidden;
     height: 80vh;
     display: flex;
     flex-direction: column;
 }
 
+/* ============================================================================
+   TOOLBAR
+   ============================================================================ */
 .toolbar {
-    background: #ffffff;
-    border-bottom: 1px solid #e5e7eb;
+    background: var(--bg-secondary);
+    border-bottom: 1px solid var(--border-color);
     padding: 8px 20px;
     display: flex;
-    gap: 8px;
+    gap: 4px;
     align-items: center;
-    flex-wrap: wrap;
-    flex-shrink: 0;
-    height: 56px;
+    flex-wrap: nowrap;
+    min-height: 56px;
     box-sizing: border-box;
+    overflow: hidden;
 }
 
-/* Icon-Only Toolbar Buttons - Full Height */
+.toolbar-divider {
+    width: 1px;
+    height: 28px;
+    background: var(--border-color);
+    flex-shrink: 0;
+}
+
+/* Icon Buttons */
 .toolbar-icon-btn {
-    width: 40px;
-    height: 40px;
+    width: 36px;
+    height: 36px;
     border: none;
     background: transparent;
-    color: #6b7280;
-    border-radius: 6px;
-    padding: 0;
+    color: var(--text-secondary);
+    border-radius: 8px;
     cursor: pointer;
     display: inline-flex;
     align-items: center;
     justify-content: center;
     transition: all 0.15s;
-    flex-shrink: 0;
+    font-size: 1.25rem;
+    font-weight: 600;
 }
 .toolbar-icon-btn:hover:not(:disabled) {
-    background: #f3f4f6;
-    color: #374151;
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
 }
 .toolbar-icon-btn:disabled {
     opacity: 0.35;
     cursor: not-allowed;
 }
 .toolbar-icon-btn-primary {
-    background: var(--primary-color);
+    background: var(--accent);
     color: white;
 }
 .toolbar-icon-btn-primary:hover:not(:disabled) {
-    background: var(--primary-hover);
+    background: var(--accent-hover);
 }
 .toolbar-icon-btn-danger {
-    color: #dc2626;
+    color: var(--danger);
 }
 .toolbar-icon-btn-danger:hover:not(:disabled) {
-    background: #fef2f2;
-    color: #991b1b;
+    background: var(--danger-soft);
 }
 
-/* Toolbar Inputs - Full Height */
+/* Fix vertical alignment for Shiny inputs in toolbar */
+#toolbar_actions .shiny-input-container,
+#toolbar_actions .form-group {
+    margin-bottom: 0 !important;
+}
+
+/* Toolbar Inputs */
 #toolbar_actions input[type="number"],
 #toolbar_actions input[type="text"],
 #toolbar_actions select {
     height: 40px !important;
-    border: 1px solid #d1d5db !important;
-    border-radius: 6px !important;
-    padding: 0 10px !important;
+    border: 1px solid var(--border-color) !important;
+    border-radius: 8px !important;
+    padding: 0 12px !important;
     font-size: 0.875rem !important;
-    background: white !important;
-    transition: all 0.15s !important;
+    background: var(--bg-secondary) !important;
+    color: var(--text-primary) !important;
     box-sizing: border-box !important;
 }
-#toolbar_actions input[type="number"]:focus,
-#toolbar_actions input[type="text"]:focus,
+#toolbar_actions input:focus,
 #toolbar_actions select:focus {
     outline: none !important;
-    border-color: var(--primary-color) !important;
-    box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.1) !important;
+    border-color: var(--accent) !important;
+    box-shadow: 0 0 0 3px var(--accent-soft) !important;
 }
 #toolbar_actions input[type="number"] {
     width: 55px !important;
     text-align: center !important;
 }
 
-/* Toolbar Divider - Full Height */
-.toolbar-divider {
-    width: 1px;
-    height: 40px;
-    background: #e5e7eb;
-    flex-shrink: 0;
-}
-
-/* Legacy toolbar button styles (for backwards compatibility) */
-.toolbar-btn {
-    border: 1px solid #d1d5db;
-    background: white;
-    color: #374151;
-    border-radius: 6px;
-    padding: 6px 12px;
-    font-size: 0.875rem;
-    font-weight: 500;
-    cursor: pointer;
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-}
-.toolbar-btn:hover:not(:disabled) { background: #f9fafb; border-color: #9ca3af; }
-.toolbar-btn-primary { background: var(--primary-color); color: white; border-color: var(--primary-color); }
-.toolbar-btn-primary:hover:not(:disabled) { background: var(--primary-hover); }
-.toolbar-btn:disabled { opacity: 0.5; cursor: not-allowed; }
-
-/* Custom Table */
+/* ============================================================================
+   TABLE
+   ============================================================================ */
 .topics-table-container {
-    flex-grow: 1;
+    flex: 1;
     overflow-y: auto;
-    position: relative;
-    padding: 0;
 }
+
 .topics-table {
     width: 100%;
     border-collapse: collapse;
 }
+
 .topics-table th {
     position: sticky;
     top: 0;
-    background: #f9fafb;
+    background: var(--bg-tertiary);
     padding: 12px 16px;
     text-align: left;
     font-size: 0.75rem;
     font-weight: 600;
     text-transform: uppercase;
-    color: #6b7280;
-    border-bottom: 1px solid #e5e7eb;
+    color: var(--text-muted);
+    border-bottom: 1px solid var(--border-color);
     z-index: 10;
 }
+
 .topics-table td {
     padding: 12px 16px;
-    border-bottom: 1px solid #f3f4f6;
+    border-bottom: 1px solid var(--border-color);
     font-size: 0.875rem;
-    vertical-align: middle;
+    color: var(--text-primary);
 }
+
 .topics-table tr {
-    background: white;
-    transition: background 0.1s;
+    background: var(--bg-secondary);
     cursor: pointer;
+    transition: background 0.1s;
 }
-.topics-table tr:hover { background: #f9fafb; }
-.topics-table tr.selected-row { background: var(--selected-bg); }
-.topics-table tr.sortable-ghost { opacity: 0.4; background: #c7d2fe; }
+.topics-table tr:hover { background: var(--bg-tertiary); }
+.topics-table tr.selected-row { background: var(--accent-soft); }
+.topics-table tr.sortable-ghost { opacity: 0.4; background: var(--accent-soft); }
+
+/* ============================================================================
+   ICON ACTIONS & BUTTONS
+   ============================================================================ */
+.btn-icon-action {
+    cursor: pointer;
+    padding: 6px;
+    border-radius: 6px;
+    border: none;
+    background: transparent;
+    color: var(--text-muted);
+    transition: all 0.15s;
+    margin-left: 4px;
+}
+.btn-icon-action:hover { background: var(--bg-tertiary); color: var(--text-primary); }
+.btn-icon-action.text-success { color: var(--success); }
+.btn-icon-action.text-danger { color: var(--danger); }
+.btn-icon-action.text-danger:hover { background: var(--danger-soft); }
+.btn-icon-action.text-warning { color: var(--warning); }
+.btn-icon-action.text-muted-light { color: var(--text-muted); }
 
 .drag-handle {
     cursor: grab;
-    color: #9ca3af;
-    margin-right: 8px;
+    color: var(--text-muted);
+    padding: 4px 8px;
 }
-.btn-icon-action {
-    cursor: pointer;
-    padding: 4px;
-    border-radius: 4px;
-    transition: all 0.2s;
-    margin-left: 8px;
-    font-size: 1rem;
-    border: none;
-    background: transparent;
-}
-.btn-icon-action:hover { background: #e5e7eb; }
-.text-success { color: #059669; }
-.text-muted-light { color: #9ca3af; }
-.text-danger { color: #dc2626; }
+.drag-handle:hover { color: var(--text-secondary); }
 
-/* Inline Edit */
+/* ============================================================================
+   INLINE EDITING
+   ============================================================================ */
 .editable-topic-name {
     cursor: pointer;
     border-bottom: 1px dashed transparent;
-    transition: all 0.2s;
     padding-bottom: 1px;
 }
 .editable-topic-name:hover {
-    border-bottom-color: #9ca3af;
-    color: var(--primary-color);
+    border-bottom-color: var(--text-muted);
+    color: var(--accent);
 }
 .rename-input {
     width: 100%;
     padding: 4px 8px;
-    border: 1px solid var(--primary-color);
-    border-radius: 4px;
+    border: 1px solid var(--accent);
+    border-radius: 6px;
     font-size: 0.875rem;
+    background: var(--bg-secondary);
+    color: var(--text-primary);
     outline: none;
 }
 
-/* Activity Context Menu */
+/* ============================================================================
+   ACTIVITY ACTIONS (in modal)
+   ============================================================================ */
+.btn-rename-activity,
+.btn-duplicate-activity,
+.btn-delete-activity,
+.btn-toggle-visibility-activity {
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    cursor: pointer;
+    padding: 4px 8px;
+    border-radius: 6px;
+    transition: all 0.15s;
+}
+.btn-rename-activity:hover { background: var(--accent-soft); color: var(--accent); }
+.btn-duplicate-activity:hover { background: var(--accent-soft); color: var(--accent); }
+.btn-delete-activity:hover { background: var(--danger-soft); color: var(--danger); }
+.btn-toggle-visibility-activity:hover { background: var(--accent-soft); }
+
+/* ============================================================================
+   CONTEXT MENU
+   ============================================================================ */
 .activity-context-menu {
     position: fixed;
-    background: white;
-    border: 1px solid #e5e7eb;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
     border-radius: 8px;
-    box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+    box-shadow: var(--shadow-lg);
     z-index: 10000;
     min-width: 200px;
     max-height: 400px;
@@ -230,103 +319,115 @@ body {
     padding: 8px 12px;
     font-weight: 600;
     font-size: 0.75rem;
-    color: #6b7280;
+    color: var(--text-muted);
     text-transform: uppercase;
-    border-bottom: 1px solid #e5e7eb;
+    border-bottom: 1px solid var(--border-color);
 }
 .activity-context-menu .menu-item {
     padding: 8px 12px;
     cursor: pointer;
     font-size: 0.875rem;
+    color: var(--text-primary);
     display: flex;
     align-items: center;
     gap: 8px;
 }
-.activity-context-menu .menu-item:hover {
-    background: #f3f4f6;
-}
+.activity-context-menu .menu-item:hover { background: var(--bg-tertiary); }
 .activity-context-menu .menu-item.current-section {
-    background: #e0f2fe;
-    color: #0369a1;
+    background: var(--accent-soft);
+    color: var(--accent);
     font-weight: 500;
 }
 
-/* Activity Drag Handle */
-.drag-handle {
-    cursor: grab;
-    color: #9ca3af;
-    padding: 4px 8px;
-    font-size: 1rem;
-}
-.drag-handle:hover {
-    color: #6b7280;
-}
-
 /* Sortable states */
-.sortable-ghost {
-    opacity: 0.4;
-    background: #e0f2fe !important;
-}
-.sortable-chosen {
-    background: #f0f9ff !important;
-}
+.sortable-ghost { opacity: 0.4; background: var(--accent-soft) !important; }
+.sortable-chosen { background: var(--bg-tertiary) !important; }
 
-/* Rename Button */
-.btn-rename-activity {
-    background: none;
+/* ============================================================================
+   THEME TOGGLE BUTTON
+   ============================================================================ */
+.theme-toggle {
+    width: 40px;
+    height: 40px;
     border: none;
-    color: #6b7280;
+    background: transparent;
+    color: var(--text-secondary);
+    border-radius: 8px;
     cursor: pointer;
-    padding: 4px 8px;
-    border-radius: 4px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     transition: all 0.15s;
 }
-.btn-rename-activity:hover {
-    background: #fef3c7;
-    color: #d97706;
+.theme-toggle:hover {
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
+}
+.theme-toggle svg {
+    width: 20px;
+    height: 20px;
 }
 
-/* Duplicate Button */
-.btn-duplicate-activity {
+/* ============================================================================
+   UTILITY LINK BUTTON
+   ============================================================================ */
+.btn-link-subtle {
     background: none;
     border: none;
-    color: #6b7280;
+    color: var(--text-secondary);
     cursor: pointer;
-    padding: 4px 8px;
-    border-radius: 4px;
-    transition: all 0.15s;
+    padding: 2px 6px;
+    font-size: 0.9em;
+    text-decoration: none;
 }
-.btn-duplicate-activity:hover {
-    background: #f3f4f6;
-    color: #3b82f6;
+.btn-link-subtle:hover {
+    color: var(--text-primary);
+    text-decoration: underline;
 }
 
-/* Delete Button */
-.btn-delete-activity {
-    background: none;
-    border: none;
-    color: #9ca3af;
-    cursor: pointer;
-    padding: 4px 8px;
-    border-radius: 4px;
-    transition: all 0.15s;
+/* ============================================================================
+   BOOTSTRAP OVERRIDES (modals, cards, forms)
+   ============================================================================ */
+.modal-content {
+    background: var(--bg-secondary) !important;
+    color: var(--text-primary) !important;
+    border-color: var(--border-color) !important;
 }
-.btn-delete-activity:hover {
-    background: #fef2f2;
-    color: #ef4444;
+.modal-header, .modal-footer {
+    border-color: var(--border-color) !important;
 }
-
-/* Visibility Toggle Button */
-.btn-toggle-visibility-activity {
-    background: none;
-    border: none;
-    cursor: pointer;
-    padding: 4px 8px;
-    border-radius: 4px;
-    transition: all 0.15s;
-    font-size: 1.1rem;
+.modal-header .btn-close {
+    filter: var(--text-primary);
 }
-.btn-toggle-visibility-activity:hover {
-    background: #e0f2fe;
+[data-theme="dark"] .modal-header .btn-close {
+    filter: invert(1);
+}
+.card {
+    background: var(--bg-secondary) !important;
+    color: var(--text-primary) !important;
+    border-color: var(--border-color) !important;
+}
+.form-control, .form-select {
+    background: var(--bg-secondary) !important;
+    color: var(--text-primary) !important;
+    border-color: var(--border-color) !important;
+}
+.form-control:focus, .form-select:focus {
+    border-color: var(--accent) !important;
+    box-shadow: 0 0 0 3px var(--accent-soft) !important;
+}
+.form-label {
+    color: var(--text-secondary) !important;
+}
+.btn-primary {
+    background: var(--accent) !important;
+    border-color: var(--accent) !important;
+}
+.btn-primary:hover {
+    background: var(--accent-hover) !important;
+    border-color: var(--accent-hover) !important;
+}
+.text-muted {
+    color: var(--text-muted) !important;
 }
 """

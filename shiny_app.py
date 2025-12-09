@@ -41,7 +41,16 @@ app_ui = ui.page_fluid(
         ui.nav_spacer(),
         ui.nav_control(ui.output_ui("nav_course_selector")),
         ui.nav_control(ui.output_ui("nav_user_profile")),
-        title=None, bg="white"
+        ui.nav_control(
+            ui.tags.button(
+                ui.HTML('<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg>'),
+                id="theme-toggle-btn",
+                class_="theme-toggle",
+                onclick="toggleTheme()",
+                title="Toggle theme"
+            )
+        ),
+        title=None
     ),
 
     # MAIN CONTENT
@@ -140,8 +149,8 @@ def server(input, output, session):
         return ui.div(
             # TOOLBAR
             ui.div(
-                ui.div(ui.output_ui("toolbar_selection_info"), class_="d-flex align-items-center"),
-                ui.div(ui.output_ui("toolbar_actions"), class_="ms-auto d-flex gap-2"),
+                ui.div(ui.output_ui("toolbar_selection_info"), class_="d-flex align-items-center flex-grow-1"),
+                ui.div(ui.output_ui("toolbar_actions"), class_="ms-auto d-flex gap-1"),
                 class_="toolbar"
             ),
             # CUSTOM TABLE
@@ -293,10 +302,7 @@ def server(input, output, session):
         if count == 0:
             return ui.span("No selection", class_="text-muted fst-italic")
         elif count == 1:
-            data = topics_list()
-            idx = indices[0]
-            if idx < len(data):
-                return ui.span(f"Selected: {data[idx]['Topic Name']}", style="font-weight: 600;")
+            return ui.span("1 topic selected", style="font-weight: 600; color: var(--primary-color);")
         return ui.span(f"{count} topics selected", style="font-weight: 600; color: var(--primary-color);")
 
     @output
@@ -378,14 +384,13 @@ def server(input, output, session):
             # Add topic section
             ui.div(
                 ui.input_numeric("add_count", None, value=1, min=1, width="60px"),
-                ui.input_action_button(
+            ui.input_action_button(
                     "act_add",
-                    "",
-                    icon=icon_svg("plus"),
+                    "+",
                     class_="toolbar-icon-btn toolbar-icon-btn-primary",
                     title="Add topic(s)"
                 ),
-                class_="d-flex gap-2 align-items-center"
+                class_="d-flex gap-1 align-items-center"
             ),
 
             # Divider
@@ -402,7 +407,7 @@ def server(input, output, session):
                     class_="toolbar-icon-btn",
                     title="Rename selected topic"
                 ),
-                class_="d-flex gap-2 align-items-center"
+                class_="d-flex gap-1 align-items-center"
             ),
 
             # Divider
@@ -426,7 +431,7 @@ def server(input, output, session):
                     class_="toolbar-icon-btn toolbar-icon-btn-danger",
                     title="Delete selected topic(s)"
                 ),
-                class_="d-flex gap-2 align-items-center"
+                class_="d-flex gap-1 align-items-center"
             ),
 
             # Divider
@@ -443,10 +448,10 @@ def server(input, output, session):
                     class_="toolbar-icon-btn toolbar-icon-btn-primary",
                     title="Apply selected action"
                 ),
-                class_="d-flex gap-2 align-items-center"
+                class_="d-flex gap-1 align-items-center"
             ),
 
-            class_="d-flex align-items-center gap-2"
+            class_="d-flex align-items-center gap-1"
         )
 
     # -------------------------------------------------------------------------
