@@ -2,29 +2,39 @@
 
 A unified tool for managing and extracting data from [Paatshala](https://paatshala.ictkerala.org) (ICT Academy of Kerala's Moodle LMS).
 
-**Current Architecture:**
-- 🎈 **Streamlit App** (`app.py`) — The primary dashboard for downloading tasks, quiz scores, and submissions.
-- 💎 **Shiny App** (`shiny_app.py`) — A high-performance, reactive interface for real-time analysis and data exploration.
+## Architecture
+
+| App | File | Purpose |
+|-----|------|---------|
+| 💎 **Shiny** | `shiny_app.py` | Topic & activity management with real-time UI |
+| 🎈 **Streamlit** | `app.py` | Data extraction (tasks, quizzes, submissions) |
 
 > [!NOTE]
-> The CLI (`paatshala.py`) and legacy monolithic GUI have been retired and moved to the `old/` directory.
+> The CLI (`paatshala.py`) and legacy GUIs have been retired to the `old/` directory.
 
 ## Features
 
-- **Dual Interface**: Choose between Streamlit for workflows or Shiny for reactive data exploration.
-- **Session Memory**: Remembers your course selection.
-- **Smart Fetching**: Auto-fetches dependencies (tasks before submissions).
-- **Parallel Processing**: Threaded requests for fast data extraction.
-- **Organized Output**: Data saved to `output/course_<id>/`.
+### Shiny App (Topic Management)
+- **Topic Operations**: Rename, move (drag-and-drop), delete, visibility toggle
+- **Batch Mode**: Queue multiple operations, preview changes, save all at once
+- **Activity Management**: View, reorder, duplicate, and delete activities within topics
+- **Access Restrictions**: Add/remove group restrictions, clear all restrictions
+- **Real-time UI**: Optimistic updates with immediate visual feedback
+- **Dark Mode**: Full dark theme support
+
+### Streamlit App (Data Extraction)
+- **Task Fetching**: Download all course tasks as CSV
+- **Quiz Scores**: Extract grade data for quizzes
+- **Submissions**: Bulk export student submissions
+- **Session Memory**: Remembers your course selection
+- **Parallel Processing**: Threaded requests for fast extraction
 
 ## Requirements
 
 - Python 3.8+
-- Dependencies listed in `requirements.txt`
+- Dependencies in `requirements.txt`
 
 ## Installation
-
-Ideally, run this project within a virtual environment.
 
 ```bash
 # Clone the repository
@@ -32,8 +42,9 @@ git clone https://github.com/yourusername/paatshala-tool.git
 cd paatshala-tool
 
 # Create and activate virtual environment
-python3 -m venv .venv
-source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+python -m venv venv
+venv\Scripts\activate  # Windows
+# source venv/bin/activate  # Linux/Mac
 
 # Install dependencies
 pip install -r requirements.txt
@@ -41,34 +52,36 @@ pip install -r requirements.txt
 
 ## Usage
 
-Ensure your virtual environment is activated before running the apps.
-
-### 1. Streamlit Dashboard (`app.py`)
-
-Best for standard workflows: Downloading tasks, fetching grades, and bulk exporting submissions.
-
-```bash
-streamlit run app.py
-```
-
-*Opens automatically at `http://localhost:8501`*
-
-### 2. Shiny Reactive App (`shiny_app.py`)
-
-Best for interactive analysis and fast responsiveness.
+### Shiny App (Recommended for Topic Management)
 
 ```bash
 shiny run shiny_app.py
 ```
+Opens at `http://localhost:8000`
 
-*Opens automatically at `http://localhost:8000`*
+**Development mode with auto-reload:**
+```bash
+shiny run shiny_app.py --reload
+```
+
+### Streamlit App (Data Extraction)
+
+```bash
+streamlit run app.py
+```
+Opens at `http://localhost:8501`
+
+> [!TIP]
+> **Disable Telemetry**: This project includes `.streamlit/config.toml` that disables Streamlit's usage statistics collection:
+> ```toml
+> [browser]
+> gatherUsageStats = false
+> ```
 
 ## Configuration
 
-The applications use a unified configuration system.
-
 ### First Run
-You will be prompted for credentials. You can optionally save them to a `.config` file or usage session cookies.
+You'll be prompted for credentials. Optionally save them to a `.config` file.
 
 ### Config File (`.config`)
 ```ini
@@ -78,18 +91,40 @@ username=your_username
 password=your_password
 ```
 
-## Output Structure
-
-All extracted data matches the following structure:
+## Project Structure
 
 ```
-output/
-└── course_<id>/
-    ├── tasks_<id>.csv
-    ├── quiz_scores_<id>.csv
-    └── submissions_<id>_mod<mod_id>.csv
+paatshala-main/
+├── app.py              # Streamlit app entry point
+├── shiny_app.py        # Shiny app entry point
+├── core/               # Core API and authentication
+│   ├── api.py          # Moodle API wrapper
+│   ├── auth.py         # Session management
+│   ├── parser.py       # HTML/data parsing
+│   └── persistence.py  # Local storage
+├── shiny_modules/      # Shiny UI components
+│   ├── ui/             # CSS, JS, layouts
+│   └── server/         # Server-side handlers
+├── streamlit_modules/  # Streamlit UI modules
+├── output/             # Extracted data
+│   └── course_<id>/    # Per-course exports
+└── old/                # Legacy tools (archived)
 ```
+
+## Output
+
+Extracted data is saved as:
+```
+output/course_<id>/
+├── tasks_<id>.csv
+├── quiz_scores_<id>.csv
+└── submissions_<id>_mod<mod_id>.csv
+```
+
+## Troubleshooting
+
+See [HOW_TO_RUN.md](HOW_TO_RUN.md) for detailed setup and troubleshooting.
 
 ## Legacy Tools
 
-The old CLI and Tkinter/Per-based GUIs are available in the `old/` directory for reference but are no longer maintained.
+The old CLI and Tkinter-based GUIs are in the `old/` directory for reference.

@@ -23,10 +23,8 @@ from core.auth import (
     login_and_get_cookie, validate_session, setup_session, attempt_auto_login
 )
 from core.api import (
-    get_courses, fetch_tasks_list, fetch_quiz_scores_all, get_quizzes, get_topics,
-    fetch_submissions, evaluate_submission, download_file, get_available_groups,
-    add_topic, delete_topic, toggle_topic_visibility, update_topic, rename_topic_inplace,
-    move_topic, enable_edit_mode
+    get_courses, fetch_tasks_list, fetch_quiz_scores_all, get_quizzes,
+    fetch_submissions, evaluate_submission, download_file, get_available_groups
 )
 from core.persistence import (
     read_config, write_config, clear_config,
@@ -35,8 +33,8 @@ from core.persistence import (
     load_csv_from_disk, save_csv_to_disk, dataframe_to_csv,
     OUTPUT_DIR, get_output_dir
 )
-from ui.styles import apply_custom_css
-from ui.components import show_data_status, show_fresh_status, format_timestamp
+from streamlit_modules.ui.styles import apply_custom_css
+from streamlit_modules.ui.components import show_data_status, show_fresh_status, format_timestamp
 
 # ============================================================================
 # PAGE CONFIG
@@ -70,11 +68,7 @@ def init_session_state():
         'submissions_data': None,
         'submissions_loaded_from_disk': False,
         'auto_login_attempted': False,
-        'auto_login_attempted': False,
         'selected_task_for_submissions': None,
-        'topics_data': None,
-        'topics_loaded_from_disk': False,
-        'action_queue': [],
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -209,10 +203,7 @@ def main():
                     st.session_state.selected_course = None
                     st.session_state.tasks_data = None
                     st.session_state.quiz_data = None
-                    st.session_state.tasks_data = None
-                    st.session_state.quiz_data = None
                     st.session_state.submissions_data = None
-                    st.session_state.topics_data = None
                     st.rerun()
             
             with col2:
@@ -304,8 +295,6 @@ def main():
                         st.session_state.quiz_loaded_from_disk = False
                         st.session_state.submissions_data = None
                         st.session_state.submissions_loaded_from_disk = False
-                        st.session_state.topics_data = None
-                        st.session_state.topics_loaded_from_disk = False
                         # Save to last session
                         save_last_session({
                             'course_id': new_course['id'],
@@ -368,295 +357,7 @@ def main():
     st.divider()
     
     # Tabs
-    tab_topics, tab1, tab2, tab3, tab4 = st.tabs(["📑 Topics", "📋 Tasks", "📊 Quiz Scores", "📝 Submissions", "🔍 Evaluation"])
-    
-    # -------------------------------------------------------------------------
-    # TAB: TOPICS
-    # -------------------------------------------------------------------------
-    with tab_topics:
-        st.subheader("Course Topics")
-        # Batch Execution UI
-        if st.session_state.action_queue:
-            q_len = len(st.session_state.action_queue)
-            st.warning(f"⚠️ You have {q_len} unsaved changes.")
-            
-            col_save, col_clear = st.columns([1, 4])
-            with col_save:
-                if st.button(f"💾 Save Changes ({q_len})", type="primary", use_container_width=True):
-                    progress_text = "Saving changes..."
-                    my_bar = st.progress(0, text=progress_text)
-                    
-                    success_count = 0
-                    failed = False
-                    
-                    for i, action in enumerate(st.session_state.action_queue):
-                        my_bar.progress((i + 1) / q_len, text=f"Executing action {i+1}/{q_len}: {action['type']}...")
-                        
-                        # Execute Action
-                        session = setup_session(st.session_state.session_id)
-                        ok = False
-                        
-                        try:
-                            if action['type'] == 'rename':
-                                logger.info(f"Renaming topic {action['db_id']} to '{action['name']}'...")
-                                ok = rename_topic_inplace(session, action['sesskey'], action['db_id'], action['name'])
-                            elif action['type'] == 'move':
-                                logger.info(f"Moving topic section {action['section_id']} to {action['target_id']}...")
-                                # Ensure edit mode for moves
-                                enable_edit_mode(session, course['id'], action['sesskey'])
-                                ok = move_topic(session, action['section_id'], action['sesskey'], course['id'], target_section_number=action['target_id'])
-                            elif action['type'] == 'delete':
-                                logger.info(f"Deleting topic in section {action.get('section_id', 'unknown')} (DB ID: {action['db_id']})...")
-                                # Ensure edit mode for deletes
-                                enable_edit_mode(session, course['id'], action['sesskey'])
-                                ok = delete_topic(session, action['db_id'], action['sesskey'])
-                        except Exception as e:
-                            st.error(f"Exception at action {i+1}: {e}")
-                            failed = True
-                            break
-                            
-                        if ok:
-                            success_count += 1
-                        else:
-                            st.error(f"Failed at action {i+1}: {action['type']}")
-                            failed = True
-                            break
-                    
-                    # my_bar.empty() # Keep it for debugging
-                    
-                    if failed:
-                        st.error(f"Stopped after {success_count} successful actions.")
-                        st.session_state.action_queue = st.session_state.action_queue[success_count:]
-                    else:
-                        st.success("All changes saved successfully!")
-                        st.session_state.action_queue = []
-                        
-                        # Refresh Data
-                        with st.spinner("Refreshing data..."):
-                            session = setup_session(st.session_state.session_id)
-                            rows = get_topics(session, course['id'])
-                            
-                            if rows:
-                                st.session_state.topics_data = rows
-                                save_csv_to_disk(course['id'], f"topics_{course['id']}.csv", rows)
-                                save_meta(course['id'], 'topics', len(rows))
-                            else:
-                                st.error("Changes saved, but failed to refresh topic list. Please reload manually.")
-                                
-                            st.rerun()
-            
-            with col_clear:
-                if st.button("❌ Discard Changes"):
-                    st.session_state.action_queue = []
-                    st.session_state.topics_data = None # Force reload
-                    st.rerun()
-                    st.session_state.topics_data = None # Force reload
-                    st.rerun()
-            
-            st.divider()
-        
-        # Try to load from disk if not loaded
-        if st.session_state.topics_data is None:
-            disk_data = load_csv_from_disk(course['id'], f"topics_{course['id']}.csv")
-            if disk_data:
-                st.session_state.topics_data = disk_data
-                st.session_state.topics_loaded_from_disk = True
-        
-        col1, col2 = st.columns([3, 1])
-        with col1:
-            if st.session_state.topics_loaded_from_disk and 'topics' in meta:
-                show_data_status(meta, 'topics', 'Topics')
-            elif st.session_state.topics_data:
-                show_fresh_status(len(st.session_state.topics_data))
-        
-        with col2:
-            fetch_topics = st.button(
-                "🔄 Refresh" if st.session_state.topics_data else "📥 Fetch",
-                key="fetch_topics",
-                use_container_width=True
-            )
-        
-        if fetch_topics:
-            with st.spinner("Fetching topics..."):
-                session = setup_session(st.session_state.session_id)
-                rows = get_topics(session, course['id'])
-                
-                if rows:
-                    st.session_state.topics_data = rows
-                    st.session_state.topics_loaded_from_disk = False
-                    
-                    # Save to disk
-                    save_csv_to_disk(course['id'], f"topics_{course['id']}.csv", rows)
-                    save_meta(course['id'], 'topics', len(rows))
-                    
-                    st.success(f"✓ Fetched {len(rows)} topics → Saved to `output/course_{course['id']}/`")
-                    time.sleep(0.5)
-                    st.rerun()
-                else:
-                    st.warning("No topics found")
-        
-        if st.session_state.topics_data:
-            # Table Header
-            h_col1, h_col2, h_col3, h_col4 = st.columns([0.6, 0.15, 0.1, 0.15])
-            with h_col1:
-                st.markdown("**Topic Name**")
-            with h_col2:
-                st.markdown("**Order**")
-            with h_col3:
-                st.markdown("**Visibility**")
-            with h_col4:
-                st.markdown("**Actions**")
-            
-            st.divider()
-
-            # Display topics as table rows
-            for i, row in enumerate(st.session_state.topics_data):
-                col1, col2, col3, col4 = st.columns([0.6, 0.15, 0.1, 0.15])
-                
-                with col1:
-                    # Editable Name
-                    new_name = st.text_input(
-                        "Topic Name",
-                        value=row['Topic Name'],
-                        key=f"topic_name_{i}",
-                        label_visibility="collapsed",
-                        placeholder="Topic Name"
-                    )
-                    
-                    if new_name != row['Topic Name']:
-                        if row.get('DB ID'):
-                            # Queue Rename
-                            st.session_state.action_queue.append({
-                                'type': 'rename',
-                                'db_id': row['DB ID'],
-                                'name': new_name,
-                                'sesskey': row.get('Sesskey')
-                            })
-                            
-                            # Local Update
-                            st.session_state.topics_data[i]['Topic Name'] = new_name
-                            save_csv_to_disk(course['id'], f"topics_{course['id']}.csv", st.session_state.topics_data)
-                            st.rerun()
-
-                with col2:
-                    # Order Buttons (Up/Down)
-                    c_up, c_down = st.columns(2)
-                    with c_up:
-                        if st.button("⬆️", key=f"up_{i}", help="Move Up", disabled=(i == 0)):
-                            if row.get('DB ID'):
-                                # Queue Move Up
-                                prev_row = st.session_state.topics_data[i-1]
-                                st.session_state.action_queue.append({
-                                    'type': 'move',
-                                    'section_id': row['Section ID'],
-                                    'target_id': prev_row['Section ID'],
-                                    'sesskey': row.get('Sesskey')
-                                })
-                                
-                                # Local Update (Swap)
-                                st.session_state.topics_data[i], st.session_state.topics_data[i-1] = st.session_state.topics_data[i-1], st.session_state.topics_data[i]
-                                
-                                # Re-index Section IDs (Crucial for subsequent moves)
-                                for idx, t in enumerate(st.session_state.topics_data):
-                                    t['Section ID'] = str(idx) # Assuming 0-based index matches Section ID
-                                    
-                                st.rerun()
-                    with c_down:
-                        if st.button("⬇️", key=f"down_{i}", help="Move Down", disabled=(i == len(st.session_state.topics_data) - 1)):
-                            if row.get('DB ID'):
-                                # Queue Move Down
-                                next_row = st.session_state.topics_data[i+1]
-                                st.session_state.action_queue.append({
-                                    'type': 'move',
-                                    'section_id': next_row['Section ID'], # We move the NEXT one BEFORE current
-                                    'target_id': row['Section ID'],
-                                    'sesskey': row.get('Sesskey')
-                                })
-                                
-                                # Local Update (Swap)
-                                st.session_state.topics_data[i], st.session_state.topics_data[i+1] = st.session_state.topics_data[i+1], st.session_state.topics_data[i]
-                                
-                                # Re-index Section IDs
-                                for idx, t in enumerate(st.session_state.topics_data):
-                                    t['Section ID'] = str(idx)
-                                    
-                                st.rerun()
-
-                with col3:
-                    is_visible = row.get('Visible', True)
-                    if st.button(
-                        "👁️" if is_visible else "🚫", 
-                        key=f"vis_{i}", 
-                        help="Toggle Visibility",
-                        type="secondary"
-                    ):
-                        session = setup_session(st.session_state.session_id)
-                        if toggle_topic_visibility(session, course['id'], row['Section ID'], row.get('Sesskey'), hide=is_visible):
-                            st.toast(f"Topic {'hidden' if is_visible else 'shown'}!")
-                            session = setup_session(st.session_state.session_id)
-                            rows = get_topics(session, course['id'])
-                            if rows:
-                                st.session_state.topics_data = rows
-                                save_csv_to_disk(course['id'], f"topics_{course['id']}.csv", rows)
-                                save_meta(course['id'], 'topics', len(rows))
-                            time.sleep(0.5)
-                            st.rerun()
-
-                with col4:
-                    if st.button("🗑️", key=f"del_{i}", help="Delete Topic"):
-                        if row.get('DB ID'):
-                            # Queue Delete
-                            st.session_state.action_queue.append({
-                                'type': 'delete',
-                                'db_id': row['DB ID'],
-                                'sesskey': row.get('Sesskey')
-                            })
-                            
-                            # Local Update (Remove)
-                            st.session_state.topics_data.pop(i)
-                            
-                            # Re-index Section IDs (Crucial for subsequent moves/deletes)
-                            for idx, t in enumerate(st.session_state.topics_data):
-                                t['Section ID'] = str(idx)
-                                
-                            save_csv_to_disk(course['id'], f"topics_{course['id']}.csv", st.session_state.topics_data)
-                            st.rerun()
-                
-                st.markdown("<hr style='margin: 0.5rem 0;'>", unsafe_allow_html=True)
-
-            st.divider()
-            
-            # Add Topic
-            if st.button("➕ Add New Topic"):
-                session = setup_session(st.session_state.session_id)
-                # We need a sesskey. Use the one from the first topic if available
-                sesskey = st.session_state.topics_data[0].get('Sesskey') if st.session_state.topics_data else None
-                
-                if sesskey:
-                    logger.info("Adding new topic...")
-                    if add_topic(session, course['id'], sesskey):
-                        st.success("Topic added!")
-                        session = setup_session(st.session_state.session_id)
-                        rows = get_topics(session, course['id'])
-                        if rows:
-                            st.session_state.topics_data = rows
-                            st.session_state.topics_loaded_from_disk = False
-                            save_csv_to_disk(course['id'], f"topics_{course['id']}.csv", rows)
-                            save_meta(course['id'], 'topics', len(rows))
-                        time.sleep(1)
-                        st.rerun()
-                    else:
-                        st.error("Failed to add topic")
-                else:
-                    st.error("Could not find session key. Please refresh topics first.")
-            
-            csv_data = convert_to_csv(st.session_state.topics_data)
-            st.download_button(
-                label="📥 Download CSV",
-                data=csv_data,
-                file_name=f"topics_{course['id']}.csv",
-                mime="text/csv"
-            )
+    tab1, tab2, tab3, tab4 = st.tabs(["📋 Tasks", "📊 Quiz Scores", "📝 Submissions", "🔍 Evaluation"])
     
     # -------------------------------------------------------------------------
     # TAB 1: TASKS

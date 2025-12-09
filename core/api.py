@@ -280,13 +280,8 @@ def get_topics(session, course_id, max_retries=3):
                 if act_link:
                     act_url = act_link.get("href", "")
                 
-                # Get visibility
-                act_visible = True
-                if "dimmed" in act_classes or "hidden" in act_classes:
-                    act_visible = False
-                dimmed_text = act.find(class_="dimmed_text")
-                if dimmed_text:
-                    act_visible = False
+                # Get visibility - check for "ishidden" class in availabilityinfo div
+                act_visible = act.find("div", class_=lambda c: c and "ishidden" in c) is None
                 
                 if act_id:
                     activity_list.append({
