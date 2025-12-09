@@ -276,3 +276,20 @@ def clear_cache(key=None):
     except Exception as e:
         print(f"Error clearing cache: {e}")
         return False
+
+
+def clear_output():
+    """
+    Clear entire output folder (all course data, CSVs, downloads).
+    WARNING: This is destructive!
+    """
+    import shutil
+    output_path = Path(OUTPUT_DIR)
+    
+    try:
+        if output_path.exists():
+            shutil.rmtree(output_path)
+        return True
+    except Exception as e:
+        print(f"Error clearing output: {e}")
+        return False

@@ -984,7 +984,12 @@ def fetch_quiz_scores_all(session_id, course_id, group_id=None, progress_callbac
     return quiz_names_ordered, rows
 
 def get_available_groups(session, module_id, activity_type='assign'):
-    """Get list of available groups for an assignment or quiz"""
+    """Get list of available groups for an assignment or quiz.
+    
+    Returns:
+        List of tuples: (group_id, group_name, member_count)
+        - member_count may be None if not available
+    """
     if activity_type == 'quiz':
         url = f"{BASE}/mod/quiz/report.php?id={module_id}&mode=overview"
     else:
@@ -1005,12 +1010,64 @@ def get_available_groups(session, module_id, activity_type='assign'):
         for option in group_select.find_all("option"):
             group_id = option.get("value", "")
             group_name = option.get_text(strip=True)
+            
+            # Try to extract member count from group name if it's in format "Name (N)"
+            # Otherwise we'll fetch it separately
+            member_count = None
             if group_id and group_name:
-                groups.append((group_id, group_name))
+                # Skip "All participants" or similar
+                if group_id == "0" or "all" in group_name.lower():
+                    continue
+                groups.append((group_id, group_name, member_count))
         
         return groups
     except:
         return []
+
+
+def get_group_member_counts(session, course_id, group_ids):
+    """Fetch member counts for a list of groups.
+    
+    Args:
+        session: Requests session
+        course_id: Course ID
+        group_ids: List of group IDs to fetch counts for
+    
+    Returns:
+        Dict mapping group_id to member_count
+    """
+    counts = {}
+    
+    # Use the course participants page with group filter to get count
+    for group_id in group_ids:
+        try:
+            url = f"{BASE}/user/index.php?id={course_id}&group={group_id}"
+            resp = session.get(url, timeout=15)
+            if resp.ok:
+                soup = BeautifulSoup(resp.text, "html.parser")
+                
+                # Look for participant count in page (usually in heading or info)
+                # Example: "Participants: 25" or "25 participants"
+                import re
+                
+                # Try to find the count in the page header or info
+                # Moodle usually shows "X participants" somewhere
+                page_text = soup.get_text()
+                
+                # Pattern: "X participants" or "participants: X"
+                match = re.search(r'(\d+)\s*participants?', page_text, re.IGNORECASE)
+                if match:
+                    counts[group_id] = int(match.group(1))
+                else:
+                    # Count table rows as fallback
+                    table = soup.find("table", {"id": "participants"})
+                    if table:
+                        rows = table.find_all("tr", class_=lambda c: c and "user" in str(c).lower())
+                        counts[group_id] = len(rows)
+        except:
+            pass
+    
+    return counts
 
 def fetch_submissions(session_id, module_id, group_id=None):
     """Fetch submissions for a specific task/module"""
@@ -1027,6 +1084,285 @@ def fetch_submissions(session_id, module_id, group_id=None):
         return parse_grading_table(resp.text)
     except:
         return []
+
+
+def get_workshops(session, course_id):
+    """Get list of workshop activities from course page"""
+    url = f"{BASE}/course/view.php?id={course_id}"
+    resp = session.get(url)
+    if not resp.ok:
+        return []
+    
+    soup = BeautifulSoup(resp.text, "html.parser")
+    items = soup.find_all("li", class_=lambda c: c and "modtype_workshop" in c)
+    
+    workshops = []
+    for item in items:
+        link = item.find("a", href=re.compile(r"mod/workshop/view\.php\?id=\d+"))
+        if not link:
+            link = item.find("a", href=re.compile(r"/mod/workshop/"))
+        if link:
+            name = link.get_text(strip=True)
+            href = link.get("href", "")
+            m = re.search(r"[?&]id=(\d+)", href)
+            module_id = m.group(1) if m else ""
+            if href.startswith("/"):
+                href = BASE + href
+            elif not href.startswith("http"):
+                href = BASE + "/" + href.lstrip("/")
+            workshops.append((name, module_id, href))
+    
+    return workshops
+
+
+def fetch_workshop_submissions(session_id, module_id, group_id=None):
+    """
+    Fetch workshop submissions data.
+    Returns a tuple: (phase_name, list of dicts with student info and grades)
+    
+    Workshop phases detected from table headers:
+    - Submission phase: Only Name + Submission columns (no grades)
+    - Assessment phase: Has Grades received/given columns (peer grades only)
+    - Grading Evaluation phase: Has Grade for submission/assessment columns (final grades)
+    """
+    session = setup_session(session_id)
+    
+    url = f"{BASE}/mod/workshop/view.php?id={module_id}"
+    if group_id:
+        url += f"&group={group_id}"
+    
+    try:
+        resp = session.get(url, timeout=60)
+        if not resp.ok:
+            logger.warning(f"Workshop fetch failed: {resp.status_code}")
+            return None, []
+        
+        soup = BeautifulSoup(resp.text, "html.parser")
+        
+        # Detect phase from the active phase indicator in the userplan
+        # The phase is indicated by dt elements with class like "phase10 active"
+        # phase10=Setup, phase20=Submission, phase30=Assessment, phase40=Grading Evaluation, phase50=Closed
+        phase = "Unknown"
+        phase_mapping = {
+            "phase10": "Setup",
+            "phase20": "Submission", 
+            "phase30": "Assessment",
+            "phase40": "Grading Evaluation",
+            "phase50": "Closed"
+        }
+        
+        # Look for the active phase indicator
+        active_phase_dt = soup.find("dt", class_="active")
+        if active_phase_dt:
+            dt_classes = active_phase_dt.get("class", [])
+            for cls in dt_classes:
+                if cls in phase_mapping:
+                    phase = phase_mapping[cls]
+                    break
+        
+        # Fallback: detect from h3 heading if no active indicator found
+        if phase == "Unknown":
+            phase_heading = soup.find("h3", id="mod_workshop-userplanheading")
+            if phase_heading:
+                heading_text = phase_heading.get_text(strip=True)
+                if "Setup" in heading_text:
+                    phase = "Setup"
+                elif "Submission" in heading_text:
+                    phase = "Submission"
+                elif "Assessment" in heading_text:
+                    phase = "Assessment"
+                elif "Grading" in heading_text or "Evaluation" in heading_text:
+                    phase = "Grading Evaluation"
+                elif "Closed" in heading_text:
+                    phase = "Closed"
+        
+        logger.info(f"Workshop phase detected: {phase}")
+        
+        # Find the grading report table
+        table = soup.find("table", class_="grading-report")
+        if not table:
+            logger.info("No grading-report table found")
+            return phase, []
+        
+        # Get tbody or use table directly
+        tbody = table.find("tbody")
+        if not tbody:
+            tbody = table
+        
+        # Group rows by student - the table uses rowspan, so we need to collect
+        # all rows belonging to each student (rows without participant cell belong to previous student)
+        all_trs = tbody.find_all("tr")
+        student_groups = []  # List of (first_tr, [all_trs_for_student])
+        current_group = None
+        
+        for tr in all_trs:
+            participant_cell = tr.find("td", class_="participant")
+            if participant_cell:
+                # Start a new student group
+                current_group = {"first_tr": tr, "all_trs": [tr]}
+                student_groups.append(current_group)
+            elif current_group:
+                # This row belongs to the current student (continuation row)
+                current_group["all_trs"].append(tr)
+        
+        rows = []
+        
+        for group in student_groups:
+            first_tr = group["first_tr"]
+            all_student_trs = group["all_trs"]
+            
+            # Extract student name from first row
+            participant_cell = first_tr.find("td", class_="participant")
+            name_span = participant_cell.find("span")
+            student_name = name_span.get_text(strip=True) if name_span else participant_cell.get_text(strip=True)
+            
+            row_data = {
+                "Student Name": student_name,
+                "Submission Title": "",
+                "Last Modified": "",
+                "Submission Grade": "-",
+                "Assessment Grade": "-",
+                "Phase": phase
+            }
+            
+            # Extract submission info from first row
+            submission_cell = first_tr.find("td", class_="submission")
+            if submission_cell:
+                title_link = submission_cell.find("a", class_="title")
+                if title_link:
+                    row_data["Submission Title"] = title_link.get_text(strip=True)
+                
+                info_div = submission_cell.find("div", class_="info")
+                if info_div and "No submission" in info_div.get_text():
+                    row_data["Submission Title"] = "No submission"
+                
+                lastmod_div = submission_cell.find("div", class_="lastmodified")
+                if lastmod_div:
+                    date_span = lastmod_div.find("span")
+                    if date_span:
+                        row_data["Last Modified"] = date_span.get_text(strip=True)
+            
+            # Extract grades based on phase
+            if phase in ("Grading Evaluation", "Closed"):
+                # Final grades are in dedicated cells (only in first row due to rowspan)
+                for td in first_tr.find_all("td"):
+                    td_classes = td.get("class", [])
+                    if "submissiongrade" in td_classes:
+                        grade_text = td.get_text(strip=True)
+                        if grade_text and grade_text != "-":
+                            row_data["Submission Grade"] = grade_text
+                    elif "gradinggrade" in td_classes:
+                        grade_text = td.get_text(strip=True)
+                        if grade_text and grade_text != "-":
+                            row_data["Assessment Grade"] = grade_text
+            
+            elif phase == "Assessment":
+                # Collect ALL peer grades from ALL rows belonging to this student
+                grades_received = []
+                grades_given = []
+                
+                for tr in all_student_trs:
+                    for td in tr.find_all("td"):
+                        td_classes = td.get("class", [])
+                        if "receivedgrade" in td_classes:
+                            grade_span = td.find("span", class_="grade")
+                            if grade_span:
+                                grade_text = grade_span.get_text(strip=True)
+                                if grade_text and grade_text != "-":
+                                    grades_received.append(grade_text)
+                        elif "givengrade" in td_classes:
+                            grade_span = td.find("span", class_="grade")
+                            if grade_span:
+                                grade_text = grade_span.get_text(strip=True)
+                                if grade_text and grade_text != "-":
+                                    grades_given.append(grade_text)
+                
+                if grades_received:
+                    row_data["Submission Grade"] = ", ".join(grades_received)
+                if grades_given:
+                    row_data["Assessment Grade"] = ", ".join(grades_given)
+            
+            rows.append(row_data)
+        
+        logger.info(f"Parsed {len(rows)} workshop submissions in {phase} phase")
+        return phase, rows
+        
+    except Exception as e:
+        logger.error(f"Error fetching workshop submissions: {e}")
+        return None, []
+
+
+# Workshop phase codes
+WORKSHOP_PHASES = {
+    "Setup": 10,
+    "Submission": 20,
+    "Assessment": 30,
+    "Grading Evaluation": 40,
+    "Closed": 50
+}
+
+WORKSHOP_PHASE_NAMES = {v: k for k, v in WORKSHOP_PHASES.items()}
+
+
+def switch_workshop_phase(session_id, module_id, phase_code):
+    """
+    Switch workshop to a different phase.
+    
+    Args:
+        session_id: Moodle session cookie
+        module_id: Workshop module ID (cmid)
+        phase_code: Phase number (10=Setup, 20=Submission, 30=Assessment, 40=Grading Evaluation, 50=Closed)
+    
+    Returns:
+        True if successful, False otherwise
+    """
+    session = setup_session(session_id)
+    
+    # First, get the sesskey from the workshop page
+    url = f"{BASE}/mod/workshop/view.php?id={module_id}"
+    try:
+        resp = session.get(url, timeout=30)
+        if not resp.ok:
+            logger.error(f"Failed to load workshop page: {resp.status_code}")
+            return False
+        
+        soup = BeautifulSoup(resp.text, "html.parser")
+        
+        # Extract sesskey
+        sesskey_input = soup.find("input", {"name": "sesskey"})
+        if not sesskey_input:
+            # Try from URL
+            import re
+            sesskey_match = re.search(r'sesskey=([a-zA-Z0-9]+)', resp.text)
+            if sesskey_match:
+                sesskey = sesskey_match.group(1)
+            else:
+                logger.error("Could not find sesskey")
+                return False
+        else:
+            sesskey = sesskey_input.get("value")
+        
+        # POST to switch phase
+        switch_url = f"{BASE}/mod/workshop/switchphase.php"
+        payload = {
+            "cmid": str(module_id),
+            "phase": str(phase_code),
+            "confirm": "1",
+            "sesskey": sesskey
+        }
+        
+        resp = session.post(switch_url, data=payload, timeout=30)
+        
+        if resp.ok:
+            logger.info(f"Successfully switched workshop {module_id} to phase {phase_code}")
+            return True
+        else:
+            logger.error(f"Failed to switch phase: {resp.status_code}")
+            return False
+            
+    except Exception as e:
+        logger.error(f"Error switching workshop phase: {e}")
+        return False
 
 def evaluate_submission(row):
     """Run link verification and GitHub checks for a submission row"""
