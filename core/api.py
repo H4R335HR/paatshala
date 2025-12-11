@@ -2118,3 +2118,304 @@ def get_topic_restriction(session, topic_id):
     except Exception as e:
         logger.error(f"Error fetching restriction: {e}")
         return None
+
+
+# ============================================================================
+# FEEDBACK MODULE FUNCTIONS
+# ============================================================================
+
+def get_feedbacks(session, course_id):
+    """
+    Get list of feedback activities from course page.
+    
+    Returns list of tuples: (name, module_id, url)
+    """
+    url = f"{BASE}/course/view.php?id={course_id}"
+    resp = session.get(url)
+    if not resp.ok:
+        return []
+    
+    soup = BeautifulSoup(resp.text, "html.parser")
+    
+    feedbacks = []
+    items = soup.find_all("li", class_=lambda c: c and "modtype_feedback" in c)
+    
+    for item in items:
+        link = item.find("a", href=re.compile(r"mod/feedback/view\.php\?id=\d+"))
+        if not link:
+            link = item.find("a", href=re.compile(r"/mod/feedback/"))
+        if link:
+            name = link.get_text(strip=True)
+            href = link.get("href", "")
+            m = re.search(r"[?&]id=(\d+)", href)
+            module_id = m.group(1) if m else ""
+            if href.startswith("/"):
+                href = BASE + href
+            elif not href.startswith("http"):
+                href = BASE + "/" + href.lstrip("/")
+            
+            feedbacks.append((name, module_id, href))
+    
+    return feedbacks
+
+
+def fetch_feedback_overview(session_id, module_id, group_id=None):
+    """
+    Fetch overview data from feedback view page.
+    
+    Returns dict with:
+    - name: Feedback name
+    - submitted_answers: Number of responses
+    - questions: Number of questions
+    - allow_from: Start date
+    - allow_until: End date (if available)
+    """
+    session = setup_session(session_id)
+    url = f"{BASE}/mod/feedback/view.php?id={module_id}"
+    if group_id:
+        url += f"&group={group_id}"
+    
+    try:
+        resp = session.get(url, timeout=30)
+        if not resp.ok:
+            return {}
+        
+        soup = BeautifulSoup(resp.text, "html.parser")
+        
+        overview = {
+            'name': '',
+            'submitted_answers': 0,
+            'questions': 0,
+            'allow_from': '',
+            'allow_until': ''
+        }
+        
+        # Get feedback name from h2
+        h2 = soup.find('h2')
+        if h2:
+            overview['name'] = h2.get_text(strip=True)
+        
+        # Parse overview section using feedback_info divs
+        # Structure: <div class="feedback_info"><span class="feedback_info">Label:</span><span class="feedback_info_value">Value</span></div>
+        info_divs = soup.find_all('div', class_='feedback_info')
+        
+        for div in info_divs:
+            label_span = div.find('span', class_='feedback_info')
+            value_span = div.find('span', class_='feedback_info_value')
+            
+            if label_span and value_span:
+                label = label_span.get_text(strip=True).lower()
+                value = value_span.get_text(strip=True)
+                
+                if 'submitted answers' in label:
+                    try:
+                        overview['submitted_answers'] = int(value)
+                    except ValueError:
+                        pass
+                elif 'questions' in label:
+                    try:
+                        overview['questions'] = int(value)
+                    except ValueError:
+                        pass
+                elif 'allow answers from' in label:
+                    overview['allow_from'] = value
+                elif 'allow answers to' in label:
+                    # Note: Moodle uses "Allow answers to" not "until"
+                    overview['allow_until'] = value
+        
+        return overview
+    except Exception as e:
+        logger.error(f"Error fetching feedback overview: {e}")
+        return {}
+
+
+def fetch_feedback_responses(session_id, module_id, group_id=None):
+    """
+    Fetch feedback responses from show_entries page.
+    
+    Returns tuple: (column_names, list of dicts with response data)
+    
+    The table has dynamic columns based on the feedback questions.
+    Standard columns: User picture (skipped), First name/Surname, Groups, Date
+    Dynamic columns: Question responses (classes like val12136, val12137, etc.)
+    """
+    session = setup_session(session_id)
+    url = f"{BASE}/mod/feedback/show_entries.php?id={module_id}"
+    if group_id:
+        url += f"&group={group_id}"
+    
+    try:
+        resp = session.get(url, timeout=60)
+        if not resp.ok:
+            return [], []
+        
+        soup = BeautifulSoup(resp.text, "html.parser")
+        
+        # Find the responses table
+        table = soup.find("table", id="showentrytable")
+        if not table:
+            table = soup.find("table", class_="generaltable")
+        
+        if not table:
+            logger.warning("No feedback responses table found")
+            return [], []
+        
+        # Parse headers to get column names
+        headers = []
+        header_row = table.find("thead")
+        if header_row:
+            for th in header_row.find_all("th"):
+                # Get the column class to identify column type
+                classes = th.get("class", [])
+                col_class = ""
+                for cls in classes:
+                    if cls.startswith("c") and cls[1:].isdigit():
+                        continue  # Skip position classes like c0, c1
+                    if cls != "header":
+                        col_class = cls
+                        break
+                
+                # Get header text (clean up sort links, etc.)
+                header_text = ""
+                # Try to get text from links first
+                link = th.find("a")
+                if link:
+                    header_text = link.get_text(strip=True)
+                else:
+                    header_text = th.get_text(strip=True)
+                
+                # Clean up hidden accessibility text
+                accesshide = th.find("span", class_="accesshide")
+                if accesshide:
+                    accesshide_text = accesshide.get_text()
+                    header_text = header_text.replace(accesshide_text, "").strip()
+                
+                # Skip userpic, deleteentry, and groups columns
+                if col_class in ("userpic", "deleteentry", "groups"):
+                    headers.append(None)  # Placeholder to keep index alignment
+                else:
+                    headers.append(header_text if header_text else col_class)
+        
+        # Parse data rows
+        rows = []
+        tbody = table.find("tbody")
+        if tbody:
+            for tr in tbody.find_all("tr"):
+                # Skip empty rows
+                if "emptyrow" in tr.get("class", []):
+                    continue
+                
+                row_data = {}
+                cells = tr.find_all("td")
+                
+                for i, td in enumerate(cells):
+                    if i >= len(headers):
+                        break
+                    
+                    header = headers[i]
+                    if header is None:  # Skip userpic/deleteentry columns
+                        continue
+                    
+                    # Get cell text
+                    cell_text = ""
+                    link = td.find("a")
+                    if link:
+                        cell_text = link.get_text(strip=True)
+                    else:
+                        cell_text = td.get_text(strip=True)
+                    
+                    row_data[header] = cell_text
+                
+                if row_data:  # Only add non-empty rows
+                    rows.append(row_data)
+        
+        # Get clean list of column names (excluding None placeholders)
+        column_names = [h for h in headers if h is not None]
+        
+        return column_names, rows
+    except Exception as e:
+        logger.error(f"Error fetching feedback responses: {e}")
+        return [], []
+
+
+def fetch_feedback_non_respondents(session_id, module_id, group_id=None):
+    """
+    Fetch list of users who haven't responded to the feedback.
+    
+    Returns list of dicts with user info (name, groups, etc.)
+    """
+    session = setup_session(session_id)
+    url = f"{BASE}/mod/feedback/show_nonrespondents.php?id={module_id}"
+    if group_id:
+        url += f"&group={group_id}"
+    
+    try:
+        resp = session.get(url, timeout=60)
+        if not resp.ok:
+            return []
+        
+        soup = BeautifulSoup(resp.text, "html.parser")
+        
+        # Find the non-respondents table
+        table = soup.find("table", class_="generaltable")
+        if not table:
+            # Check for "No users" message
+            page_text = soup.get_text()
+            if "no users" in page_text.lower() or "all users have responded" in page_text.lower():
+                return []
+            logger.warning("No non-respondents table found")
+            return []
+        
+        # Parse headers
+        headers = []
+        header_row = table.find("thead") or table.find("tr")
+        if header_row:
+            for th in header_row.find_all(["th", "td"]):
+                header_text = th.get_text(strip=True)
+                # Skip picture column
+                if "picture" in header_text.lower():
+                    headers.append(None)
+                else:
+                    headers.append(header_text)
+        
+        # Parse data rows
+        rows = []
+        tbody = table.find("tbody") or table
+        for tr in tbody.find_all("tr"):
+            # Skip header row if no thead
+            if tr.find("th"):
+                continue
+            
+            # Skip empty rows (Moodle uses emptyrow class for placeholder rows)
+            tr_classes = tr.get("class", [])
+            if "emptyrow" in tr_classes:
+                continue
+            
+            row_data = {}
+            cells = tr.find_all("td")
+            
+            for i, td in enumerate(cells):
+                if i >= len(headers):
+                    break
+                
+                header = headers[i]
+                if header is None:  # Skip picture column
+                    continue
+                
+                cell_text = ""
+                link = td.find("a")
+                if link:
+                    cell_text = link.get_text(strip=True)
+                else:
+                    cell_text = td.get_text(strip=True)
+                
+                row_data[header] = cell_text
+            
+            # Only add rows that have actual data (not just empty cells)
+            if row_data and any(v.strip() for v in row_data.values()):
+                rows.append(row_data)
+        
+        return rows
+    except Exception as e:
+        logger.error(f"Error fetching non-respondents: {e}")
+        return []

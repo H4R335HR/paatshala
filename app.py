@@ -31,7 +31,8 @@ from streamlit_modules.pages import (
     render_quiz_tab,
     render_submissions_tab,
     render_evaluation_tab,
-    render_workshop_tab
+    render_workshop_tab,
+    render_feedback_tab
 )
 
 # ============================================================================
@@ -315,7 +316,7 @@ def main():
     st.divider()
     
     # Tabs - now using modular page renderers
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(["📋 Tasks", "📊 Quiz Scores", "📝 Submissions", "🔍 Evaluation", "🔧 Workshops"])
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["📋 Tasks", "📊 Quiz Scores", "📝 Submissions", "🔍 Evaluation", "🔧 Workshops", "📣 Feedback"])
     
     with tab1:
         render_tasks_tab(course, meta)
@@ -331,6 +332,9 @@ def main():
     
     with tab5:
         render_workshop_tab(course, meta)
+    
+    with tab6:
+        render_feedback_tab(course, meta)
 
 
 if __name__ == "__main__":

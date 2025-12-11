@@ -30,6 +30,13 @@ def init_session_state():
         'workshops_loaded_from_disk': False,
         'workshop_submissions_data': None,
         'selected_workshop': None,
+        # Feedback tab state
+        'feedbacks_data': None,
+        'feedbacks_loaded_from_disk': False,
+        'feedback_responses_data': None,
+        'feedback_non_respondents_data': None,
+        'feedback_overview_data': None,
+        'selected_feedback': None,
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -67,6 +74,13 @@ def clear_course_data():
     st.session_state.workshops_loaded_from_disk = False
     st.session_state.workshop_submissions_data = None
     st.session_state.selected_workshop = None
+    # Feedback state
+    st.session_state.feedbacks_data = None
+    st.session_state.feedbacks_loaded_from_disk = False
+    st.session_state.feedback_responses_data = None
+    st.session_state.feedback_non_respondents_data = None
+    st.session_state.feedback_overview_data = None
+    st.session_state.selected_feedback = None
 
 
 def logout():
