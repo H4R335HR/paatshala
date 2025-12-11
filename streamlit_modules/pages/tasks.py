@@ -76,7 +76,7 @@ def render_tasks_tab(course, meta):
     if st.session_state.tasks_data:
         st.dataframe(
             st.session_state.tasks_data,
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
             column_config={
                 "URL": st.column_config.LinkColumn("URL", display_text="Open")

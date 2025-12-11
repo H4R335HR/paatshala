@@ -117,7 +117,7 @@ def render_quiz_tab(course, meta):
     if st.session_state.quiz_data:
         st.dataframe(
             st.session_state.quiz_data,
-            use_container_width=True,
+            width="stretch",
             hide_index=True
         )
         

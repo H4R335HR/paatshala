@@ -37,6 +37,8 @@ def init_session_state():
         'feedback_non_respondents_data': None,
         'feedback_overview_data': None,
         'selected_feedback': None,
+        # TryHackMe tab state
+        'tryhackme_data': None,
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -81,6 +83,8 @@ def clear_course_data():
     st.session_state.feedback_non_respondents_data = None
     st.session_state.feedback_overview_data = None
     st.session_state.selected_feedback = None
+    # TryHackMe state
+    st.session_state.tryhackme_data = None
 
 
 def logout():

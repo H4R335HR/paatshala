@@ -2419,3 +2419,110 @@ def fetch_feedback_non_respondents(session_id, module_id, group_id=None):
     except Exception as e:
         logger.error(f"Error fetching non-respondents: {e}")
         return []
+
+
+# =============================================================================
+# TryHackMe API Functions
+# =============================================================================
+
+def clean_name(name):
+    """
+    Remove batch suffix from participant names.
+    E.g., 'Jovan Jacob CL-SMP-CSA-14-NOV-2025-TVM' -> 'Jovan Jacob'
+    """
+    if not name:
+        return name
+    # Pattern: space followed by batch code starting with CL- or similar pattern
+    # Common patterns: CL-SMP-..., CL-FSD-..., etc.
+    import re
+    # Match pattern: space + uppercase letters + hyphen + more chars (batch code)
+    cleaned = re.sub(r'\s+[A-Z]{2,}-[A-Z]{2,}-.*$', '', name)
+    return cleaned.strip()
+
+
+def extract_thm_username(raw_value):
+    """
+    Extract TryHackMe username from URL or raw text.
+    
+    Handles:
+    - Full URLs: 'https://tryhackme.com/p/username' -> 'username'
+    - Direct username: 'username' -> 'username'
+    - URLs with extra paths: 'https://tryhackme.com/p/user/path' -> 'user'
+    """
+    if not raw_value:
+        return None
+    
+    value = raw_value.strip()
+    
+    # Handle URLs
+    if 'tryhackme.com' in value:
+        import re
+        # Match /p/username or /r/username pattern
+        match = re.search(r'tryhackme\.com/(?:p|r)/([a-zA-Z0-9._-]+)', value)
+        if match:
+            return match.group(1)
+        # Try to get last path segment if /p/ pattern not found
+        match = re.search(r'tryhackme\.com/([a-zA-Z0-9._-]+)/?$', value)
+        if match:
+            return match.group(1)
+    
+    # Direct username - just return as-is (remove any whitespace/special chars at edges)
+    # But validate it looks like a username (alphanumeric, dots, underscores, hyphens)
+    import re
+    if re.match(r'^[a-zA-Z0-9._-]+$', value):
+        return value
+    
+    return None
+
+
+def fetch_thm_user_data(username):
+    """
+    Fetch TryHackMe user data from public API.
+    
+    Returns dict with:
+    - username: The username
+    - completed_rooms: Number of completed rooms
+    - avatar: Avatar URL
+    - error: Error message if failed
+    """
+    if not username:
+        return {"username": username, "completed_rooms": 0, "avatar": None, "error": "No username"}
+    
+    result = {
+        "username": username,
+        "completed_rooms": 0,
+        "avatar": None,
+        "error": None
+    }
+    
+    try:
+        import requests
+        import time
+        
+        # Add small delay to avoid rate limiting
+        time.sleep(0.2)
+        
+        # Fetch completed rooms count
+        rooms_url = f"https://tryhackme.com/api/no-completed-rooms-public/{username}"
+        rooms_resp = requests.get(rooms_url, timeout=10)
+        if rooms_resp.ok:
+            try:
+                result["completed_rooms"] = int(rooms_resp.text.strip())
+            except ValueError:
+                result["completed_rooms"] = 0
+        
+        # Fetch user info (avatar)
+        user_url = f"https://tryhackme.com/api/discord/user/{username}"
+        user_resp = requests.get(user_url, timeout=10)
+        if user_resp.ok:
+            user_data = user_resp.json()
+            result["avatar"] = user_data.get("avatar", "")
+        
+    except requests.exceptions.Timeout:
+        result["error"] = "Timeout"
+    except requests.exceptions.RequestException as e:
+        result["error"] = str(e)
+    except Exception as e:
+        result["error"] = str(e)
+    
+    return result

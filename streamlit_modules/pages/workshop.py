@@ -342,7 +342,7 @@ def render_workshop_tab(course, meta):
         
         st.dataframe(
             display_data,
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
             column_config=column_config
         )

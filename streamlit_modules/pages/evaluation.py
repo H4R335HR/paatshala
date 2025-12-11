@@ -78,7 +78,7 @@ def render_evaluation_tab(course, meta):
                 # Real-time update
                 table_placeholder.dataframe(
                     get_display_dataframe(data),
-                    use_container_width=True,
+                    width="stretch",
                     column_config={
                         "Link": st.column_config.LinkColumn("Link"),
                         "Valid?": st.column_config.TextColumn("Valid?", width="small"),
@@ -125,7 +125,7 @@ def render_evaluation_tab(course, meta):
         
         event = st.dataframe(
             display_df,
-            use_container_width=True,
+            width="stretch",
             column_config=cols_config,
             on_select="rerun",
             selection_mode="single-row",

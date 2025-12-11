@@ -10,6 +10,7 @@ from core.api import (
     fetch_feedback_overview,
     fetch_feedback_responses,
     fetch_feedback_non_respondents,
+    clean_name,
     BASE
 )
 
@@ -169,6 +170,12 @@ def render_feedback_tab(course, meta):
                 # Create DataFrame
                 df = pd.DataFrame(rows)
                 
+                # Clean names - remove batch suffix from name columns
+                for col in df.columns:
+                    col_lower = col.lower()
+                    if 'first name' in col_lower or 'firstname' in col_lower or col_lower == 'name':
+                        df[col] = df[col].apply(clean_name)
+                
                 # Reorder columns if we have column info
                 if columns:
                     # Only keep columns that exist in the DataFrame
@@ -193,7 +200,7 @@ def render_feedback_tab(course, meta):
                         st.link_button("🔗 Open in Paatshala", feedback_url)
                 
                 # Display table
-                st.dataframe(df, use_container_width=True, hide_index=True)
+                st.dataframe(df, width="stretch", hide_index=True)
             else:
                 st.info("No responses found. Click 'Fetch Data' to load responses.")
         
@@ -224,7 +231,7 @@ def render_feedback_tab(course, meta):
                         st.link_button("🔗 Open in Paatshala", feedback_url)
                 
                 # Display table
-                st.dataframe(df, use_container_width=True, hide_index=True)
+                st.dataframe(df, width="stretch", hide_index=True)
             else:
                 st.info("No non-respondents found or all users have responded.")
     else:

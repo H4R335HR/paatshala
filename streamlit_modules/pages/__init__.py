@@ -9,6 +9,7 @@ from .submissions import render_submissions_tab
 from .evaluation import render_evaluation_tab
 from .workshop import render_workshop_tab
 from .feedback import render_feedback_tab
+from .tryhackme import render_tryhackme_tab
 
 __all__ = [
     'render_tasks_tab',
@@ -16,6 +17,7 @@ __all__ = [
     'render_submissions_tab',
     'render_evaluation_tab',
     'render_workshop_tab',
-    'render_feedback_tab'
+    'render_feedback_tab',
+    'render_tryhackme_tab'
 ]
 
