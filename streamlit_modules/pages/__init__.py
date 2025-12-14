@@ -10,6 +10,7 @@ from .evaluation import render_evaluation_tab
 from .workshop import render_workshop_tab
 from .feedback import render_feedback_tab
 from .tryhackme import render_tryhackme_tab
+from .quizizz import render_quizizz_tab
 
 __all__ = [
     'render_tasks_tab',
@@ -18,6 +19,7 @@ __all__ = [
     'render_evaluation_tab',
     'render_workshop_tab',
     'render_feedback_tab',
-    'render_tryhackme_tab'
+    'render_tryhackme_tab',
+    'render_quizizz_tab'
 ]
 

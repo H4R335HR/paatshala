@@ -39,6 +39,9 @@ def init_session_state():
         'selected_feedback': None,
         # TryHackMe tab state
         'tryhackme_data': None,
+        # Quizizz tab state
+        'quizizz_data': None,  # Combined data from all uploaded files
+        'quizizz_name_mappings': {},  # Manual name mappings {quizizz_name: moodle_name}
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -85,6 +88,9 @@ def clear_course_data():
     st.session_state.selected_feedback = None
     # TryHackMe state
     st.session_state.tryhackme_data = None
+    # Quizizz state
+    st.session_state.quizizz_data = None
+    st.session_state.quizizz_name_mappings = {}
 
 
 def logout():
