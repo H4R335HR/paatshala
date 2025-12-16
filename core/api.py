@@ -298,13 +298,20 @@ def get_topics(session, course_id, max_retries=3):
             if summary_node:
                 summary = summary_node.get_text(" ", strip=True)[:100] + "..." if len(summary_node.get_text(strip=True)) > 100 else summary_node.get_text(" ", strip=True)
             
-            # Extract restriction summary (look for availability info)
+            # Extract restriction summary (look for availability info at SECTION level only)
+            # We need to exclude availability info that belongs to activities inside the section
             restriction_summary = ""
-            availability_info = section.find(class_="availabilityinfo") or section.find(class_="availability-info")
-            if availability_info:
+            for availability_info in section.find_all(class_=lambda c: c and ("availabilityinfo" in c or "availability-info" in c)):
+                # Check if this availability info is inside an activity (nested) - if so, skip it
+                parent_activity = availability_info.find_parent(class_=lambda c: c and "activity" in c)
+                if parent_activity:
+                    continue  # This belongs to an activity, not the section
+                
+                # This is section-level availability info
                 restriction_summary = availability_info.get_text(" ", strip=True)[:150]
                 # Clean up common phrases
                 restriction_summary = restriction_summary.replace("Not available unless:", "").strip()
+                break  # Found section-level restriction, stop looking
     
             # Find the DB ID for editing (often in the edit link or inplace editable attributes)
             db_id = ""
@@ -2058,6 +2065,9 @@ def get_restriction_summary(json_str, grade_items_map=None):
     try:
         data = json.loads(json_str)
         if 'c' in data:
+            # Check if conditions array is empty - no actual restrictions
+            if not data['c']:
+                return []
             # Show the TOP-LEVEL operator
             top_op = data.get('op', '&')
             top_op_str = "Match ALL of:" if top_op == '&' else "Match ANY of:"
