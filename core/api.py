@@ -882,6 +882,262 @@ def fetch_tasks_list(session_id, course_id, progress_callback=None):
     
     return rows
 
+
+# =============================================================================
+# ASSIGNMENT DATE MANAGEMENT
+# =============================================================================
+
+def get_assignment_dates(session, module_id):
+    """
+    Fetch current assignment dates from modedit.php.
+    
+    Args:
+        session: Moodle session
+        module_id: Assignment module ID (cmid)
+    
+    Returns:
+        dict with:
+        - due_date: datetime or None
+        - cutoff_date: datetime or None
+        - allow_submissions_from: datetime or None
+        - due_date_enabled: bool
+        - cutoff_date_enabled: bool
+        - allow_submissions_enabled: bool
+        - form_data: dict with all form field values for resubmission
+        Returns None on error.
+    """
+    url = f"{BASE}/course/modedit.php"
+    params = {"update": module_id, "return": 1}
+    
+    try:
+        resp = session.get(url, params=params, timeout=30)
+        if not resp.ok:
+            logger.error(f"Failed to load modedit.php: {resp.status_code}")
+            return None
+        
+        soup = BeautifulSoup(resp.text, "html.parser")
+        
+        # Find the form - Moodle uses dynamically generated IDs like "mform1_ABC123"
+        # So we search by class "mform" and method "post"
+        form = soup.find("form", class_="mform", method="post")
+        if not form:
+            # Fallback: try finding any form with action containing modedit.php
+            form = soup.find("form", action=lambda a: a and "modedit.php" in a and "?" not in a)
+        if not form:
+            logger.error("Could not find modedit form")
+            return None
+        
+        # Helper function to extract date from Moodle's multi-field date selector
+        def extract_date(prefix):
+            """Extract datetime from Moodle's date fields"""
+            # Check if enabled - Moodle uses presence of 'checked' attribute
+            enabled_el = soup.find("input", {"name": f"{prefix}[enabled]"})
+            is_enabled = enabled_el and enabled_el.has_attr("checked")
+            
+            if not is_enabled:
+                return None, False
+            
+            day_el = soup.find("select", {"name": f"{prefix}[day]"})
+            month_el = soup.find("select", {"name": f"{prefix}[month]"})
+            year_el = soup.find("select", {"name": f"{prefix}[year]"})
+            hour_el = soup.find("select", {"name": f"{prefix}[hour]"})
+            minute_el = soup.find("select", {"name": f"{prefix}[minute]"})
+            
+            def get_selected_value(select_el):
+                if not select_el:
+                    return None
+                # HTML 'selected' is a boolean attribute - check for presence
+                selected = select_el.find("option", selected=lambda x: x is not None)
+                if not selected:
+                    # Fallback: look for 'selected' attribute with any value
+                    selected = select_el.find("option", attrs={"selected": True})
+                return selected.get("value") if selected else None
+            
+            day = get_selected_value(day_el)
+            month = get_selected_value(month_el)
+            year = get_selected_value(year_el)
+            hour = get_selected_value(hour_el)
+            minute = get_selected_value(minute_el)
+            
+            logger.debug(f"{prefix}: day={day}, month={month}, year={year}, hour={hour}, minute={minute}")
+            
+            if all([day, month, year, hour, minute]):
+                try:
+                    dt = datetime(int(year), int(month), int(day), int(hour), int(minute))
+                    return dt, True
+                except ValueError as e:
+                    logger.error(f"Error parsing date for {prefix}: {e}")
+                    return None, True
+            return None, True
+        
+        # Extract all dates
+        due_date, due_enabled = extract_date("duedate")
+        cutoff_date, cutoff_enabled = extract_date("cutoffdate")
+        allow_from, allow_enabled = extract_date("allowsubmissionsfromdate")
+        
+        # Extract all form fields for later resubmission
+        # IMPORTANT: Skip button/submit inputs - they would cause form to cancel!
+        form_data = {}
+        skip_types = {"submit", "button", "image", "reset"}
+        
+        for input_el in form.find_all(["input", "select", "textarea"]):
+            name = input_el.get("name")
+            if not name:
+                continue
+            
+            # Skip button-type inputs (submit, cancel, etc.)
+            input_type = input_el.get("type", "").lower()
+            if input_type in skip_types:
+                continue
+            
+            if input_el.name == "select":
+                # Find selected option - check for 'selected' attribute presence
+                selected = input_el.find("option", selected=lambda x: x is not None)
+                if not selected:
+                    selected = input_el.find("option", attrs={"selected": True})
+                form_data[name] = selected.get("value", "") if selected else ""
+            elif input_el.name == "textarea":
+                form_data[name] = input_el.get_text()
+            elif input_type == "checkbox":
+                # Only include checked checkboxes - use has_attr for proper detection
+                if input_el.has_attr("checked"):
+                    form_data[name] = input_el.get("value", "1")
+            elif input_type == "radio":
+                if input_el.has_attr("checked"):
+                    form_data[name] = input_el.get("value", "")
+            else:
+                form_data[name] = input_el.get("value", "")
+        
+        # Log key form fields for debugging
+        logger.debug(f"Form data keys: {list(form_data.keys())[:20]}...")
+        logger.debug(f"duedate fields: day={form_data.get('duedate[day]')}, month={form_data.get('duedate[month]')}, year={form_data.get('duedate[year]')}, enabled={form_data.get('duedate[enabled]')}")
+        
+        return {
+            "due_date": due_date,
+            "due_date_enabled": due_enabled,
+            "cutoff_date": cutoff_date,
+            "cutoff_date_enabled": cutoff_enabled,
+            "allow_submissions_from": allow_from,
+            "allow_submissions_enabled": allow_enabled,
+            "form_data": form_data
+        }
+        
+    except Exception as e:
+        logger.error(f"Error getting assignment dates: {e}")
+        return None
+
+
+def update_assignment_dates(session, module_id, 
+                            due_date=None, due_date_enabled=None,
+                            cutoff_date=None, cutoff_date_enabled=None):
+    """
+    Update assignment dates by POSTing to modedit.php.
+    
+    Args:
+        session: Moodle session
+        module_id: Assignment module ID
+        due_date: datetime object for new due date (or None to keep current)
+        due_date_enabled: bool to enable/disable (or None to keep current)
+        cutoff_date: datetime object for cut-off date (or None to keep current)
+        cutoff_date_enabled: bool to enable/disable (or None to keep current)
+    
+    Returns:
+        True on success, False on failure
+    """
+    # First, get current form data
+    current = get_assignment_dates(session, module_id)
+    if not current or "form_data" not in current:
+        logger.error("Could not get current assignment dates")
+        return False
+    
+    form_data = current["form_data"].copy()
+    
+    # Helper to set date fields
+    def set_date_fields(prefix, dt, enabled):
+        if enabled is not None:
+            if enabled:
+                form_data[f"{prefix}[enabled]"] = "1"
+            else:
+                # Remove the enabled field to disable
+                form_data.pop(f"{prefix}[enabled]", None)
+        
+        if dt is not None and (enabled is None or enabled):
+            form_data[f"{prefix}[day]"] = str(dt.day)
+            form_data[f"{prefix}[month]"] = str(dt.month)
+            form_data[f"{prefix}[year]"] = str(dt.year)
+            form_data[f"{prefix}[hour]"] = str(dt.hour)
+            form_data[f"{prefix}[minute]"] = str(dt.minute)
+    
+    # Apply changes
+    if due_date is not None or due_date_enabled is not None:
+        set_date_fields("duedate", due_date, due_date_enabled)
+    
+    if cutoff_date is not None or cutoff_date_enabled is not None:
+        set_date_fields("cutoffdate", cutoff_date, cutoff_date_enabled)
+    
+    # Ensure submit button is included
+    form_data["submitbutton"] = "Save and display"
+    
+    # Debug: Log what we're about to send for date fields
+    logger.info(f"Sending duedate: day={form_data.get('duedate[day]')}, month={form_data.get('duedate[month]')}, year={form_data.get('duedate[year]')}, enabled={form_data.get('duedate[enabled]')}")
+    logger.info(f"Sending cutoffdate: enabled={form_data.get('cutoffdate[enabled]')}")
+    
+    # Debug: Dump full POST data to file for comparison with Burp
+    try:
+        from pathlib import Path
+        debug_dir = Path("output")
+        debug_dir.mkdir(exist_ok=True)
+        debug_file = debug_dir / "debug_form_post.txt"
+        
+        # Build URL-encoded form body like Burp shows
+        from urllib.parse import urlencode
+        encoded_body = urlencode(form_data)
+        
+        with open(debug_file, 'w', encoding='utf-8') as f:
+            f.write("=== FORM DATA (sorted by key) ===\n\n")
+            for key in sorted(form_data.keys()):
+                f.write(f"{key} = {form_data[key]}\n")
+            f.write(f"\n\n=== URL ENCODED BODY ===\n\n{encoded_body}\n")
+        logger.info(f"Wrote debug form data to {debug_file}")
+    except Exception as e:
+        logger.warning(f"Could not write debug file: {e}")
+    
+    # POST the form
+    url = f"{BASE}/course/modedit.php"
+    
+    try:
+        logger.info(f"Updating assignment {module_id} dates")
+        resp = session.post(url, data=form_data, timeout=30)
+        
+        # Debug: Log response details
+        logger.info(f"Response status: {resp.status_code}, URL: {resp.url[:100]}")
+        
+        # Moodle typically redirects on success
+        if resp.ok:
+            # Check if we got redirected to the assignment page (success)
+            if "mod/assign/view.php" in resp.url or "course/view.php" in resp.url:
+                logger.info("Assignment dates updated successfully")
+                return True
+            # Check for error messages in response
+            if "error" in resp.text.lower() and "validat" in resp.text.lower():
+                logger.warning(f"Validation error in response")
+                # Try to extract error message
+                from bs4 import BeautifulSoup
+                soup = BeautifulSoup(resp.text, "html.parser")
+                error_el = soup.find(class_="alert-danger") or soup.find(class_="error")
+                if error_el:
+                    logger.error(f"Moodle error: {error_el.get_text(strip=True)[:200]}")
+                return False
+            return True
+        else:
+            logger.error(f"Failed to update assignment dates: {resp.status_code}")
+            return False
+            
+    except Exception as e:
+        logger.error(f"Error updating assignment dates: {e}")
+        return False
+
+
 def get_quizzes(session, course_id):
     """Get list of practice quizzes from course"""
     url = f"https://{PAATSHALA_HOST}/course/view.php?id={course_id}"

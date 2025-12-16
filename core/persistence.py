@@ -153,12 +153,16 @@ def save_csv_to_disk(course_id, filename, rows, fieldnames=None):
         return None
     
     if fieldnames is None:
-        # Collect all unique keys from all rows to ensure no data is lost
+        # Preserve column order from the first row, but ensure all keys are included
         # (e.g. if some rows have 'Eval_Link' and others don't)
-        all_keys = set()
-        for r in rows:
-            all_keys.update(r.keys())
-        fieldnames = sorted(list(all_keys))
+        # This keeps freshly fetched data order consistent with cached data
+        fieldnames = list(rows[0].keys())
+        seen = set(fieldnames)
+        for r in rows[1:]:
+            for key in r.keys():
+                if key not in seen:
+                    fieldnames.append(key)
+                    seen.add(key)
     
     try:
         with open(output_path, 'w', newline='', encoding='utf-8') as f:
