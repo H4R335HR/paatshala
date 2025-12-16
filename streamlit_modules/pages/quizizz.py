@@ -16,7 +16,11 @@ from pathlib import Path
 from datetime import datetime
 from rapidfuzz import fuzz, process
 
-from core.persistence import get_output_dir
+from core.persistence import get_output_dir, write_wayground_config
+from core.wayground import (
+    wayground_login, validate_wayground_session, attempt_wayground_auto_login,
+    get_available_reports, download_report
+)
 
 
 def get_quizizz_dir(course_id):
@@ -25,6 +29,16 @@ def get_quizizz_dir(course_id):
     quizizz_dir = output_dir / "quizizz"
     quizizz_dir.mkdir(parents=True, exist_ok=True)
     return quizizz_dir
+
+
+def init_wayground_session_state():
+    """Initialize wayground-related session state variables."""
+    if 'wayground_session' not in st.session_state:
+        st.session_state.wayground_session = None
+    if 'wayground_user' not in st.session_state:
+        st.session_state.wayground_user = None
+    if 'wayground_auto_login_attempted' not in st.session_state:
+        st.session_state.wayground_auto_login_attempted = False
 
 
 def get_name_mappings_file(course_id):
@@ -193,10 +207,9 @@ def render_quizizz_tab(course, meta):
     """Render the Quizizz tab content."""
     course_id = course.get('id')
     
-    st.markdown("### 📝 Quizizz Results")
-    st.caption("Upload and view quiz results from Quizizz/Wayground platform")
+    # Initialize session state
+    init_wayground_session_state()
     
-    # Load name mappings from disk
     if 'quizizz_name_mappings' not in st.session_state:
         st.session_state.quizizz_name_mappings = {}
     
@@ -204,73 +217,54 @@ def render_quizizz_tab(course, meta):
     if saved_mappings:
         st.session_state.quizizz_name_mappings.update(saved_mappings)
     
-    # =========================================================================
-    # File Upload Section
-    # =========================================================================
-    st.subheader("📤 Upload Quiz Results")
+    if 'quizizz_data' not in st.session_state:
+        st.session_state.quizizz_data = None
     
-    uploaded_files = st.file_uploader(
-        "Upload Quizizz Excel exports",
-        type=['xlsx'],
-        accept_multiple_files=True,
-        key="quizizz_uploader",
-        help="Select one or more .xlsx files exported from Quizizz/Wayground"
-    )
+    if 'wayground_reports' not in st.session_state:
+        st.session_state.wayground_reports = None
     
-    if uploaded_files:
-        quizizz_dir = get_quizizz_dir(course_id)
-        
-        for uploaded_file in uploaded_files:
-            target_path = quizizz_dir / uploaded_file.name
-            
-            # Check if already exists
-            if not target_path.exists():
-                with open(target_path, 'wb') as f:
-                    f.write(uploaded_file.getbuffer())
-                st.success(f"✓ Saved: {uploaded_file.name}")
-            else:
-                st.info(f"Already exists: {uploaded_file.name}")
-    
-    # =========================================================================
-    # Uploaded Files List
-    # =========================================================================
-    existing_files = load_uploaded_files(course_id)
-    
-    if existing_files:
-        st.divider()
-        st.subheader("📁 Uploaded Files")
-        
-        cols = st.columns([3, 1, 1])
-        cols[0].markdown("**File Name**")
-        cols[1].markdown("**Quiz Name**")
-        cols[2].markdown("**Action**")
-        
-        for file_path in existing_files:
-            cols = st.columns([3, 1, 1])
-            cols[0].text(file_path.name)
-            quiz_name = extract_quiz_name(file_path.name)
-            cols[1].text(quiz_name)
-            
-            if cols[2].button("🗑️", key=f"del_{file_path.name}", help="Delete file"):
-                file_path.unlink()
-                st.rerun()
-        
-        # Refresh data button
-        if st.button("🔄 Refresh Data", type="primary"):
-            st.session_state.quizizz_data = combine_quizizz_data(course_id)
+    # Auto-login attempt on first load (silent)
+    if not st.session_state.wayground_session and not st.session_state.wayground_auto_login_attempted:
+        st.session_state.wayground_auto_login_attempted = True
+        session, user_info = attempt_wayground_auto_login()
+        if session:
+            st.session_state.wayground_session = session
+            st.session_state.wayground_user = user_info
             st.rerun()
-        
-        # Load/refresh combined data
-        if st.session_state.quizizz_data is None:
-            st.session_state.quizizz_data = combine_quizizz_data(course_id)
     
     # =========================================================================
-    # Data Display Section
+    # Header with inconspicuous login status
+    # =========================================================================
+    col_title, col_status = st.columns([4, 2])
+    with col_title:
+        st.markdown("### 📝 Quizizz / Wayground")
+    with col_status:
+        if st.session_state.wayground_session:
+            user = st.session_state.wayground_user or {}
+            user_name = user.get('firstName', 'User')
+            col_name, col_logout = st.columns([3, 1])
+            with col_name:
+                st.caption(f"✓ {user_name}")
+            with col_logout:
+                if st.button("↪", key="wayground_logout", help="Logout from Wayground"):
+                    st.session_state.wayground_session = None
+                    st.session_state.wayground_user = None
+                    st.session_state.wayground_reports = None
+                    st.rerun()
+        else:
+            st.caption("Not logged in")
+    
+    # Load combined data on first load
+    existing_files = load_uploaded_files(course_id)
+    if existing_files and st.session_state.quizizz_data is None:
+        st.session_state.quizizz_data = combine_quizizz_data(course_id)
+    
+    # =========================================================================
+    # 1. Quiz Results Table (MAIN FEATURE - comes first)
     # =========================================================================
     if st.session_state.quizizz_data is not None and not st.session_state.quizizz_data.empty:
         df = st.session_state.quizizz_data.copy()
         
-        st.divider()
         st.subheader("📊 Quiz Results")
         
         # Create full name column
@@ -289,10 +283,8 @@ def render_quizizz_tab(course, meta):
             unique_students = df['Full Name'].nunique() if 'Full Name' in df.columns else 0
             st.metric("Students", unique_students)
         with col4:
-            # Handle accuracy - may be percentage strings like "90%"
             try:
                 if 'Accuracy' in df.columns:
-                    # Convert percentage strings to numeric
                     accuracy_series = df['Accuracy'].astype(str).str.replace('%', '', regex=False)
                     accuracy_numeric = pd.to_numeric(accuracy_series, errors='coerce')
                     avg_accuracy = accuracy_numeric.mean()
@@ -310,30 +302,22 @@ def render_quizizz_tab(course, meta):
             # ===== CONSOLIDATED VIEW =====
             st.caption("📊 **Consolidated Summary** - Aggregated results per student across all quizzes")
             
-            # Prepare numeric columns
             df_numeric = df.copy()
             
-            # Convert Accuracy to numeric (remove % sign)
             if 'Accuracy' in df_numeric.columns:
                 df_numeric['Accuracy_Num'] = pd.to_numeric(
                     df_numeric['Accuracy'].astype(str).str.replace('%', '', regex=False),
                     errors='coerce'
                 )
             
-            # Convert Score to numeric
             if 'Score' in df_numeric.columns:
                 df_numeric['Score_Num'] = pd.to_numeric(df_numeric['Score'], errors='coerce')
             
-            # Convert Correct/Incorrect to numeric
             for col in ['Correct', 'Incorrect']:
                 if col in df_numeric.columns:
                     df_numeric[f'{col}_Num'] = pd.to_numeric(df_numeric[col], errors='coerce')
             
-            # Group by student name and aggregate
-            agg_dict = {
-                'Quiz Name': 'count',  # Number of quizzes attempted
-            }
-            
+            agg_dict = {'Quiz Name': 'count'}
             if 'Score_Num' in df_numeric.columns:
                 agg_dict['Score_Num'] = 'sum'
             if 'Accuracy_Num' in df_numeric.columns:
@@ -345,7 +329,6 @@ def render_quizizz_tab(course, meta):
             
             consolidated = df_numeric.groupby('Full Name').agg(agg_dict).reset_index()
             
-            # Rename columns for display
             rename_map = {
                 'Quiz Name': 'Quizzes Taken',
                 'Score_Num': 'Total Score',
@@ -355,29 +338,22 @@ def render_quizizz_tab(course, meta):
             }
             consolidated = consolidated.rename(columns=rename_map)
             
-            # Format Accuracy with % sign
             if 'Avg Accuracy' in consolidated.columns:
                 consolidated['Avg Accuracy'] = consolidated['Avg Accuracy'].apply(
                     lambda x: f"{x:.1f}%" if pd.notna(x) else "N/A"
                 )
             
-            # Sort by Total Score descending
             if 'Total Score' in consolidated.columns:
                 consolidated = consolidated.sort_values('Total Score', ascending=False)
             
-            # Add rank
             consolidated.insert(0, 'Rank', range(1, len(consolidated) + 1))
             
-            st.dataframe(
-                consolidated,
-                width="stretch",
-                hide_index=True
-            )
+            st.dataframe(consolidated, width="stretch", hide_index=True)
             
-            # Download button
-            col1, col2 = st.columns([1, 4])
+            # Action buttons row
+            csv = consolidated.to_csv(index=False)
+            col1, col2, col3 = st.columns([1, 1, 4])
             with col1:
-                csv = consolidated.to_csv(index=False)
                 st.download_button(
                     label="📥 Download CSV",
                     data=csv,
@@ -385,27 +361,25 @@ def render_quizizz_tab(course, meta):
                     mime="text/csv",
                     key="download_quizizz_csv"
                 )
+            with col2:
+                if st.button("🔗 Name Matching", key="name_match_btn_consolidated"):
+                    st.session_state.show_name_matching = True
         else:
             # ===== INDIVIDUAL QUIZ VIEW =====
             display_df = df.copy()
             if selected_quiz != 'All':
                 display_df = df[df['Quiz Name'] == selected_quiz]
             
-            # Select columns to display
             display_cols = ['Quiz Name', 'Full Name', 'Score', 'Accuracy', 'Correct', 'Incorrect', 
                            'Total Time Taken', 'Started At']
             display_cols = [c for c in display_cols if c in display_df.columns]
             
-            st.dataframe(
-                display_df[display_cols],
-                width="stretch",
-                hide_index=True
-            )
+            st.dataframe(display_df[display_cols], width="stretch", hide_index=True)
             
-            # Download button
-            col1, col2 = st.columns([1, 4])
+            # Action buttons row
+            csv = display_df.to_csv(index=False)
+            col1, col2, col3 = st.columns([1, 1, 4])
             with col1:
-                csv = display_df.to_csv(index=False)
                 st.download_button(
                     label="📥 Download CSV",
                     data=csv,
@@ -413,33 +387,167 @@ def render_quizizz_tab(course, meta):
                     mime="text/csv",
                     key="download_quizizz_csv"
                 )
+            with col2:
+                if st.button("🔗 Name Matching", key="name_match_btn_individual"):
+                    st.session_state.show_name_matching = True
         
-        # =====================================================================
-        # Name Matching Section
-        # =====================================================================
         st.divider()
-        with st.expander("🔗 Name Matching (Fuzzy Match with Moodle Students)", expanded=False):
-            st.caption("Match Quizizz names to Moodle students for integrated reporting")
+    else:
+        st.info("📤 Upload or fetch Quizizz reports to view quiz results")
+    
+    # =========================================================================
+    # 2. Uploaded Files List
+    # =========================================================================
+    if existing_files:
+        with st.expander(f"📁 Uploaded Files ({len(existing_files)})", expanded=False):
+            for file_path in existing_files:
+                col1, col2 = st.columns([5, 1])
+                with col1:
+                    st.text(file_path.name)
+                with col2:
+                    if st.button("🗑️", key=f"del_{file_path.name}", help="Delete file"):
+                        file_path.unlink()
+                        st.session_state.quizizz_data = None
+                        st.rerun()
             
-            # Get unique Quizizz names
+            if st.button("🔄 Refresh Data"):
+                st.session_state.quizizz_data = combine_quizizz_data(course_id)
+                st.rerun()
+    
+    # =========================================================================
+    # 3. Wayground Fetch Reports Section
+    # =========================================================================
+    with st.expander("🌐 Wayground Reports", expanded=False):
+        if st.session_state.wayground_session:
+            col1, col2 = st.columns([1, 4])
+            with col1:
+                if st.button("🔄 Fetch", key="fetch_wg_reports"):
+                    with st.spinner("Fetching reports..."):
+                        reports = get_available_reports(st.session_state.wayground_session)
+                        st.session_state.wayground_reports = reports
+                        if not reports:
+                            st.warning("No reports found")
+                        st.rerun()
+            
+            if st.session_state.wayground_reports:
+                st.caption(f"Found {len(st.session_state.wayground_reports)} reports")
+                
+                quizizz_dir = get_quizizz_dir(course_id)
+                
+                for i, report in enumerate(st.session_state.wayground_reports):
+                    report_name = report.get('name', f'report_{i}')
+                    report_date = report.get('date', '')
+                    safe_name = "".join(c if c.isalnum() or c in '-_' else '_' for c in report_name)
+                    
+                    if report_date:
+                        local_path = quizizz_dir / f"{safe_name}_{report_date}.xlsx"
+                    else:
+                        local_path = quizizz_dir / f"{safe_name}.xlsx"
+                    
+                    col1, col2, col3 = st.columns([3, 1, 1])
+                    with col1:
+                        st.text(f"{report_name}" + (f" ({report_date})" if report_date else ""))
+                    with col2:
+                        if local_path.exists():
+                            st.caption("✓")
+                    with col3:
+                        if st.button("📥", key=f"dl_report_{i}", help="Download"):
+                            with st.spinner("Downloading..."):
+                                content, dl_filename = download_report(
+                                    st.session_state.wayground_session,
+                                    report['id'],
+                                    local_path
+                                )
+                                if content:
+                                    st.session_state.quizizz_data = None
+                                    st.rerun()
+                                else:
+                                    st.error("Download failed")
+        else:
+            # Login form (compact)
+            st.caption("Login to fetch reports from Wayground")
+            col1, col2 = st.columns(2)
+            with col1:
+                wg_email = st.text_input("Email", key="wg_email", placeholder="email@example.com")
+            with col2:
+                wg_password = st.text_input("Password", type="password", key="wg_password")
+            
+            col1, col2 = st.columns([1, 2])
+            with col1:
+                wg_remember = st.checkbox("Remember", value=True, key="wg_remember")
+            with col2:
+                if st.button("Login", key="wg_login_btn"):
+                    if wg_email and wg_password:
+                        with st.spinner("Logging in..."):
+                            session, user_info = wayground_login(wg_email, wg_password)
+                            if session:
+                                st.session_state.wayground_session = session
+                                st.session_state.wayground_user = user_info
+                                if wg_remember:
+                                    write_wayground_config(email=wg_email, password=wg_password)
+                                st.rerun()
+                            else:
+                                st.error("Login failed")
+                    else:
+                        st.warning("Enter credentials")
+    
+    # =========================================================================
+    # 4. Manual Upload Section (last)
+    # =========================================================================
+    with st.expander("📤 Upload Quiz Reports", expanded=False):
+        uploaded_files = st.file_uploader(
+            "Upload Quizizz Excel exports",
+            type=['xlsx'],
+            accept_multiple_files=True,
+            key="quizizz_uploader",
+            help="Select one or more .xlsx files exported from Quizizz/Wayground"
+        )
+        
+        if uploaded_files:
+            quizizz_dir = get_quizizz_dir(course_id)
+            
+            for uploaded_file in uploaded_files:
+                target_path = quizizz_dir / uploaded_file.name
+                
+                if not target_path.exists():
+                    with open(target_path, 'wb') as f:
+                        f.write(uploaded_file.getbuffer())
+                    st.success(f"✓ Saved: {uploaded_file.name}")
+                    st.session_state.quizizz_data = None  # Trigger refresh
+                else:
+                    st.info(f"Already exists: {uploaded_file.name}")
+    
+    # =========================================================================
+    # Name Matching Dialog (triggered by button)
+    # =========================================================================
+    if 'show_name_matching' not in st.session_state:
+        st.session_state.show_name_matching = False
+    
+    if st.session_state.show_name_matching and st.session_state.quizizz_data is not None:
+        df = st.session_state.quizizz_data.copy()
+        if 'First Name' in df.columns:
+            df['Full Name'] = df['First Name'].fillna('') + ' ' + df['Last Name'].fillna('')
+            df['Full Name'] = df['Full Name'].str.strip()
+        
+        @st.dialog("🔗 Name Matching")
+        def show_name_matching_dialog():
+            st.caption("Match Quizizz names to Moodle students")
+            
             quizizz_names = df['Full Name'].unique().tolist() if 'Full Name' in df.columns else []
             
-            # Try to get Moodle names from quiz data if available
             moodle_names = []
-            if st.session_state.quiz_data:
+            if 'quiz_data' in st.session_state and st.session_state.quiz_data:
                 quiz_df = pd.DataFrame(st.session_state.quiz_data)
                 if 'Student' in quiz_df.columns:
                     from core.api import clean_name
                     moodle_names = [clean_name(n) for n in quiz_df['Student'].unique().tolist()]
             
             if moodle_names:
-                st.info(f"Found {len(moodle_names)} students from Moodle quiz data for matching")
+                st.info(f"Found {len(moodle_names)} Moodle students")
                 
-                # Perform fuzzy matching
                 match_results = []
                 for qname in quizizz_names:
                     if qname in st.session_state.quizizz_name_mappings:
-                        # Already manually mapped
                         match_results.append({
                             'Quizizz Name': qname,
                             'Moodle Name': st.session_state.quizizz_name_mappings[qname],
@@ -456,28 +564,20 @@ def render_quizizz_tab(course, meta):
                         })
                 
                 match_df = pd.DataFrame(match_results)
-                
-                # Color-code by confidence
                 st.dataframe(
                     match_df,
                     width="stretch",
                     hide_index=True,
                     column_config={
                         'Confidence': st.column_config.ProgressColumn(
-                            "Confidence",
-                            min_value=0,
-                            max_value=100,
-                            format="%d%%"
+                            "Confidence", min_value=0, max_value=100, format="%d%%"
                         )
                     }
                 )
                 
-                # Manual mapping for low-confidence matches
                 low_confidence = match_df[match_df['Confidence'] < 80]
                 if not low_confidence.empty:
-                    st.subheader("📝 Manual Mapping")
-                    st.caption("Map low-confidence names manually:")
-                    
+                    st.caption("Manual mapping for low-confidence matches:")
                     for _, row in low_confidence.iterrows():
                         qname = row['Quizizz Name']
                         col1, col2 = st.columns([2, 3])
@@ -495,22 +595,12 @@ def render_quizizz_tab(course, meta):
                     
                     if st.button("💾 Save Mappings"):
                         save_name_mappings(course_id, st.session_state.quizizz_name_mappings)
-                        st.success("✓ Mappings saved!")
+                        st.success("✓ Saved!")
             else:
-                st.warning("No Moodle student data available. Fetch Quiz Scores first to enable name matching.")
-    
-    else:
-        st.info("👆 Upload Quizizz Excel files to view quiz results")
-        st.markdown("""
-        **How to export from Quizizz/Wayground:**
-        1. Open your quiz in Quizizz
-        2. Go to Reports
-        3. Click Export → Excel
-        4. Upload the downloaded file here
+                st.warning("Fetch Quiz Scores first to enable name matching")
+            
+            if st.button("Close"):
+                st.session_state.show_name_matching = False
+                st.rerun()
         
-        **Features:**
-        - View combined results from multiple quizzes
-        - Fuzzy name matching with Moodle students
-        - Manual mapping for unmatched names
-        - Download combined CSV
-        """)
+        show_name_matching_dialog()

@@ -89,6 +89,70 @@ def clear_config(config_path=CONFIG_FILE):
     except Exception:
         return False
 
+
+def read_wayground_config(config_path=CONFIG_FILE):
+    """Read Wayground email and password from config file"""
+    if not os.path.exists(config_path):
+        return None, None
+    
+    email, password = None, None
+    try:
+        with open(config_path, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
+                if '=' in line:
+                    key, value = line.split('=', 1)
+                    key = key.strip().lower()
+                    value = value.strip().strip('"').strip("'")
+                    if key == 'wayground_email':
+                        email = value
+                    elif key == 'wayground_password':
+                        password = value
+        return email, password
+    except Exception:
+        return None, None
+
+
+def write_wayground_config(config_path=CONFIG_FILE, email=None, password=None):
+    """Write Wayground credentials to config file"""
+    try:
+        lines = []
+        existing_keys = set()
+        
+        if os.path.exists(config_path):
+            with open(config_path, 'r') as f:
+                for line in f:
+                    line_stripped = line.strip()
+                    if not line_stripped or line_stripped.startswith('#'):
+                        lines.append(line)
+                        continue
+                    if '=' in line_stripped:
+                        key = line_stripped.split('=', 1)[0].strip().lower()
+                        existing_keys.add(key)
+                        # Skip if we're updating this key
+                        if email and key == 'wayground_email':
+                            continue
+                        if password and key == 'wayground_password':
+                            continue
+                        lines.append(line)
+                    else:
+                        lines.append(line)
+        
+        # Add wayground credentials
+        if email:
+            lines.append(f"wayground_email={email}\n")
+        if password:
+            lines.append(f"wayground_password={password}\n")
+        
+        with open(config_path, 'w') as f:
+            f.writelines(lines)
+        
+        return True
+    except Exception:
+        return False
+
 def load_last_session():
     """Load last session data"""
     if os.path.exists(LAST_SESSION_FILE):
