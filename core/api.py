@@ -1712,7 +1712,7 @@ def evaluate_submission(row):
         parts = url.rstrip('/').split('/')
         if len(parts) >= 5:
             owner = parts[-2]
-            repo = parts[-1]
+            repo = parts[-1].removesuffix('.git')  # Strip .git suffix for API compatibility
             api_url = f"https://api.github.com/repos/{owner}/{repo}"
             
             try:

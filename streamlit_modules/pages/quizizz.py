@@ -223,15 +223,6 @@ def render_quizizz_tab(course, meta):
     if 'wayground_reports' not in st.session_state:
         st.session_state.wayground_reports = None
     
-    # Auto-login attempt on first load (silent)
-    if not st.session_state.wayground_session and not st.session_state.wayground_auto_login_attempted:
-        st.session_state.wayground_auto_login_attempted = True
-        session, user_info = attempt_wayground_auto_login()
-        if session:
-            st.session_state.wayground_session = session
-            st.session_state.wayground_user = user_info
-            st.rerun()
-    
     # =========================================================================
     # Header with inconspicuous login status
     # =========================================================================
@@ -466,6 +457,22 @@ def render_quizizz_tab(course, meta):
         else:
             # Login form (compact)
             st.caption("Login to fetch reports from Wayground")
+            
+            # Quick login with saved credentials button
+            col_saved, col_or = st.columns([2, 1])
+            with col_saved:
+                if st.button("🔑 Use Saved Credentials", key="wg_auto_login_btn"):
+                    with st.spinner("Logging in..."):
+                        session, user_info = attempt_wayground_auto_login()
+                        if session:
+                            st.session_state.wayground_session = session
+                            st.session_state.wayground_user = user_info
+                            st.rerun()
+                        else:
+                            st.error("No saved credentials or login failed")
+            with col_or:
+                st.caption("or enter below")
+            
             col1, col2 = st.columns(2)
             with col1:
                 wg_email = st.text_input("Email", key="wg_email", placeholder="email@example.com")
