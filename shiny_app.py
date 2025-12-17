@@ -128,22 +128,25 @@ def server(input, output, session):
         """Show text input when 'Custom Course ID' is selected"""
         if input.course_id() != "__custom__":
             return None
-        return ui.div(
-            ui.input_text("custom_course_id_text", None, placeholder="Enter course ID...", width="120px"),
-            ui.input_action_button("load_custom_course", "Go", class_="btn-sm btn-primary"),
-            class_="d-flex align-items-center gap-1"
-        )
+        # Use raw HTML with JS onclick to read value and trigger action
+        return ui.HTML('''
+            <div class="custom-course-input">
+                <input type="text" id="custom_course_id_text" placeholder="Course ID" />
+                <button class="btn btn-primary"
+                        onclick="var val = document.getElementById('custom_course_id_text').value; Shiny.setInputValue('load_custom_course_id', val);">Go</button>
+            </div>
+        ''')
 
     @reactive.Effect
-    @reactive.event(input.load_custom_course)
+    @reactive.event(input.load_custom_course_id)
     def on_load_custom_course():
         """Load custom course when Go button is clicked"""
-        custom_id = input.custom_course_id_text()
-        if not custom_id or not custom_id.strip():
+        custom_id = input.load_custom_course_id()
+        if not custom_id or not str(custom_id).strip():
             ui.notification_show("Please enter a course ID", type="warning")
             return
         
-        custom_id = custom_id.strip()
+        custom_id = str(custom_id).strip()
         logger.info(f"Loading custom course ID: {custom_id}")
         
         # Add to courses list if not already present

@@ -430,4 +430,41 @@ body {
 .text-muted {
     color: var(--text-muted) !important;
 }
+
+/* ============================================================================
+   NAVBAR CUSTOM COURSE INPUT
+   ============================================================================ */
+/* Fix alignment of Shiny input wrappers in navbar */
+#nav_course_selector .shiny-input-container,
+#nav_course_selector .form-group {
+    margin-bottom: 0 !important;
+}
+#nav_course_selector > .d-flex {
+    align-items: center !important;
+}
+
+.custom-course-input {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+.custom-course-input input {
+    height: 38px;
+    width: 100px;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    padding: 0 10px;
+    background: var(--bg-secondary);
+    color: var(--text-primary);
+    font-size: 0.875rem;
+}
+.custom-course-input input:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-soft);
+}
+.custom-course-input button {
+    height: 38px;
+    padding: 0 16px;
+}
 """
