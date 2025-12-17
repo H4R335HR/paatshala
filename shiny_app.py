@@ -111,8 +111,52 @@ def server(input, output, session):
     @render.ui
     def nav_course_selector():
         if not user_authenticated(): return None
-        choices = {c['id']: c['name'] for c in available_courses()}
-        return ui.div(ui.input_select("course_id", None, choices=choices, width="300px"), style="margin-top: 10px;")
+        # Build choices with custom option at the top
+        choices = {"__custom__": "📝 Enter Course ID..."}
+        choices.update({str(c['id']): c['name'] for c in available_courses()})
+        
+        return ui.div(
+            ui.input_select("course_id", None, choices=choices, width="300px"),
+            ui.output_ui("custom_course_id_input"),
+            class_="d-flex align-items-center gap-2",
+            style="margin-top: 10px;"
+        )
+
+    @output
+    @render.ui
+    def custom_course_id_input():
+        """Show text input when 'Custom Course ID' is selected"""
+        if input.course_id() != "__custom__":
+            return None
+        return ui.div(
+            ui.input_text("custom_course_id_text", None, placeholder="Enter course ID...", width="120px"),
+            ui.input_action_button("load_custom_course", "Go", class_="btn-sm btn-primary"),
+            class_="d-flex align-items-center gap-1"
+        )
+
+    @reactive.Effect
+    @reactive.event(input.load_custom_course)
+    def on_load_custom_course():
+        """Load custom course when Go button is clicked"""
+        custom_id = input.custom_course_id_text()
+        if not custom_id or not custom_id.strip():
+            ui.notification_show("Please enter a course ID", type="warning")
+            return
+        
+        custom_id = custom_id.strip()
+        logger.info(f"Loading custom course ID: {custom_id}")
+        
+        # Add to courses list if not already present
+        current_courses = list(courses_data())
+        existing_ids = [str(c['id']) for c in current_courses]
+        
+        if custom_id not in existing_ids:
+            # Add as a placeholder course
+            current_courses.insert(0, {'id': custom_id, 'name': f"Course {custom_id}"})
+            courses_data.set(current_courses)
+        
+        # Update the dropdown to show the custom course
+        ui.update_select("course_id", selected=custom_id)
 
     @output
     @render.ui
