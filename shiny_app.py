@@ -111,9 +111,9 @@ def server(input, output, session):
     @render.ui
     def nav_course_selector():
         if not user_authenticated(): return None
-        # Build choices with custom option at the top
-        choices = {"__custom__": "📝 Enter Course ID..."}
-        choices.update({str(c['id']): c['name'] for c in available_courses()})
+        # Build choices with custom option at the bottom
+        choices = {str(c['id']): c['name'] for c in available_courses()}
+        choices["__custom__"] = "📝 Enter Course ID..."
         
         return ui.div(
             ui.input_select("course_id", None, choices=choices, width="300px"),
