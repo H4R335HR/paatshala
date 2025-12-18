@@ -26,16 +26,7 @@ from core.persistence import (
 )
 from streamlit_modules.ui.styles import apply_custom_css
 from streamlit_modules.session import init_session_state, clear_course_data
-from streamlit_modules.pages import (
-    render_tasks_tab,
-    render_quiz_tab,
-    render_submissions_tab,
-    render_evaluation_tab,
-    render_workshop_tab,
-    render_feedback_tab,
-    render_tryhackme_tab,
-    render_quizizz_tab
-)
+# Tab renderers are now lazy-loaded via tab_registry for better performance
 from streamlit_modules.pages.config import render_config_page
 
 # ============================================================================
@@ -258,6 +249,51 @@ def main():
                             })
                             st.rerun()
             
+            # Tab Manager (expandable dropdown with live updates)
+            st.divider()
+            from streamlit_modules.tab_registry import TAB_REGISTRY, get_all_tab_ids
+            from core.persistence import get_enabled_tabs, set_enabled_tabs
+            
+            enabled_tabs = get_enabled_tabs()
+            all_tab_ids = get_all_tab_ids()
+            
+            with st.expander(f"📑 Manage Tabs ({len(enabled_tabs)}/{len(all_tab_ids)})", expanded=False):
+                st.caption("Check/uncheck to show/hide tabs instantly")
+                
+                # Individual tab checkboxes with live updates
+                # IMPORTANT: Loop through enabled_tabs first to preserve order, then disabled tabs
+                new_enabled = []
+                
+                # First show enabled tabs in their current order
+                for tab_id in enabled_tabs:
+                    tab_info = TAB_REGISTRY[tab_id]
+                    is_enabled = st.checkbox(
+                        f"{tab_info['name']}",
+                        value=True,
+                        key=f"tab_toggle_{tab_id}",
+                        help=tab_info['description']
+                    )
+                    if is_enabled:
+                        new_enabled.append(tab_id)
+                
+                # Then show disabled tabs
+                for tab_id in all_tab_ids:
+                    if tab_id not in enabled_tabs:
+                        tab_info = TAB_REGISTRY[tab_id]
+                        is_enabled = st.checkbox(
+                            f"{tab_info['name']}",
+                            value=False,
+                            key=f"tab_toggle_{tab_id}",
+                            help=tab_info['description']
+                        )
+                        if is_enabled:
+                            new_enabled.append(tab_id)
+                
+                # Auto-save if changed
+                if new_enabled != enabled_tabs:
+                    set_enabled_tabs(new_enabled)
+                    st.rerun()
+            
             # Action buttons row (compact icons)
             st.divider()
             col1, col2, col3, col4 = st.columns(4)
@@ -331,32 +367,58 @@ def main():
     
     st.divider()
     
-    # Tabs - now using modular page renderers
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs(["📋 Tasks", "📊 Quiz Scores", "📝 Submissions", "🔍 Evaluation", "🔧 Workshops", "📣 Feedback", "🎯 TryHackMe", "📝 Quizizz"])
+    # Dynamic tabs based on configuration
+    from streamlit_modules.tab_registry import TAB_REGISTRY, get_tab_renderer
+    from core.persistence import get_enabled_tabs, set_enabled_tabs
     
-    with tab1:
-        render_tasks_tab(course, meta)
+    enabled_tab_ids = get_enabled_tabs()
     
-    with tab2:
-        render_quiz_tab(course, meta)
+    # Validate tab IDs against registry (preserves order from config)
+    # To reorder tabs, edit the order in .config file: enabled_tabs=evaluation,tasks,quiz,...
+    valid_tab_ids = [tid for tid in enabled_tab_ids if tid in TAB_REGISTRY]
     
-    with tab3:
-        render_submissions_tab(course, meta)
-    
-    with tab4:
-        render_evaluation_tab(course, meta)
-    
-    with tab5:
-        render_workshop_tab(course, meta)
-    
-    with tab6:
-        render_feedback_tab(course, meta)
-    
-    with tab7:
-        render_tryhackme_tab(course, meta)
-    
-    with tab8:
-        render_quizizz_tab(course, meta)
+    if not valid_tab_ids:
+        # No tabs enabled - show helpful message
+        st.info("📭 No tabs are currently enabled.")
+        st.markdown("""
+        **To enable tabs:**
+        1. Open the **📑 Manage Tabs** dropdown in the sidebar
+        2. Check the tabs you want to use
+        3. Tabs will appear instantly!
+        
+        Or use the quick actions below:
+        """)
+        
+        col1, col2, col3 = st.columns([1, 1, 2])
+        with col1:
+            if st.button("✨ Enable Default Tabs", type="primary"):
+                from streamlit_modules.tab_registry import DEFAULT_ENABLED_TABS
+                set_enabled_tabs(DEFAULT_ENABLED_TABS.copy())
+                st.rerun()
+        with col2:
+            if st.button("✅ Enable All Tabs"):
+                from streamlit_modules.tab_registry import get_all_tab_ids
+                set_enabled_tabs(get_all_tab_ids())
+                st.rerun()
+    else:
+        # Build tab names for enabled tabs
+        tab_names = [TAB_REGISTRY[tid]['name'] for tid in valid_tab_ids]
+        
+        # Create tabs dynamically
+        tabs = st.tabs(tab_names)
+        
+        # Render each tab with lazy loading
+        for i, tab_id in enumerate(valid_tab_ids):
+            with tabs[i]:
+                renderer = get_tab_renderer(tab_id)
+                if renderer:
+                    try:
+                        renderer(course, meta)
+                    except Exception as e:
+                        st.error(f"Error rendering tab: {e}")
+                        logger.error(f"Error in tab {tab_id}: {e}", exc_info=True)
+                else:
+                    st.error(f"Failed to load tab renderer for: {tab_id}")
 
 
 if __name__ == "__main__":

@@ -169,6 +169,70 @@ def render_config_page():
                 
                 col_idx += 1
     
+    # Tab Order Section
+    with st.expander("**📑 Tab Order**", expanded=False):
+        st.caption("Use ↑↓ arrows to reorder tabs")
+        
+        from streamlit_modules.tab_registry import TAB_REGISTRY, get_all_tab_ids
+        from core.persistence import get_enabled_tabs, set_enabled_tabs
+        
+        all_tab_ids = get_all_tab_ids()
+        current_enabled = get_enabled_tabs()
+        
+        # Initialize session state for tab order if not exists
+        if 'temp_tab_order' not in st.session_state:
+            st.session_state.temp_tab_order = current_enabled.copy()
+        
+        # Show current order with up/down buttons
+        for idx, tab_id in enumerate(st.session_state.temp_tab_order):
+            tab_info = TAB_REGISTRY.get(tab_id)
+            if not tab_info:
+                continue
+            
+            col1, col2, col3 = st.columns([4, 1, 1])
+            
+            with col1:
+                st.text(f"{idx + 1}. {tab_info['name']}")
+            
+            with col2:
+                # Up button (disabled if first)
+                if st.button("↑", key=f"up_{tab_id}", disabled=(idx == 0)):
+                    # Swap with previous
+                    st.session_state.temp_tab_order[idx], st.session_state.temp_tab_order[idx - 1] = \
+                        st.session_state.temp_tab_order[idx - 1], st.session_state.temp_tab_order[idx]
+                    st.rerun()
+            
+            with col3:
+                # Down button (disabled if last)
+                if st.button("↓", key=f"down_{tab_id}", disabled=(idx == len(st.session_state.temp_tab_order) - 1)):
+                    # Swap with next
+                    st.session_state.temp_tab_order[idx], st.session_state.temp_tab_order[idx + 1] = \
+                        st.session_state.temp_tab_order[idx + 1], st.session_state.temp_tab_order[idx]
+                    st.rerun()
+        
+        st.divider()
+        
+        # Save and Reset buttons
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            # Save button (only enabled if order changed)
+            order_changed = st.session_state.temp_tab_order != current_enabled
+            if st.button("💾 Save Tab Order", type="primary", disabled=not order_changed, use_container_width=True):
+                if set_enabled_tabs(st.session_state.temp_tab_order):
+                    # Clear the temp state so it reloads from config
+                    del st.session_state.temp_tab_order
+                    st.toast("✅ Tab order saved!", icon="✅")
+                    st.rerun()
+                else:
+                    st.error("❌ Failed to save tab order")
+        
+        with col2:
+            # Reset button
+            if st.button("🔄 Reset Order", disabled=not order_changed, use_container_width=True):
+                st.session_state.temp_tab_order = current_enabled.copy()
+                st.rerun()
+    
     st.divider()
     
     # Save button
@@ -223,4 +287,10 @@ def render_config_page():
         password=mypassword
         moodle_url=https://example.com
         ```
+        
+        ### Tab Management
+        
+        - **Enable/Disable Tabs**: Use the "📑 Manage Tabs" dropdown in the sidebar
+        - **Reorder Tabs**: Use the "📑 Tab Order" section above to set tab positions
+        - Changes are saved when you click "💾 Save Changes"
         """)

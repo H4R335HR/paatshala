@@ -90,7 +90,9 @@ def set_config(key, value):
             f.writelines(lines)
         
         return True
-    except Exception:
+    except Exception as e:
+        import logging
+        logging.error(f"Failed to set config {key}: {e}")
         return False
 
 
@@ -130,6 +132,47 @@ def get_config_keys():
         return list(config.keys())
     except Exception:
         return []
+
+
+def get_enabled_tabs():
+    """
+    Get list of enabled tab IDs from config.
+    Returns default tabs if not configured.
+    
+    Returns:
+        list: List of enabled tab IDs
+    """
+    tabs_str = get_config('enabled_tabs')
+    if not tabs_str:
+        # Return default tabs on first run
+        try:
+            from streamlit_modules.tab_registry import DEFAULT_ENABLED_TABS
+            return DEFAULT_ENABLED_TABS.copy()
+        except ImportError:
+            # Fallback if tab_registry not available
+            return ['tasks', 'quiz', 'submissions', 'evaluation']
+    
+    # Parse comma-separated list
+    tab_ids = [t.strip() for t in tabs_str.split(',') if t.strip()]
+    return tab_ids
+
+
+def set_enabled_tabs(tab_ids):
+    """
+    Save enabled tab IDs to config.
+    
+    Args:
+        tab_ids: List of tab IDs to enable (can be empty list)
+    
+    Returns:
+        bool: Success status
+    """
+    if not isinstance(tab_ids, list):
+        return False
+    
+    # Convert to comma-separated string
+    tabs_str = ','.join(tab_ids) if tab_ids else ''
+    return set_config('enabled_tabs', tabs_str)
 
 
 
