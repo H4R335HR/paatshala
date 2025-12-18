@@ -55,6 +55,42 @@ def parse_assign_view(html):
     due_date = mapped_status.get("due_date_status") or mapped_overview.get("due_date_overview") or ""
     time_remaining = mapped_status.get("time_remaining_status") or mapped_overview.get("time_remaining_overview") or ""
     
+    # Extract task description from intro div
+    description = ""
+    intro_div = soup.find("div", {"id": "intro"})
+    if intro_div:
+        # Get the inner content, preserving some structure
+        no_overflow = intro_div.find("div", class_="no-overflow")
+        content_div = no_overflow if no_overflow else intro_div
+        
+        # Convert lists to readable format
+        description_parts = []
+        for child in content_div.children:
+            if hasattr(child, 'name'):
+                if child.name in ['ol', 'ul']:
+                    for i, li in enumerate(child.find_all('li'), 1):
+                        li_text = li.get_text(" ", strip=True)
+                        if child.name == 'ol':
+                            description_parts.append(f"{i}. {li_text}")
+                        else:
+                            description_parts.append(f"• {li_text}")
+                elif child.name == 'p':
+                    p_text = child.get_text(" ", strip=True)
+                    if p_text:
+                        description_parts.append(p_text)
+                elif child.name in ['br']:
+                    pass  # Skip line breaks between elements
+                else:
+                    text = child.get_text(" ", strip=True)
+                    if text:
+                        description_parts.append(text)
+            elif hasattr(child, 'strip'):
+                text = child.strip()
+                if text:
+                    description_parts.append(text)
+        
+        description = "\n".join(description_parts)
+    
     return {
         "participants": mapped_overview.get("participants", ""),
         "drafts": mapped_overview.get("drafts", ""),
@@ -68,6 +104,7 @@ def parse_assign_view(html):
         "last_modified": mapped_status.get("last_modified", ""),
         "submission_comments": comments_count,
         "max_grade": max_grade,
+        "description": description,
     }
 
 def parse_grading_table(html):

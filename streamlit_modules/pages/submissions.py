@@ -75,6 +75,11 @@ def render_submissions_tab(course, meta):
         else:
             st.caption("💡 Select a group in the sidebar to filter results")
         
+        # Show task description if available
+        if selected_task and selected_task.get('description'):
+            with st.expander("📋 Task Description", expanded=False):
+                st.markdown(selected_task['description'])
+        
         # =========================================================================
         # DATE EDITING SECTION (Lazy loaded when user expands)
         # =========================================================================

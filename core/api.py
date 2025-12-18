@@ -866,6 +866,7 @@ def fetch_tasks_list(session_id, course_id, progress_callback=None):
                     "Participants": info.get("participants", ""),
                     "Submitted": info.get("submitted", ""),
                     "Needs Grading": info.get("needs_grading", ""),
+                    "description": info.get("description", ""),
                     "URL": returned_url
                 })
             except Exception as e:
@@ -1331,6 +1332,50 @@ def get_group_member_counts(session, course_id, group_ids):
             pass
     
     return counts
+
+
+def get_max_grade(session, module_id):
+    """
+    Fetch the maximum grade for an assignment from the grader page.
+    
+    Args:
+        session: Requests session
+        module_id: The assignment module ID
+    
+    Returns:
+        str: The max grade (e.g. "15") or "" if not found
+    """
+    # Fetch the grader page with action=grader
+    # We use a dummy user approach - the grader page will redirect or show the form
+    # even without a specific userid, we can still see the grade structure
+    url = f"{BASE}/mod/assign/view.php?id={module_id}&action=grader"
+    
+    try:
+        resp = session.get(url, timeout=30)
+        if not resp.ok:
+            return ""
+        
+        soup = BeautifulSoup(resp.text, "html.parser")
+        
+        # Look for the label "Grade out of X" in the grading form
+        # Pattern: <label ...>Grade out of 15</label>
+        for label in soup.find_all("label"):
+            text = label.get_text(strip=True)
+            match = re.search(r"Grade out of (\d+(?:\.\d+)?)", text, re.IGNORECASE)
+            if match:
+                return match.group(1)
+        
+        # Also check span elements (sometimes displayed as static text)
+        for span in soup.find_all("span"):
+            text = span.get_text(strip=True)
+            match = re.search(r"Grade out of (\d+(?:\.\d+)?)", text, re.IGNORECASE)
+            if match:
+                return match.group(1)
+        
+        return ""
+    except Exception as e:
+        logger.debug(f"Error fetching max grade for module {module_id}: {e}")
+        return ""
 
 def fetch_submissions(session_id, module_id, group_id=None):
     """Fetch submissions for a specific task/module"""

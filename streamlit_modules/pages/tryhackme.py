@@ -10,11 +10,13 @@ from bs4 import BeautifulSoup
 import re
 import json
 
-from core.persistence import get_output_dir
+from core.persistence import get_output_dir, get_config
 
 
-# Default API URL
-DEFAULT_THM_URL = "https://ictak.online/tryhackme.php"
+# Get API URL from config (with default fallback)
+def get_thm_url():
+    """Get TryHackMe tracker URL from config."""
+    return get_config('thm_base_url', 'https://ictak.online/tryhackme.php')
 
 
 def get_thm_cache_dir(course_id):
@@ -189,7 +191,7 @@ def render_tryhackme_tab(course, meta):
     
     # Initialize session state for TryHackMe settings
     if 'thm_base_url' not in st.session_state:
-        st.session_state.thm_base_url = DEFAULT_THM_URL
+        st.session_state.thm_base_url = get_thm_url()
     if 'thm_batch_name' not in st.session_state:
         st.session_state.thm_batch_name = ""
     if 'thm_leaderboard_data' not in st.session_state:
@@ -198,6 +200,8 @@ def render_tryhackme_tab(course, meta):
         st.session_state.thm_scoreboard_data = None
     if 'thm_batch_info' not in st.session_state:
         st.session_state.thm_batch_info = None
+    if 'thm_current_batch' not in st.session_state:
+        st.session_state.thm_current_batch = None  # Track which batch the data belongs to
     
     # Auto-detect batch name from selected group using smart extraction
     selected_group = st.session_state.get('selected_group')
@@ -211,18 +215,26 @@ def render_tryhackme_tab(course, meta):
     # Get course ID for persistence
     course_id = course.get('id')
     
-    # Load cached data on first load (if available and session state is empty)
-    if effective_batch and st.session_state.thm_leaderboard_data is None:
-        cached_leaderboard = load_thm_data(course_id, effective_batch, 'leaderboard')
-        cached_scoreboard = load_thm_data(course_id, effective_batch, 'scoreboard')
-        cached_batch_info = load_thm_data(course_id, effective_batch, 'batch_info')
+    # Check if batch has changed - if so, clear and reload data
+    if effective_batch != st.session_state.thm_current_batch:
+        # Batch changed - clear session data
+        st.session_state.thm_leaderboard_data = None
+        st.session_state.thm_scoreboard_data = None
+        st.session_state.thm_batch_info = None
+        st.session_state.thm_current_batch = effective_batch
         
-        if cached_leaderboard:
-            st.session_state.thm_leaderboard_data = cached_leaderboard
-        if cached_scoreboard:
-            st.session_state.thm_scoreboard_data = cached_scoreboard
-        if cached_batch_info:
-            st.session_state.thm_batch_info = cached_batch_info
+        # Try to load cached data for the new batch
+        if effective_batch:
+            cached_leaderboard = load_thm_data(course_id, effective_batch, 'leaderboard')
+            cached_scoreboard = load_thm_data(course_id, effective_batch, 'scoreboard')
+            cached_batch_info = load_thm_data(course_id, effective_batch, 'batch_info')
+            
+            if cached_leaderboard:
+                st.session_state.thm_leaderboard_data = cached_leaderboard
+            if cached_scoreboard:
+                st.session_state.thm_scoreboard_data = cached_scoreboard
+            if cached_batch_info:
+                st.session_state.thm_batch_info = cached_batch_info
     
     # =========================================================================
     # Action Buttons (at top)
@@ -254,10 +266,11 @@ def render_tryhackme_tab(course, meta):
             'Connection': 'keep-alive',
         }
         
-        # Fetch leaderboard (JSON API)
+        # Fetch leaderboard (JSON API with refresh action)
+        leaderboard_url = f"{base_url}?action=refresh&b={effective_batch}"
+        
         with st.spinner("Fetching leaderboard data..."):
             try:
-                leaderboard_url = f"{base_url}?action=refresh&b={effective_batch}"
                 response = requests.get(leaderboard_url, headers=headers, timeout=30)
                 response.raise_for_status()
                 
@@ -513,18 +526,6 @@ def render_leaderboard_section():
     
     df = pd.DataFrame(display_data)
     
-    # Download button
-    col1, col2 = st.columns([1, 4])
-    with col1:
-        csv = df.to_csv(index=False)
-        st.download_button(
-            label="📥 Download CSV",
-            data=csv,
-            file_name=f"tryhackme_leaderboard_{st.session_state.thm_batch_name}.csv",
-            mime="text/csv",
-            key="download_thm_leaderboard_csv"
-        )
-    
     # Display dataframe
     column_config = {
         "Rank": st.column_config.NumberColumn("🏅 Rank", width="small"),
@@ -543,6 +544,16 @@ def render_leaderboard_section():
         width="stretch",
         hide_index=True,
         column_config=column_config
+    )
+    
+    # Download button (below table)
+    csv = df.to_csv(index=False)
+    st.download_button(
+        label="📥 Download CSV",
+        data=csv,
+        file_name=f"tryhackme_leaderboard_{st.session_state.thm_batch_name}.csv",
+        mime="text/csv",
+        key="download_thm_leaderboard_csv"
     )
 
 
@@ -623,15 +634,15 @@ def render_scoreboard_section():
 def render_admin_panel(effective_batch):
     """Render the admin panel section for TryHackMe management"""
     
-    # Admin auth constants (matching PHP backend)
-    AUTH_PARAM = 'auth0r1ty'
-    AUTH_VALUE = 'l3tm3in'
-    CRON_SECRET = 'm0nd4ySn4p!'
+    # Admin auth constants from config (with defaults matching PHP backend)
+    AUTH_PARAM = get_config('thm_auth_param', 'auth0r1ty')
+    AUTH_VALUE = get_config('thm_auth_value', 'l3tm3in')
+    CRON_SECRET = get_config('thm_cron_secret', 'm0nd4ySn4p!')
     
     with st.expander("🔧 Admin Panel", expanded=False):
         st.caption("Manage TryHackMe leaderboard batches and snapshots")
         
-        base_url = st.session_state.get('thm_base_url', DEFAULT_THM_URL)
+        base_url = st.session_state.get('thm_base_url', get_thm_url())
         # Remove filename from URL if present to get base site URL
         site_url = base_url.rsplit('/', 1)[0] if '/tryhackme.php' in base_url else base_url
         

@@ -36,6 +36,7 @@ from streamlit_modules.pages import (
     render_tryhackme_tab,
     render_quizizz_tab
 )
+from streamlit_modules.pages.config import render_config_page
 
 # ============================================================================
 # PAGE CONFIG
@@ -259,7 +260,7 @@ def main():
             
             # Action buttons row (compact icons)
             st.divider()
-            col1, col2, col3 = st.columns(3)
+            col1, col2, col3, col4 = st.columns(4)
             with col1:
                 if st.button("🔄", help="Refresh courses", use_container_width=True):
                     with st.spinner("..."):
@@ -278,6 +279,10 @@ def main():
                 if st.button("📂", help="Clear output folder", use_container_width=True):
                     clear_output()
                     st.toast("Output folder cleared")
+            with col4:
+                if st.button("⚙️", help="Configuration", use_container_width=True):
+                    st.session_state.show_config_page = True
+                    st.rerun()
     
     # Main content area
     if not st.session_state.authenticated:
@@ -302,6 +307,15 @@ def main():
     
     if not st.session_state.courses:
         st.info("👈 Click 'Load Courses' in the sidebar to get started.")
+        return
+    
+    # Check if config page is requested
+    if st.session_state.get('show_config_page'):
+        # Back button
+        if st.button("← Back to Dashboard"):
+            st.session_state.show_config_page = False
+            st.rerun()
+        render_config_page()
         return
     
     if not st.session_state.selected_course:

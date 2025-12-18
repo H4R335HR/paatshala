@@ -3,11 +3,135 @@ import json
 import csv
 from pathlib import Path
 from datetime import datetime
+from dotenv import dotenv_values
 
 # Constants
 CONFIG_FILE = ".config"
 LAST_SESSION_FILE = ".last_session"
 OUTPUT_DIR = "output"
+
+# Keys that should be masked in UI (write-only display)
+SENSITIVE_KEYS = {
+    'password', 'cookie', 'wayground_password', 
+    'thm_auth_value', 'thm_cron_secret'
+}
+
+# =============================================================================
+# GENERIC CONFIG SYSTEM (using python-dotenv)
+# =============================================================================
+
+def get_config(key, default=None):
+    """
+    Get a config value from .config file.
+    
+    Args:
+        key: Config key (case-insensitive)
+        default: Default value if key not found
+    
+    Returns:
+        Config value or default
+    """
+    if not os.path.exists(CONFIG_FILE):
+        return default
+    
+    try:
+        config = dotenv_values(CONFIG_FILE)
+        # dotenv_values returns keys as-is, so we search case-insensitively
+        for k, v in config.items():
+            if k.lower() == key.lower():
+                return v if v else default
+        return default
+    except Exception:
+        return default
+
+
+def set_config(key, value):
+    """
+    Set a config value in .config file, preserving other values.
+    
+    Args:
+        key: Config key
+        value: Value to set (use None or empty string to delete)
+    
+    Returns:
+        bool: Success status
+    """
+    try:
+        lines = []
+        key_found = False
+        key_lower = key.lower()
+        
+        # Read existing file
+        if os.path.exists(CONFIG_FILE):
+            with open(CONFIG_FILE, 'r') as f:
+                for line in f:
+                    line_stripped = line.strip()
+                    # Preserve comments and empty lines
+                    if not line_stripped or line_stripped.startswith('#'):
+                        lines.append(line)
+                        continue
+                    
+                    if '=' in line_stripped:
+                        existing_key = line_stripped.split('=', 1)[0].strip()
+                        if existing_key.lower() == key_lower:
+                            key_found = True
+                            # Skip if deleting (None or empty)
+                            if value:
+                                lines.append(f"{key}={value}\n")
+                            continue
+                    lines.append(line)
+        
+        # Add new key if not found and value is provided
+        if not key_found and value:
+            lines.append(f"{key}={value}\n")
+        
+        # Write back
+        with open(CONFIG_FILE, 'w') as f:
+            f.writelines(lines)
+        
+        return True
+    except Exception:
+        return False
+
+
+def get_all_config(mask_sensitive=True):
+    """
+    Get all config values from .config file.
+    
+    Args:
+        mask_sensitive: If True, replace sensitive values with '••••••••'
+    
+    Returns:
+        dict: All config key-value pairs
+    """
+    if not os.path.exists(CONFIG_FILE):
+        return {}
+    
+    try:
+        config = dotenv_values(CONFIG_FILE)
+        result = {}
+        for key, value in config.items():
+            if mask_sensitive and key.lower() in SENSITIVE_KEYS and value:
+                result[key] = '••••••••'
+            else:
+                result[key] = value or ''
+        return result
+    except Exception:
+        return {}
+
+
+def get_config_keys():
+    """Get list of all config keys currently in .config file."""
+    if not os.path.exists(CONFIG_FILE):
+        return []
+    
+    try:
+        config = dotenv_values(CONFIG_FILE)
+        return list(config.keys())
+    except Exception:
+        return []
+
+
 
 def read_config(config_path=CONFIG_FILE):
     """Read cookie, username, and password from config file"""
