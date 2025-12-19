@@ -97,6 +97,14 @@ CONFIG_SCHEMA = {
             "default": "gemini-2.5-flash",
             "type": "text"
         }
+    },
+    "Google Drive": {
+        "google_drive_credentials": {
+            "label": "Credentials File Path",
+            "help": "Path to Google Drive service account JSON file (for Video Importer)",
+            "default": "",
+            "type": "text"
+        }
     }
 }
 

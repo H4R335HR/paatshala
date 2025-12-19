@@ -94,6 +94,9 @@ def register_activity_handlers(
 
                 activity_rows.append(f"""
                 <tr data-activity-id="{act_id}" data-activity-name="{escaped_name}" data-section-id="{section_id}" data-visible="{str(act_visible).lower()}">
+                    <td class="text-center">
+                        <input type="checkbox" class="activity-checkbox" data-activity-id="{act_id}" data-activity-name="{escaped_name}">
+                    </td>
                     <td class="text-center drag-handle" title="Drag to reorder">⋮⋮</td>
                     <td class="text-center">{type_icon}</td>
                     <td>{name_html}</td>
@@ -113,6 +116,9 @@ def register_activity_handlers(
             <table class="table table-sm table-hover">
                 <thead>
                     <tr>
+                        <th style="width: 30px;">
+                            <input type="checkbox" id="activity-select-all" title="Select All">
+                        </th>
                         <th style="width: 30px;"></th>
                         <th style="width: 40px;"></th>
                         <th>Activity Name</th>
@@ -160,8 +166,9 @@ def register_activity_handlers(
             size="l",
             easy_close=True,
             footer=ui.div(
-                ui.span("💡 Drag to reorder • Right-click to move • 📋 to duplicate", 
+                ui.span("💡 Drag to reorder • Right-click to move", 
                         class_="text-muted small", style="margin-right: auto;"),
+                ui.HTML('<button id="btn-batch-delete" class="btn btn-outline-danger btn-sm" disabled style="margin-right: 8px;">🗑️ Delete (0)</button>'),
                 ui.input_action_button("close_activities_modal", "Close", class_="btn-secondary"),
                 class_="d-flex align-items-center w-100"
             )
@@ -450,4 +457,54 @@ def register_activity_handlers(
                 </script>"""),
                 selector="body"
             )
+
+    @reactive.Effect
+    @reactive.event(input.activity_batch_delete)
+    def on_activity_batch_delete():
+        """Handle batch deleting multiple activities"""
+        evt = input.activity_batch_delete()
+        if not evt: return
+        
+        activities = evt.get('activities', [])
+        if not activities:
+            return
+        
+        s = setup_session(user_session_id())
+        cid = input.course_id()
+        
+        # Get fresh sesskey (cached one may be stale)
+        sesskey = get_fresh_sesskey(s, cid)
+        if not sesskey:
+            ui.notification_show("❌ Could not get session key", type="error")
+            return
+        
+        ensure_edit_mode(s, cid, sesskey)
+        
+        total = len(activities)
+        success_count = 0
+        
+        ui.notification_show(f"Deleting {total} activities...", duration=2)
+        
+        for act in activities:
+            activity_id = act.get('id')
+            if not activity_id:
+                continue
+            
+            success = delete_activity(s, activity_id, sesskey)
+            if success:
+                success_count += 1
+        
+        if success_count == total:
+            ui.notification_show(f"✅ Deleted {success_count} activities", type="message")
+        elif success_count > 0:
+            ui.notification_show(f"⚠️ Deleted {success_count}/{total} activities", type="warning")
+        else:
+            ui.notification_show(f"❌ Failed to delete activities", type="error")
+        
+        # Refresh topics
+        new_topics = get_topics(s, cid)
+        topics_list.set(new_topics)
+        
+        # Close modal
+        ui.modal_remove()
 

@@ -819,6 +819,282 @@ def update_topic(session, db_id, name, summary=""):
     resp = session.post(post_url, data=data)
     return resp.ok
 
+# Cache for module IDs to avoid repeated lookups
+_module_id_cache = {}
+
+def get_module_id(session, course_id, module_name='page'):
+    """
+    Get the module ID for a given module type using Moodle's web service API.
+    
+    Args:
+        session: Requests session
+        course_id: The course ID
+        module_name: The module name (e.g., 'page', 'assign', 'quiz')
+    
+    Returns:
+        str: Module ID or '15' as fallback
+    """
+    # Check cache first
+    cache_key = f"{course_id}_{module_name}"
+    if cache_key in _module_id_cache:
+        return _module_id_cache[cache_key]
+    
+    try:
+        # Try method 1: Use Moodle's web service to get module list
+        # This is the most reliable method
+        url = f"{BASE}/lib/ajax/service.php"
+        params = {
+            'info': 'core_course_get_course_module_info'
+        }
+        
+        # First, try to get the list of available modules from the course
+        # We'll make a request to the course page in edit mode to see available modules
+        course_url = f"{BASE}/course/view.php"
+        course_params = {'id': course_id}
+        
+        resp = session.get(course_url, params=course_params, timeout=30)
+        
+        if resp.ok:
+            soup = BeautifulSoup(resp.text, 'html.parser')
+            
+            # Method 1: Look for module chooser data in JavaScript
+            # Moodle often includes module information in data attributes or JS
+            scripts = soup.find_all('script')
+            for script in scripts:
+                if script.string and 'modules' in script.string.lower():
+                    # Look for module definitions in format like: {"name":"page","id":15}
+                    # or similar patterns
+                    match = re.search(rf'["\']name["\']\s*:\s*["\']page["\']\s*,\s*["\'](?:module)?id["\']\s*:\s*(\d+)', script.string, re.IGNORECASE)
+                    if match:
+                        module_id = match.group(1)
+                        logger.info(f"Found module ID {module_id} for '{module_name}' in JavaScript")
+                        _module_id_cache[cache_key] = module_id
+                        return module_id
+                    
+                    # Alternative pattern: {"page":15} or similar
+                    match = re.search(rf'["\']page["\']\s*:\s*(\d+)', script.string)
+                    if match:
+                        module_id = match.group(1)
+                        logger.info(f"Found module ID {module_id} for '{module_name}' in JavaScript (pattern 2)")
+                        _module_id_cache[cache_key] = module_id
+                        return module_id
+            
+            # Method 2: Look in the activity chooser modal/data
+            # Find elements with data-internal or data-modulename attributes
+            module_links = soup.find_all(attrs={'data-modulename': module_name})
+            if module_links:
+                # Check for data-moduleid or similar
+                for link in module_links:
+                    if link.get('data-moduleid'):
+                        module_id = link.get('data-moduleid')
+                        logger.info(f"Found module ID {module_id} for '{module_name}' in data attribute")
+                        _module_id_cache[cache_key] = module_id
+                        return module_id
+            
+            # Method 3: Parse the activity chooser if it exists
+            # Look for the module in the chooser
+            chooser = soup.find('div', class_=re.compile(r'chooser|activity-chooser'))
+            if chooser:
+                page_option = chooser.find(attrs={'data-internal': re.compile(module_name)})
+                if page_option:
+                    # Try to extract module ID from the data-internal or href
+                    data_internal = page_option.get('data-internal', '')
+                    match = re.search(r'module[=/](\d+)', data_internal)
+                    if match:
+                        module_id = match.group(1)
+                        logger.info(f"Found module ID {module_id} for '{module_name}' in chooser")
+                        _module_id_cache[cache_key] = module_id
+                        return module_id
+            
+            # Method 4: Try to find it in any modedit.php links
+            all_links = soup.find_all('a', href=re.compile(r'modedit\.php'))
+            for link in all_links:
+                href = link.get('href', '')
+                if f'add={module_name}' in href:
+                    # Check if module ID is in the URL
+                    match = re.search(r'[?&]module=(\d+)', href)
+                    if match:
+                        module_id = match.group(1)
+                        logger.info(f"Found module ID {module_id} for '{module_name}' in modedit link")
+                        _module_id_cache[cache_key] = module_id
+                        return module_id
+        
+        # If all methods fail, use the default
+        logger.warning(f"Could not find module ID for '{module_name}', using default 15")
+        _module_id_cache[cache_key] = '15'
+        return '15'
+        
+    except Exception as e:
+        logger.error(f"Error getting module ID: {e}")
+        _module_id_cache[cache_key] = '15'
+        return '15'
+
+def add_page_with_embed(session, course_id, section_id, sesskey, page_name, embed_html, visible=True, description=None):
+
+    """
+    Add a new page resource with embedded content to a course section.
+    Fetches the actual form first to ensure all required fields are included.
+    
+    Args:
+        session: Requests session
+        course_id: The course ID
+        section_id: The section ID (visible section number)
+        sesskey: Session key
+        page_name: Display name for the page
+        embed_html: HTML content to embed (e.g., iframe code)
+        visible: Whether the page should be visible (default: True)
+        description: Optional description text for the page intro (defaults to page_name)
+    
+    Returns:
+        bool: Success status
+    """
+    logger.info(f"Adding page '{page_name}' to course {course_id}, section {section_id}")
+    
+    # Step 1: GET the form to extract all required fields
+    get_url = f"{BASE}/course/modedit.php"
+    get_params = {
+        'add': 'page',
+        'course': course_id,
+        'section': section_id,
+        'return': 0,
+        'sr': 0
+    }
+    
+    try:
+        logger.info("Fetching page creation form...")
+        get_resp = session.get(get_url, params=get_params, timeout=30)
+        
+        if not get_resp.ok:
+            logger.error(f"Failed to fetch form: HTTP {get_resp.status_code}")
+            return False
+        
+        # Parse the form
+        soup = BeautifulSoup(get_resp.text, 'html.parser')
+        form = soup.find('form', class_='mform')
+        
+        if not form:
+            logger.error("Could not find mform in response")
+            return False
+        
+        # Extract all form fields
+        form_data = {}
+        
+        for input_el in form.find_all(['input', 'select', 'textarea']):
+            name = input_el.get('name')
+            if not name:
+                continue
+            
+            # Skip submit buttons
+            input_type = input_el.get('type', '').lower()
+            if input_type in {'submit', 'button', 'image', 'reset'}:
+                continue
+            
+            if input_el.name == 'select':
+                # Get first option value as default
+                first_option = input_el.find('option')
+                form_data[name] = first_option.get('value', '') if first_option else ''
+            elif input_el.name == 'textarea':
+                form_data[name] = input_el.get_text()
+            elif input_type == 'checkbox':
+                # Only include if checked by default
+                if input_el.has_attr('checked'):
+                    form_data[name] = input_el.get('value', '1')
+            elif input_type == 'radio':
+                if input_el.has_attr('checked'):
+                    form_data[name] = input_el.get('value', '')
+            else:
+                form_data[name] = input_el.get('value', '')
+        
+        logger.info(f"Extracted {len(form_data)} form fields")
+        
+        # Step 2: Override with our specific values
+        import random
+        intro_itemid = random.randint(100000000, 999999999)
+        page_itemid = random.randint(100000000, 999999999)
+        
+        # Use provided description or default to page name
+        intro_text = description if description else page_name
+        if not intro_text.startswith('<'):
+            intro_text = f'<p>{intro_text}</p>'
+        
+        # Update the fields we care about
+        form_data.update({
+            'name': page_name,
+            'page[text]': embed_html,
+            'page[format]': '1',
+            'page[itemid]': str(page_itemid),
+            'introeditor[text]': intro_text,  # Fixed: was empty, now includes description
+            'introeditor[format]': '1',
+            'introeditor[itemid]': str(intro_itemid),
+            'visible': '1' if visible else '0',
+            'sesskey': sesskey,
+            'submitbutton2': 'Save and return to course'
+        })
+        
+        # Step 3: POST the form
+        post_url = f"{BASE}/course/modedit.php"
+        
+        logger.info("Submitting page creation form...")
+        resp = session.post(post_url, data=form_data, timeout=30, allow_redirects=True)
+        
+        # Check for successful response (including 303 redirects)
+        if resp.ok or resp.status_code == 303:
+            final_url = resp.url
+            logger.info(f"Page add response: status={resp.status_code}, final_url={final_url}")
+            
+            # Success: Redirected to course view page (this is the expected behavior)
+            if 'course/view.php' in final_url:
+                logger.info(f"Successfully added page '{page_name}' (redirected to course view)")
+                return True
+            
+            # Success: Redirected to the new page's edit form
+            elif 'course/modedit.php' in final_url and 'update=' in final_url:
+                logger.info(f"Successfully added page '{page_name}' (at edit page)")
+                return True
+            
+            # Still on modedit.php - check for errors
+            elif 'course/modedit.php' in final_url:
+                soup = BeautifulSoup(resp.text, 'html.parser')
+                
+                # Save response for debugging
+                try:
+                    from pathlib import Path
+                    debug_dir = Path("output") / "debug"
+                    debug_dir.mkdir(parents=True, exist_ok=True)
+                    debug_file = debug_dir / "page_add_response.html"
+                    with open(debug_file, 'w', encoding='utf-8') as f:
+                        f.write(resp.text)
+                    logger.info(f"Saved response HTML to {debug_file}")
+                except Exception as e:
+                    logger.warning(f"Could not save debug HTML: {e}")
+                
+                # Look for errors
+                errors = []
+                error_elements = soup.find_all(class_=re.compile(r'error|alert-danger|alert-error', re.IGNORECASE))
+                if error_elements:
+                    errors.extend([e.get_text(strip=True) for e in error_elements if e.get_text(strip=True)])
+                
+                if errors:
+                    error_text = ' | '.join(errors)
+                    logger.error(f"Page add failed with validation errors: {error_text}")
+                    return False
+                else:
+                    logger.warning(f"Stayed on modedit.php without obvious errors - page may not have been created")
+                    logger.warning(f"Check output/debug/page_add_response.html for details")
+                    return False
+            else:
+                logger.warning(f"Unexpected redirect to {final_url}")
+                return False
+        else:
+            logger.error(f"Failed to add page: HTTP {resp.status_code}")
+            return False
+            
+    except Exception as e:
+        logger.error(f"Error adding page: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return False
+
 def fetch_task_details(session_id, name, mid, url):
     """Fetch task details using thread-local session"""
     s = get_thread_session(session_id)

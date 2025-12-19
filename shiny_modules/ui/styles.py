@@ -300,6 +300,34 @@ body {
 .btn-delete-activity:hover { background: var(--danger-soft); color: var(--danger); }
 .btn-toggle-visibility-activity:hover { background: var(--accent-soft); }
 
+/* Activity Checkboxes */
+.activity-checkbox {
+    width: 16px;
+    height: 16px;
+    cursor: pointer;
+    accent-color: var(--accent);
+}
+#activity-select-all {
+    width: 16px;
+    height: 16px;
+    cursor: pointer;
+    accent-color: var(--accent);
+}
+
+/* Selected activity row */
+tr:has(.activity-checkbox:checked) {
+    background: var(--accent-soft) !important;
+}
+
+/* Batch delete button */
+#btn-batch-delete {
+    font-size: 0.875rem;
+}
+#btn-batch-delete:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
 /* ============================================================================
    CONTEXT MENU
    ============================================================================ */

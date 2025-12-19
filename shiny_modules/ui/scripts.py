@@ -461,4 +461,78 @@ $(document).on('shiny:value', function(event) {
         setTimeout(initActivitySortable, 100);
     }
 });
+
+// ============================================================================
+// BATCH DELETE FUNCTIONALITY
+// ============================================================================
+
+// Update batch delete button based on selected checkboxes
+function updateBatchDeleteButton() {
+    const checkboxes = document.querySelectorAll('.activity-checkbox:checked');
+    const btn = document.getElementById('btn-batch-delete');
+    if (!btn) return;
+    
+    const count = checkboxes.length;
+    btn.textContent = `🗑️ Delete (${count})`;
+    btn.disabled = count === 0;
+}
+
+// Select All checkbox handler
+document.addEventListener('change', function(e) {
+    if (e.target.id === 'activity-select-all') {
+        const isChecked = e.target.checked;
+        document.querySelectorAll('.activity-checkbox').forEach(cb => cb.checked = isChecked);
+        updateBatchDeleteButton();
+    }
+    
+    // Individual checkbox handler
+    if (e.target.classList.contains('activity-checkbox')) {
+        updateBatchDeleteButton();
+        
+        // Update select-all state
+        const allCheckboxes = document.querySelectorAll('.activity-checkbox');
+        const checkedCheckboxes = document.querySelectorAll('.activity-checkbox:checked');
+        const selectAll = document.getElementById('activity-select-all');
+        if (selectAll) {
+            selectAll.checked = allCheckboxes.length === checkedCheckboxes.length && allCheckboxes.length > 0;
+            selectAll.indeterminate = checkedCheckboxes.length > 0 && checkedCheckboxes.length < allCheckboxes.length;
+        }
+    }
+});
+
+// Batch delete button click handler
+document.addEventListener('click', function(e) {
+    if (e.target.id === 'btn-batch-delete') {
+        e.preventDefault();
+        e.stopPropagation();
+        
+        const checkboxes = document.querySelectorAll('.activity-checkbox:checked');
+        if (checkboxes.length === 0) return;
+        
+        const activities = Array.from(checkboxes).map(cb => ({
+            id: cb.dataset.activityId,
+            name: cb.dataset.activityName
+        }));
+        
+        const confirmMsg = activities.length === 1
+            ? `Delete "${activities[0].name}"?`
+            : `Delete ${activities.length} activities? This cannot be undone.`;
+        
+        if (confirm(confirmMsg)) {
+            // Optimistic UI: fade out selected rows
+            checkboxes.forEach(cb => {
+                const row = cb.closest('tr');
+                if (row) {
+                    row.style.transition = 'opacity 0.3s';
+                    row.style.opacity = '0.3';
+                }
+            });
+            
+            Shiny.setInputValue("activity_batch_delete", {
+                activities: activities,
+                nonce: Math.random()
+            }, {priority: "event"});
+        }
+    }
+});
 """

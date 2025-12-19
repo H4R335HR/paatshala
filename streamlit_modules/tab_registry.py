@@ -61,13 +61,20 @@ TAB_REGISTRY = {
         'module': 'streamlit_modules.pages',
         'function': 'render_quizizz_tab',
     },
+    'video_importer': {
+        'id': 'video_importer',
+        'name': '📹 Video Importer',
+        'description': 'Import Google Drive videos',
+        'module': 'streamlit_modules.pages',
+        'function': 'render_video_importer_tab',
+    },
 }
 
 # Default tabs to enable on first run
 DEFAULT_ENABLED_TABS = ['tasks', 'quiz', 'submissions', 'evaluation']
 
 # Tab order (for consistent display)
-TAB_ORDER = ['tasks', 'quiz', 'submissions', 'evaluation', 'workshops', 'feedback', 'tryhackme', 'quizizz']
+TAB_ORDER = ['tasks', 'quiz', 'submissions', 'evaluation', 'workshops', 'feedback', 'tryhackme', 'quizizz', 'video_importer']
 
 
 def get_all_tab_ids():
