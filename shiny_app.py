@@ -112,7 +112,8 @@ def server(input, output, session):
     def nav_course_selector():
         if not user_authenticated(): return None
         # Build choices with custom option at the bottom
-        choices = {str(c['id']): c['name'] for c in available_courses()}
+        # Include course ID in the display text for easy identification
+        choices = {str(c['id']): f"{c['name']} (ID: {c['id']})" for c in available_courses()}
         choices["__custom__"] = "📝 Enter Course ID..."
         
         return ui.div(

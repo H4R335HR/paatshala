@@ -1,0 +1,32 @@
+{
+  "https://paatshala.ictkerala.org/mod/url/view.php?id=21821": {
+    "status": "ok",
+    "code": 200,
+    "message": "OK",
+    "checked_at": "2025-12-20T19:48:13.786343"
+  },
+  "https://paatshala.ictkerala.org/mod/quiz/view.php?id=21822": {
+    "status": "ok",
+    "code": 200,
+    "message": "OK",
+    "checked_at": "2025-12-20T19:48:13.786343"
+  },
+  "https://paatshala.ictkerala.org/mod/assign/view.php?id=21834": {
+    "status": "ok",
+    "code": 200,
+    "message": "OK",
+    "checked_at": "2025-12-20T19:48:13.786343"
+  },
+  "https://paatshala.ictkerala.org/mod/page/view.php?id=21819": {
+    "status": "ok",
+    "code": 200,
+    "message": "OK",
+    "checked_at": "2025-12-20T19:48:13.786343"
+  },
+  "https://paatshala.ictkerala.org/mod/url/view.php?id=21820": {
+    "status": "ok",
+    "code": 200,
+    "message": "OK",
+    "checked_at": "2025-12-20T19:48:13.786343"
+  }
+}

@@ -328,6 +328,21 @@ tr:has(.activity-checkbox:checked) {
     cursor: not-allowed;
 }
 
+/* Link status icons */
+.link-status {
+    cursor: pointer;
+    font-size: 1rem;
+    transition: transform 0.15s, opacity 0.15s;
+}
+.link-status:hover {
+    transform: scale(1.2);
+    opacity: 0.8;
+}
+.status-ok { color: var(--success); }
+.status-error { color: var(--danger); }
+.status-redirect { color: var(--accent); }
+.status-auth_required { color: var(--warning); }
+
 /* ============================================================================
    CONTEXT MENU
    ============================================================================ */

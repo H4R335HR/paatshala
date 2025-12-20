@@ -11,6 +11,7 @@ from core.api import (
     get_fresh_sesskey, toggle_activity_visibility
 )
 from core.persistence import save_cache
+from core.link_checker import get_cached_status, save_cached_status, check_urls_batch, format_time_ago
 import json
 import logging
 
@@ -45,6 +46,12 @@ def register_activity_handlers(
         row = current[idx]
         topic_name = row.get('Topic Name', 'Topic')
         activities = row.get('Activities', [])
+        
+        # Get course ID for caching
+        course_id = input.course_id() if hasattr(input, 'course_id') else ''
+        
+        # Load cached link status
+        cached_status = get_cached_status(course_id) if course_id else {}
         
         # Build activities table
         if not activities:
@@ -91,9 +98,29 @@ def register_activity_handlers(
                 # Visibility toggle icon
                 vis_icon = "👁️" if act_visible else "🚫"
                 vis_toggle_title = "Hide" if act_visible else "Show"
+                
+                # Link status from cache
+                url_status = cached_status.get(act_url, {}) if act_url else {}
+                status_type = url_status.get('status', 'unchecked')
+                checked_at = url_status.get('checked_at', '')
+                status_msg = url_status.get('message', 'Not checked yet')
+                time_ago = format_time_ago(checked_at) if checked_at else 'Never checked'
+                
+                # Status icons
+                status_icons = {
+                    'ok': '✅',
+                    'error': '❌',
+                    'redirect': '↗️',
+                    'auth_required': '🔒',
+                    'unchecked': '⏳',
+                    'unknown': '❓'
+                }
+                status_icon = status_icons.get(status_type, '❓')
+                status_tooltip = f"{status_msg} • Last checked: {time_ago}"
+                escaped_url = act_url.replace('"', '&quot;') if act_url else ''
 
                 activity_rows.append(f"""
-                <tr data-activity-id="{act_id}" data-activity-name="{escaped_name}" data-section-id="{section_id}" data-visible="{str(act_visible).lower()}">
+                <tr data-activity-id="{act_id}" data-activity-name="{escaped_name}" data-section-id="{section_id}" data-visible="{str(act_visible).lower()}" data-url="{escaped_url}">
                     <td class="text-center">
                         <input type="checkbox" class="activity-checkbox" data-activity-id="{act_id}" data-activity-name="{escaped_name}">
                     </td>
@@ -101,6 +128,7 @@ def register_activity_handlers(
                     <td class="text-center">{type_icon}</td>
                     <td>{name_html}</td>
                     <td><span class="badge bg-secondary">{act_type}</span></td>
+                    <td class="text-center link-status" title="{status_tooltip}">{status_icon}</td>
                     <td class="text-center">
                         <button class="btn-toggle-visibility-activity" data-activity-id="{act_id}" data-visible="{str(act_visible).lower()}" title="{vis_toggle_title}">{vis_icon}</button>
                     </td>
@@ -123,6 +151,7 @@ def register_activity_handlers(
                         <th style="width: 40px;"></th>
                         <th>Activity Name</th>
                         <th style="width: 100px;">Type</th>
+                        <th style="width: 50px;" class="text-center" title="Link Status">🔗</th>
                         <th style="width: 60px;" class="text-center">Visible</th>
                         <th style="width: 50px;"></th>
                     </tr>
@@ -168,6 +197,7 @@ def register_activity_handlers(
             footer=ui.div(
                 ui.span("💡 Drag to reorder • Right-click to move", 
                         class_="text-muted small", style="margin-right: auto;"),
+                ui.HTML('<button id="btn-check-links" class="btn btn-outline-primary btn-sm" style="margin-right: 8px;" onclick="checkActivityLinks()">🔗 Check Links</button>'),
                 ui.HTML('<button id="btn-batch-delete" class="btn btn-outline-danger btn-sm" disabled style="margin-right: 8px;">🗑️ Delete (0)</button>'),
                 ui.input_action_button("close_activities_modal", "Close", class_="btn-secondary"),
                 class_="d-flex align-items-center w-100"
@@ -508,3 +538,70 @@ def register_activity_handlers(
         # Close modal
         ui.modal_remove()
 
+    @reactive.Effect
+    @reactive.event(input.check_activity_links)
+    def on_check_activity_links():
+        """Handle checking activity links"""
+        evt = input.check_activity_links()
+        if not evt: return
+        
+        urls = evt.get('urls', [])
+        if not urls:
+            ui.notification_show("No links to check", type="warning")
+            return
+        
+        cid = input.course_id()
+        if not cid:
+            return
+        
+        # Get session for authenticated links
+        s = setup_session(user_session_id())
+        
+        ui.notification_show(f"🔍 Checking {len(urls)} links...", duration=2)
+        
+        # Check all URLs
+        results = check_urls_batch(urls, session=s)
+        
+        # Save to cache
+        save_cached_status(cid, results)
+        
+        # Build response for JavaScript to update UI
+        status_icons = {
+            'ok': '✅',
+            'error': '❌',
+            'redirect': '↗️',
+            'auth_required': '🔒',
+            'unchecked': '⏳',
+            'unknown': '❓'
+        }
+        
+        response = {}
+        for url, status in results.items():
+            icon = status_icons.get(status.get('status', 'unknown'), '❓')
+            msg = status.get('message', '')
+            time_ago = format_time_ago(status.get('checked_at', ''))
+            tooltip = f"{msg} • Last checked: {time_ago}"
+            response[url] = {
+                'icon': icon,
+                'tooltip': tooltip,
+                'status': status.get('status', 'unknown')
+            }
+        
+        # Send results back to JavaScript
+        ui.insert_ui(
+            ui.HTML(f"""<script>
+                if (typeof updateLinkStatus === 'function') {{
+                    updateLinkStatus({json.dumps(response)});
+                }}
+            </script>"""),
+            selector="body"
+        )
+        
+        # Count results
+        ok_count = sum(1 for s in results.values() if s.get('status') == 'ok')
+        error_count = sum(1 for s in results.values() if s.get('status') == 'error')
+        
+        if error_count > 0:
+            ui.notification_show(f"✅ {ok_count} OK, ❌ {error_count} broken", type="warning")
+        else:
+            ui.notification_show(f"✅ All {ok_count} links OK!", type="message")

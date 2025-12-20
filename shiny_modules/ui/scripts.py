@@ -535,4 +535,110 @@ document.addEventListener('click', function(e) {
         }
     }
 });
+
+// ============================================================================
+// LINK STATUS CHECKER
+// ============================================================================
+
+// Check all activity links
+function checkActivityLinks() {
+    const rows = document.querySelectorAll('#activities_table_body tr[data-url]');
+    const urls = [];
+    
+    rows.forEach(row => {
+        const url = row.dataset.url;
+        if (url) {
+            urls.push(url);
+            // Show loading indicator
+            const statusCell = row.querySelector('.link-status');
+            if (statusCell) {
+                statusCell.textContent = '⏳';
+                statusCell.title = 'Checking...';
+            }
+        }
+    });
+    
+    if (urls.length === 0) {
+        alert('No links to check in this topic.');
+        return;
+    }
+    
+    // Disable button while checking
+    const btn = document.getElementById('btn-check-links');
+    if (btn) {
+        btn.disabled = true;
+        btn.textContent = '🔍 Checking...';
+    }
+    
+    // Send to backend
+    Shiny.setInputValue("check_activity_links", {
+        urls: urls,
+        nonce: Math.random()
+    }, {priority: "event"});
+    
+    // Re-enable button after timeout (fallback)
+    setTimeout(() => {
+        if (btn) {
+            btn.disabled = false;
+            btn.textContent = '🔗 Check Links';
+        }
+    }, 30000);
+}
+
+// Check single activity link (when clicking on status icon)
+function checkSingleLink(row) {
+    const url = row.dataset.url;
+    if (!url) return;
+    
+    const statusCell = row.querySelector('.link-status');
+    if (statusCell) {
+        statusCell.textContent = '⏳';
+        statusCell.title = 'Checking...';
+    }
+    
+    // Send single URL to backend
+    Shiny.setInputValue("check_activity_links", {
+        urls: [url],
+        nonce: Math.random()
+    }, {priority: "event"});
+}
+
+// Click handler for individual status icons
+document.addEventListener('click', function(e) {
+    const statusIcon = e.target.closest('.link-status');
+    if (statusIcon) {
+        e.preventDefault();
+        e.stopPropagation();
+        const row = statusIcon.closest('tr[data-url]');
+        if (row && row.dataset.url) {
+            checkSingleLink(row);
+        }
+    }
+});
+
+// Update link status icons after check
+function updateLinkStatus(results) {
+    // Re-enable button
+    const btn = document.getElementById('btn-check-links');
+    if (btn) {
+        btn.disabled = false;
+        btn.textContent = '🔗 Check Links';
+    }
+    
+    // Update each row
+    const rows = document.querySelectorAll('#activities_table_body tr[data-url]');
+    rows.forEach(row => {
+        const url = row.dataset.url;
+        if (url && results[url]) {
+            const statusCell = row.querySelector('.link-status');
+            if (statusCell) {
+                statusCell.textContent = results[url].icon;
+                statusCell.title = results[url].tooltip + ' • Click to recheck';
+                
+                // Add status class for potential styling
+                statusCell.className = 'text-center link-status status-' + results[url].status;
+            }
+        }
+    });
+}
 """
