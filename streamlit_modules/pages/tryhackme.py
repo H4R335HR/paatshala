@@ -9,8 +9,17 @@ import requests
 from bs4 import BeautifulSoup
 import re
 import json
+from datetime import datetime, timedelta
 
 from core.persistence import get_output_dir, get_config
+
+# Default HTTP headers for requests (avoid 406 errors)
+DEFAULT_HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.5',
+    'Connection': 'keep-alive',
+}
 
 
 # Get API URL from config (with default fallback)
@@ -258,20 +267,12 @@ def render_tryhackme_tab(course, meta):
     if fetch_btn or refresh_btn:
         base_url = st.session_state.thm_base_url
         
-        # Headers to mimic browser request (avoid 406 errors)
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.5',
-            'Connection': 'keep-alive',
-        }
-        
         # Fetch leaderboard (JSON API with refresh action)
         leaderboard_url = f"{base_url}?action=refresh&b={effective_batch}"
         
         with st.spinner("Fetching leaderboard data..."):
             try:
-                response = requests.get(leaderboard_url, headers=headers, timeout=30)
+                response = requests.get(leaderboard_url, headers=DEFAULT_HEADERS, timeout=30)
                 response.raise_for_status()
                 
                 leaderboard_json = response.json()
@@ -298,7 +299,7 @@ def render_tryhackme_tab(course, meta):
         with st.spinner("Fetching scoreboard data..."):
             try:
                 scoreboard_url = f"{base_url}?b={effective_batch}"
-                response = requests.get(scoreboard_url, headers=headers, timeout=30)
+                response = requests.get(scoreboard_url, headers=DEFAULT_HEADERS, timeout=30)
                 response.raise_for_status()
                 
                 # Parse the HTML to extract scoreboard data
@@ -646,11 +647,6 @@ def render_admin_panel(effective_batch):
         # Remove filename from URL if present to get base site URL
         site_url = base_url.rsplit('/', 1)[0] if '/tryhackme.php' in base_url else base_url
         
-        # Headers for requests
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        }
-        
         # Tabs for different admin actions
         admin_tab1, admin_tab2, admin_tab3, admin_tab4 = st.tabs([
             "📤 Upload Batch", "🗑️ Delete Batch", "🧹 Delete Snapshots", "⏰ Trigger Snapshot"
@@ -676,7 +672,6 @@ def render_admin_panel(effective_batch):
                                         index=3, key="admin_end_week")
             
             # Start week - default to this Monday
-            from datetime import datetime, timedelta
             today = datetime.now()
             monday = today - timedelta(days=today.weekday())
             start_week = st.date_input("Start Week", value=monday, key="admin_start_week")
@@ -705,7 +700,7 @@ def render_admin_panel(effective_batch):
                                 f"{site_url}/tryhackme.php?page=upload",
                                 data=data,
                                 files=files,
-                                headers=headers,
+                                headers=DEFAULT_HEADERS,
                                 timeout=30
                             )
                             
@@ -806,7 +801,7 @@ def render_admin_panel(effective_batch):
                                                     f"{site_url}/tryhackme.php?page=upload",
                                                     data=data,
                                                     files=files,
-                                                    headers=headers,
+                                                    headers=DEFAULT_HEADERS,
                                                     timeout=30
                                                 )
                                                 
@@ -848,7 +843,7 @@ def render_admin_panel(effective_batch):
                             response = requests.post(
                                 f"{site_url}/tryhackme.php?page=upload",
                                 data=data,
-                                headers=headers,
+                                headers=DEFAULT_HEADERS,
                                 timeout=30
                             )
                             
@@ -898,7 +893,7 @@ def render_admin_panel(effective_batch):
                             response = requests.post(
                                 f"{site_url}/tryhackme.php?page=upload",
                                 data=data,
-                                headers=headers,
+                                headers=DEFAULT_HEADERS,
                                 timeout=30
                             )
                             
@@ -924,7 +919,7 @@ def render_admin_panel(effective_batch):
                     try:
                         response = requests.get(
                             f"{site_url}/tryhackme.php?cron=snapshot&key={CRON_SECRET}",
-                            headers=headers,
+                            headers=DEFAULT_HEADERS,
                             timeout=60
                         )
                         

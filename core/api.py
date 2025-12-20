@@ -7,6 +7,7 @@ from bs4 import BeautifulSoup
 from datetime import datetime
 from pathlib import Path
 import logging
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -171,7 +172,6 @@ def get_tasks(session, course_id):
 
 def get_topics(session, course_id, max_retries=3):
     """Get all topics (sections) from course page with robust ID extraction"""
-    import time
     logger.info(f"Fetching topics for course {course_id}")
     base_url = f"{BASE}/course/view.php"
     params = {"id": course_id}
@@ -776,48 +776,6 @@ def rename_topic_inplace(session, sesskey, itemid, new_name):
         logger.error(f"Error renaming topic: {e}")
         print(f"Error renaming topic: {e}")
         return False
-
-def update_topic(session, db_id, name, summary=""):
-    """Update topic summary (and name via form if needed)"""
-    # Note: For simple renaming, rename_topic_inplace is preferred.
-    # This function is kept for updating the Summary which requires the form.
-    
-    # First GET the form to get hidden fields
-    edit_url = f"{BASE}/course/editsection.php?id={db_id}&sr"
-    resp = session.get(edit_url)
-    if not resp.ok:
-        return False
-        
-    soup = BeautifulSoup(resp.text, "html.parser")
-    form = soup.find("form", action="editsection.php")
-    if not form:
-        return False
-        
-    data = {}
-    for input_tag in form.find_all("input"):
-        if input_tag.get("name"):
-            data[input_tag["name"]] = input_tag.get("value", "")
-            
-    # Update fields
-    if "name_custom" in data:
-        data["name_custom"] = "1"
-        data["name"] = name
-    elif "section_name[custom]" in data: # Newer Moodle forms
-         data["section_name[custom]"] = "1"
-         data["section_name[value]"] = name
-    else:
-        data["name"] = name
-        
-    # Summary is usually a textarea or editor
-    if "summary_editor[text]" in data:
-        data["summary_editor[text]"] = summary
-    elif "summary" in data:
-        data["summary"] = summary
-        
-    # Submit
-    post_url = f"{BASE}/course/editsection.php"
-    resp = session.post(post_url, data=data)
-    return resp.ok
 
 # Cache for module IDs to avoid repeated lookups
 _module_id_cache = {}
@@ -1564,94 +1522,6 @@ def get_available_groups(session, module_id, activity_type='assign'):
     except:
         return []
 
-
-def get_group_member_counts(session, course_id, group_ids):
-    """Fetch member counts for a list of groups.
-    
-    Args:
-        session: Requests session
-        course_id: Course ID
-        group_ids: List of group IDs to fetch counts for
-    
-    Returns:
-        Dict mapping group_id to member_count
-    """
-    counts = {}
-    
-    # Use the course participants page with group filter to get count
-    for group_id in group_ids:
-        try:
-            url = f"{BASE}/user/index.php?id={course_id}&group={group_id}"
-            resp = session.get(url, timeout=15)
-            if resp.ok:
-                soup = BeautifulSoup(resp.text, "html.parser")
-                
-                # Look for participant count in page (usually in heading or info)
-                # Example: "Participants: 25" or "25 participants"
-                import re
-                
-                # Try to find the count in the page header or info
-                # Moodle usually shows "X participants" somewhere
-                page_text = soup.get_text()
-                
-                # Pattern: "X participants" or "participants: X"
-                match = re.search(r'(\d+)\s*participants?', page_text, re.IGNORECASE)
-                if match:
-                    counts[group_id] = int(match.group(1))
-                else:
-                    # Count table rows as fallback
-                    table = soup.find("table", {"id": "participants"})
-                    if table:
-                        rows = table.find_all("tr", class_=lambda c: c and "user" in str(c).lower())
-                        counts[group_id] = len(rows)
-        except:
-            pass
-    
-    return counts
-
-
-def get_max_grade(session, module_id):
-    """
-    Fetch the maximum grade for an assignment from the grader page.
-    
-    Args:
-        session: Requests session
-        module_id: The assignment module ID
-    
-    Returns:
-        str: The max grade (e.g. "15") or "" if not found
-    """
-    # Fetch the grader page with action=grader
-    # We use a dummy user approach - the grader page will redirect or show the form
-    # even without a specific userid, we can still see the grade structure
-    url = f"{BASE}/mod/assign/view.php?id={module_id}&action=grader"
-    
-    try:
-        resp = session.get(url, timeout=30)
-        if not resp.ok:
-            return ""
-        
-        soup = BeautifulSoup(resp.text, "html.parser")
-        
-        # Look for the label "Grade out of X" in the grading form
-        # Pattern: <label ...>Grade out of 15</label>
-        for label in soup.find_all("label"):
-            text = label.get_text(strip=True)
-            match = re.search(r"Grade out of (\d+(?:\.\d+)?)", text, re.IGNORECASE)
-            if match:
-                return match.group(1)
-        
-        # Also check span elements (sometimes displayed as static text)
-        for span in soup.find_all("span"):
-            text = span.get_text(strip=True)
-            match = re.search(r"Grade out of (\d+(?:\.\d+)?)", text, re.IGNORECASE)
-            if match:
-                return match.group(1)
-        
-        return ""
-    except Exception as e:
-        logger.debug(f"Error fetching max grade for module {module_id}: {e}")
-        return ""
 
 def fetch_submissions(session_id, module_id, group_id=None):
     """Fetch submissions for a specific task/module"""
@@ -2497,7 +2367,6 @@ def get_course_grade_items(session, course_id, topics=None):
     """
     import re
     import json
-    import time
 
     logger.info(f"Fetching grade items for course {course_id} via Availability Config")
 
@@ -3084,7 +2953,6 @@ def fetch_thm_user_data(username):
     
     try:
         import requests
-        import time
         
         # Add small delay to avoid rate limiting
         time.sleep(0.2)

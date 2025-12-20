@@ -99,6 +99,12 @@ CONFIG_SCHEMA = {
         }
     },
     "Google Drive": {
+        "google_drive_folder_url": {
+            "label": "Default Folder URL",
+            "help": "Default Google Drive folder URL for Video Importer",
+            "default": "",
+            "type": "url"
+        },
         "google_drive_credentials": {
             "label": "Credentials File Path",
             "help": "Path to Google Drive service account JSON file (for Video Importer)",

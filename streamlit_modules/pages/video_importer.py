@@ -22,11 +22,12 @@ from core.gdrive_parser import (
     generate_embed_html,
     group_videos_by_session
 )
+from core.persistence import get_config
 
 # Constants
 DEFAULT_EMBED_WIDTH = 800
 DEFAULT_EMBED_HEIGHT = 600
-DEFAULT_GDRIVE_URL = 'https://drive.google.com/drive/folders/1mWWGclSqfpyx-nk6AD7sjCkDiEJ0a8lG'
+DEFAULT_GDRIVE_URL = ''  # No default - user must provide URL or load from cache
 
 
 def auto_select_topic(session_num: int, topics: list) -> int:
@@ -119,6 +120,13 @@ def render_video_importer_tab(course, meta):
     """Render the Video Importer tab content"""
     course_id = course.get('id')
     
+    # Clear all video import state when course changes
+    if st.session_state.get('video_import_course_id') != course_id:
+        st.session_state.video_import_course_id = course_id
+        st.session_state.video_import_topics = None
+        st.session_state.video_import_videos = None
+        st.session_state.video_import_mapping = {}
+    
     st.markdown("### 📹 Google Drive Video Importer")
     st.markdown("Import videos from Google Drive as embedded pages in course topics.")
     
@@ -159,7 +167,7 @@ def render_video_importer_tab(course, meta):
         # =====================================================================
         # Google Drive API Configuration
         # =====================================================================
-        from core.persistence import get_config, set_config
+        from core.persistence import get_config, set_config, save_cache, load_cache, clear_cache
         
         credentials_path = get_config('google_drive_credentials')
         
@@ -226,10 +234,13 @@ def render_video_importer_tab(course, meta):
         cache_key = f"video_cache_{course_id}"
         cached_data = st.session_state.get(cache_key)
         
+        # Get default URL from config, then from cache, then fallback to empty
+        config_url = get_config('google_drive_folder_url', '')
+        default_url = cached_data.get('folder_url', config_url) if cached_data else config_url
+        
         col1, col2, col3 = st.columns([3, 1, 1])
         
         with col1:
-            default_url = cached_data.get('folder_url', DEFAULT_GDRIVE_URL) if cached_data else DEFAULT_GDRIVE_URL
             folder_url = st.text_input(
                 "Google Drive URL",
                 value=default_url,
@@ -246,16 +257,28 @@ def render_video_importer_tab(course, meta):
                 if st.button("🗑️ Clear", use_container_width=True, key="clear_videos_btn"):
                     st.session_state.video_import_videos = None
                     st.session_state.video_import_topics = None
+                    st.session_state.video_import_mapping = {}
                     if cache_key in st.session_state:
                         del st.session_state[cache_key]
+                    # Also clear disk cache
+                    clear_cache(cache_key)
                     st.rerun()
         
-        # Load from cache if available
-        if not fetch_btn and cached_data and cached_data.get('folder_url') == folder_url:
-            if 'video_import_videos' not in st.session_state:
+        # Load from cache if available (try disk cache first if session state is empty)
+        if not fetch_btn and 'video_import_videos' not in st.session_state:
+            # Try session state cache first
+            if cached_data and cached_data.get('folder_url') == folder_url:
                 st.session_state.video_import_videos = cached_data.get('videos')
                 fetched_time = cached_data.get('fetched_at', 'Unknown')
-                st.info(f"📦 Loaded {len(st.session_state.video_import_videos)} videos from cache (fetched: {fetched_time})")
+                st.info(f"📦 Loaded {len(st.session_state.video_import_videos)} videos from session cache (fetched: {fetched_time})")
+            else:
+                # Try disk cache
+                disk_cache = load_cache(cache_key)
+                if disk_cache and disk_cache.get('folder_url') == folder_url:
+                    st.session_state.video_import_videos = disk_cache.get('videos')
+                    st.session_state[cache_key] = disk_cache  # Also store in session state
+                    fetched_time = disk_cache.get('fetched_at', 'Unknown')
+                    st.info(f"💾 Loaded {len(st.session_state.video_import_videos)} videos from disk cache (fetched: {fetched_time})")
         
         if fetch_btn and folder_url:
             folder_id_match = re.search(r'/folders/([a-zA-Z0-9_-]+)', folder_url)
@@ -275,11 +298,14 @@ def render_video_importer_tab(course, meta):
                             st.session_state.video_import_videos = videos_list
                             st.session_state.video_import_topics = None  # Reset topics
                             
-                            st.session_state[cache_key] = {
+                            cache_data = {
                                 'videos': videos_list,
                                 'folder_url': folder_url,
                                 'fetched_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                             }
+                            st.session_state[cache_key] = cache_data
+                            # Also save to disk cache for persistence
+                            save_cache(cache_key, cache_data)
                             
                             st.success(f"✅ Found {len(videos_list)} videos!")
                             st.rerun()
@@ -336,11 +362,13 @@ def render_video_importer_tab(course, meta):
     # =========================================================================
     # Load Course Topics (cached)
     # =========================================================================
+    topics_just_loaded = False
     if not st.session_state.get('video_import_topics'):
         with st.spinner("Loading course topics..."):
             session = setup_session(st.session_state.session_id)
             topics = get_topics(session, course_id)
             st.session_state.video_import_topics = topics
+            topics_just_loaded = True
     
     topics = st.session_state.video_import_topics
     
@@ -369,19 +397,21 @@ def render_video_importer_tab(course, meta):
     with col3:
         st.metric("⚠️ Ungrouped", ungrouped)
     with col4:
-        dry_run = st.checkbox("🔍 Dry Run", value=True, help="Test without importing")
+        dry_run = st.checkbox("🔍 Dry Run", value=False, help="Test without importing")
     
     st.divider()
     
     # =========================================================================
     # Initialize mapping and selection state
     # =========================================================================
-    if 'video_import_mapping' not in st.session_state:
+    # Reset mapping if topics were just loaded (to re-run auto_select on fresh topics)
+    if topics_just_loaded or 'video_import_mapping' not in st.session_state:
         st.session_state.video_import_mapping = {}
         for session_num in grouped_videos.keys():
             if session_num == 0:
-                continue
-            st.session_state.video_import_mapping[session_num] = auto_select_topic(session_num, topics)
+                st.session_state.video_import_mapping[0] = 0  # Ungrouped defaults to Skip
+            else:
+                st.session_state.video_import_mapping[session_num] = auto_select_topic(session_num, topics)
     
     # =========================================================================
     # Unified Session Cards
@@ -442,11 +472,16 @@ def render_video_importer_tab(course, meta):
                     use_container_width=True,
                     disabled=import_disabled
                 ):
-                    # Get selected videos
-                    selected_videos = [
-                        video for i, video in enumerate(session_videos)
-                        if st.session_state[selection_key].get(i, True)
-                    ]
+                    # Get selected videos with custom titles
+                    titles_key = f"video_titles_{session_num}"
+                    selected_videos = []
+                    for i, video in enumerate(session_videos):
+                        if st.session_state[selection_key].get(i, True):
+                            video_copy = video.copy()
+                            # Apply custom title if set
+                            if titles_key in st.session_state:
+                                video_copy['clean_title'] = st.session_state[titles_key].get(i, video['clean_title'])
+                            selected_videos.append(video_copy)
                     
                     # Set pending import with complete data
                     st.session_state.pending_import = {
@@ -464,42 +499,184 @@ def render_video_importer_tab(course, meta):
             col_toggle, col_spacer = st.columns([1, 5])
             with col_toggle:
                 all_selected = all(st.session_state[selection_key].values())
-                if st.checkbox(
-                    "Select All" if not all_selected else "Deselect All",
+                toggle_all = st.checkbox(
+                    "Deselect All" if all_selected else "Select All",
                     value=all_selected,
                     key=f"select_all_{session_num}"
-                ):
-                    if not all_selected:
-                        for i in range(video_count):
-                            st.session_state[selection_key][i] = True
-                else:
-                    if all_selected:
-                        for i in range(video_count):
-                            st.session_state[selection_key][i] = False
+                )
+                # Update all checkboxes based on toggle state
+                if toggle_all != all_selected:
+                    for i in range(video_count):
+                        st.session_state[selection_key][i] = toggle_all
+                        # Also update the individual checkbox widget state
+                        st.session_state[f"video_{session_num}_{i}"] = toggle_all
+                    st.rerun()
             
-            # Video checkboxes in columns for better layout
-            num_cols = 2
-            video_cols = st.columns(num_cols)
+            # Initialize custom titles state
+            titles_key = f"video_titles_{session_num}"
+            if titles_key not in st.session_state:
+                st.session_state[titles_key] = {i: video['clean_title'] for i, video in enumerate(session_videos)}
             
+            # Video checkboxes with rename popover
             for i, video in enumerate(session_videos):
-                col_idx = i % num_cols
-                with video_cols[col_idx]:
+                col_check, col_rename = st.columns([10, 1])
+                
+                current_title = st.session_state[titles_key].get(i, video['clean_title'])
+                is_renamed = current_title != video['clean_title']
+                
+                # Initialize widget key if it doesn't exist (avoid passing value when key exists)
+                widget_key = f"video_{session_num}_{i}"
+                if widget_key not in st.session_state:
+                    st.session_state[widget_key] = st.session_state[selection_key].get(i, True)
+                
+                with col_check:
+                    display_title = f"*{current_title}*" if is_renamed else current_title
                     is_selected = st.checkbox(
-                        video['clean_title'],
-                        value=st.session_state[selection_key].get(i, True),
-                        key=f"video_{session_num}_{i}"
+                        display_title,
+                        key=widget_key
                     )
                     st.session_state[selection_key][i] = is_selected
+                
+                with col_rename:
+                    with st.popover("✏️", help="Rename video"):
+                        new_title = st.text_input(
+                            "Video title",
+                            value=current_title,
+                            key=f"rename_{session_num}_{i}",
+                            label_visibility="collapsed"
+                        )
+                        if new_title != current_title:
+                            st.session_state[titles_key][i] = new_title
+                            st.rerun()
     
     # =========================================================================
-    # Handle Ungrouped Videos
+    # Handle Ungrouped Videos (as importable session card)
     # =========================================================================
     if grouped_videos.get(0):
         st.divider()
-        with st.expander(f"⚠️ Ungrouped Videos ({len(grouped_videos[0])} videos)", expanded=False):
-            st.warning("These videos don't have a session number in their filename (e.g., #1, #2)")
-            for video in grouped_videos[0]:
-                st.markdown(f"- {video['clean_title']} (`{video['name']}`)")
+        st.subheader("⚠️ Ungrouped Videos")
+        st.caption("These videos don't have a session number in their filename (e.g., #1, #2)")
+        
+        session_num = 0
+        session_videos = grouped_videos[0]
+        video_count = len(session_videos)
+        
+        # Initialize selection state for ungrouped
+        selection_key = f"video_selection_{session_num}"
+        if selection_key not in st.session_state:
+            st.session_state[selection_key] = {i: True for i in range(video_count)}
+        
+        # Count selected videos
+        selected_count = sum(1 for v in st.session_state[selection_key].values() if v)
+        
+        with st.container(border=True):
+            header_cols = st.columns([2, 3, 2])
+            
+            with header_cols[0]:
+                st.markdown(f"### 📂 Ungrouped")
+                st.caption(f"{video_count} videos")
+            
+            with header_cols[1]:
+                current_mapping = st.session_state.video_import_mapping.get(0, 0)
+                
+                selected_topic_idx = st.selectbox(
+                    "Target Topic",
+                    range(len(topic_options)),
+                    index=current_mapping,
+                    format_func=lambda x: topic_options[x],
+                    key=f"topic_select_ungrouped",
+                    label_visibility="collapsed"
+                )
+                
+                st.session_state.video_import_mapping[0] = selected_topic_idx
+            
+            with header_cols[2]:
+                is_mapped = selected_topic_idx > 0
+                btn_label = f"🚀 Import ({selected_count})" if selected_count < video_count else "🚀 Import All"
+                
+                import_disabled = not is_mapped or selected_count == 0
+                
+                if st.button(
+                    btn_label, 
+                    key=f"import_btn_ungrouped", 
+                    type="primary", 
+                    use_container_width=True,
+                    disabled=import_disabled
+                ):
+                    # Get selected videos with custom titles
+                    titles_key = f"video_titles_{session_num}"
+                    selected_videos = []
+                    for i, video in enumerate(session_videos):
+                        if st.session_state[selection_key].get(i, True):
+                            video_copy = video.copy()
+                            if titles_key in st.session_state:
+                                video_copy['clean_title'] = st.session_state[titles_key].get(i, video['clean_title'])
+                            selected_videos.append(video_copy)
+                    
+                    st.session_state.pending_import = {
+                        'session_num': 'Ungrouped',
+                        'topic_idx': selected_topic_idx - 1,
+                        'topic_name': topics[selected_topic_idx - 1].get('Topic Name', 'Untitled'),
+                        'section_id': topics[selected_topic_idx - 1].get('Section ID'),
+                        'selected_videos': selected_videos,
+                        'dry_run': dry_run
+                    }
+                    st.session_state.import_complete = False
+                    st.rerun()
+            
+            # Select All toggle
+            col_toggle, col_spacer = st.columns([1, 5])
+            with col_toggle:
+                all_selected = all(st.session_state[selection_key].values())
+                toggle_all = st.checkbox(
+                    "Deselect All" if all_selected else "Select All",
+                    value=all_selected,
+                    key=f"select_all_ungrouped"
+                )
+                # Update all checkboxes based on toggle state
+                if toggle_all != all_selected:
+                    for i in range(video_count):
+                        st.session_state[selection_key][i] = toggle_all
+                        # Also update the individual checkbox widget state
+                        st.session_state[f"video_{session_num}_{i}"] = toggle_all
+                    st.rerun()
+            
+            # Initialize custom titles state for ungrouped
+            titles_key = f"video_titles_{session_num}"
+            if titles_key not in st.session_state:
+                st.session_state[titles_key] = {i: video['clean_title'] for i, video in enumerate(session_videos)}
+            
+            # Video checkboxes with rename popover
+            for i, video in enumerate(session_videos):
+                col_check, col_rename = st.columns([10, 1])
+                
+                current_title = st.session_state[titles_key].get(i, video['clean_title'])
+                is_renamed = current_title != video['clean_title']
+                
+                # Initialize widget key if it doesn't exist (avoid passing value when key exists)
+                widget_key = f"video_ungrouped_{i}"
+                if widget_key not in st.session_state:
+                    st.session_state[widget_key] = st.session_state[selection_key].get(i, True)
+                
+                with col_check:
+                    display_title = f"*{current_title}*" if is_renamed else current_title
+                    is_selected = st.checkbox(
+                        display_title,
+                        key=widget_key
+                    )
+                    st.session_state[selection_key][i] = is_selected
+                
+                with col_rename:
+                    with st.popover("✏️", help="Rename video"):
+                        new_title = st.text_input(
+                            "Video title",
+                            value=current_title,
+                            key=f"rename_ungrouped_{i}",
+                            label_visibility="collapsed"
+                        )
+                        if new_title != current_title:
+                            st.session_state[titles_key][i] = new_title
+                            st.rerun()
     
     # =========================================================================
     # Import Dialog
