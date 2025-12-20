@@ -543,11 +543,58 @@ def render_quizizz_tab(course, meta):
             quizizz_names = df['Full Name'].unique().tolist() if 'Full Name' in df.columns else []
             
             moodle_names = []
-            if 'quiz_data' in st.session_state and st.session_state.quiz_data:
-                quiz_df = pd.DataFrame(st.session_state.quiz_data)
-                if 'Student' in quiz_df.columns:
-                    from core.api import clean_name
-                    moodle_names = [clean_name(n) for n in quiz_df['Student'].unique().tolist()]
+            # Fetch student names from Feedback form (complete list, unlike Quiz tab)
+            try:
+                from core.api import setup_session, get_feedbacks, fetch_feedback_responses, clean_name
+                
+                selected_group = st.session_state.get('selected_group')
+                selected_group_id = selected_group.get('id') if selected_group else None
+                
+                session = setup_session(st.session_state.session_id)
+                feedbacks = get_feedbacks(session, course_id)
+                
+                if feedbacks:
+                    # Find feedback form with student names (similar logic to TryHackMe)
+                    # Priority: account creation > task feedback > any feedback
+                    module_id = None
+                    for f in feedbacks:
+                        name_lower = f[0].lower()
+                        if 'account' in name_lower and ('creation' in name_lower or 'feedback' in name_lower):
+                            module_id = f[1]
+                            break
+                    if not module_id:
+                        for f in feedbacks:
+                            if 'task' in f[0].lower():
+                                module_id = f[1]
+                                break
+                    if not module_id and feedbacks:
+                        module_id = feedbacks[0][1]  # Fallback to first feedback
+                    
+                    if module_id:
+                        columns, responses = fetch_feedback_responses(
+                            st.session_state.session_id,
+                            module_id,
+                            selected_group_id
+                        )
+                        if responses:
+                            # Find name column
+                            name_column = None
+                            for col in columns:
+                                col_lower = col.lower()
+                                if 'first name' in col_lower or 'firstname' in col_lower:
+                                    name_column = col
+                                    break
+                            if not name_column:
+                                for col in columns:
+                                    if 'name' in col.lower() and 'username' not in col.lower():
+                                        name_column = col
+                                        break
+                            
+                            if name_column:
+                                moodle_names = [clean_name(r.get(name_column, '')) 
+                                               for r in responses if r.get(name_column)]
+            except Exception as e:
+                st.warning(f"Could not fetch feedback data: {e}")
             
             if moodle_names:
                 st.info(f"Found {len(moodle_names)} Moodle students")
@@ -604,7 +651,7 @@ def render_quizizz_tab(course, meta):
                         save_name_mappings(course_id, st.session_state.quizizz_name_mappings)
                         st.success("✓ Saved!")
             else:
-                st.warning("Fetch Quiz Scores first to enable name matching")
+                st.warning("No student names found. Check if a Feedback form exists in this course.")
             
             if st.button("Close"):
                 st.session_state.show_name_matching = False
