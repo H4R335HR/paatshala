@@ -71,6 +71,12 @@ CONFIG_SCHEMA = {
             "default": "https://wayground.com",
             "type": "url"
         },
+        "quizizz_tracker_url": {
+            "label": "Leaderboard Tracker URL",
+            "help": "Full URL to quizizz.php tracker (e.g., https://ictak.online/quizizz.php)",
+            "default": "",
+            "type": "url"
+        },
         "wayground_email": {
             "label": "Email",
             "help": "Wayground login email",
@@ -96,6 +102,12 @@ CONFIG_SCHEMA = {
             "help": "Gemini model to use (e.g., gemini-2.5-flash, gemini-2.0-flash, gemini-1.5-pro)",
             "default": "gemini-2.5-flash",
             "type": "text"
+        },
+        "github_pat": {
+            "label": "GitHub PAT (Optional)",
+            "help": "Personal Access Token for GitHub API. Optional - increases rate limit from 60/hr to 5000/hr. Create at github.com/settings/tokens (no scopes needed for public repos)",
+            "default": "",
+            "type": "password"
         }
     },
     "Google Drive": {

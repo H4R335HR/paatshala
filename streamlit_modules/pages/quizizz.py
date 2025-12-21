@@ -16,11 +16,101 @@ from pathlib import Path
 from datetime import datetime
 from rapidfuzz import fuzz, process
 
-from core.persistence import get_output_dir, write_wayground_config
+from core.persistence import get_output_dir, write_wayground_config, get_config
 from core.wayground import (
     wayground_login, validate_wayground_session, attempt_wayground_auto_login,
     get_available_reports, download_report
 )
+
+
+def publish_to_leaderboard(course_id, course_name, group_name, consolidated_df, total_quizzes):
+    """
+    Push consolidated quiz data to the public quizizz.php endpoint.
+    
+    Args:
+        course_id: Moodle course ID
+        course_name: Display name for the batch
+        group_name: Group name to extract batch name from (e.g., 'CL-IRP-CSA-14-NOV-2025' -> 'csanov25')
+        consolidated_df: DataFrame with consolidated student scores
+        total_quizzes: Number of quizzes in the data
+    
+    Returns:
+        tuple: (success: bool, message: str)
+    """
+    import requests
+    import json
+    from streamlit_modules.pages.tryhackme import extract_batch_name
+    
+    # Use same batch naming as TryHackMe
+    batch_name = extract_batch_name(group_name) if group_name else f"course{course_id}"
+    
+    # Config values (same pattern as TryHackMe admin panel)
+    tracker_url = get_config('quizizz_tracker_url', '')
+    auth_param = get_config('thm_auth_param', '')
+    auth_value = get_config('thm_auth_value', '')
+    
+    if not tracker_url:
+        return False, "Quizizz tracker URL not configured. Set 'quizizz_tracker_url' in config."
+    
+    if not auth_param or not auth_value:
+        return False, "Auth params not configured. Set 'thm_auth_param' and 'thm_auth_value' in config."
+    
+    # Prepare student data
+    students = []
+    for _, row in consolidated_df.iterrows():
+        # Handle accuracy - might be string with % or numeric
+        accuracy = row.get('Avg Accuracy', 0)
+        if isinstance(accuracy, str):
+            accuracy = float(accuracy.replace('%', '').strip() or 0)
+        
+        students.append({
+            'name': row.get('Name', ''),
+            'quizizz_name': row.get('Quizizz Name', row.get('Name', '')),
+            'rank': int(row.get('Rank', 0)),
+            'quizzes_taken': int(row.get('Quizzes Taken', 0)),
+            'total_score': int(row.get('Total Score', 0) or 0),
+            'avg_accuracy': float(accuracy),
+            'total_correct': int(row.get('Total Correct', 0) or 0),
+            'total_incorrect': int(row.get('Total Incorrect', 0) or 0),
+        })
+    
+    # POST to PHP backend (same pattern as TryHackMe upload)
+    # Headers to avoid 406 errors
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    }
+    
+    try:
+        response = requests.post(
+            f"{tracker_url}?page=upload",
+            data={
+                auth_param: auth_value,
+                'action': 'update',
+                'batch_name': batch_name,
+                'display_name': course_name,
+                'total_quizzes': str(total_quizzes),
+                'students_json': json.dumps(students)
+            },
+            headers=headers,
+            timeout=30
+        )
+        
+        if response.status_code == 200:
+            result = response.json()
+            if result.get('success'):
+                return True, f"Published to {batch_name.upper()}"
+            else:
+                return False, result.get('error', 'Unknown error')
+        else:
+            return False, f"HTTP {response.status_code}"
+    except requests.exceptions.JSONDecodeError:
+        # Response wasn't JSON - check if it contains success indicators
+        if 'success' in response.text.lower():
+            return True, f"Published to {batch_name.upper()}"
+        return False, "Invalid response from server"
+    except Exception as e:
+        return False, str(e)
 
 
 def get_quizizz_dir(course_id):
@@ -223,6 +313,10 @@ def render_quizizz_tab(course, meta):
     if 'wayground_reports' not in st.session_state:
         st.session_state.wayground_reports = None
     
+    # Toggle state for showing original Quizizz names vs Matched Moodle names
+    if 'quizizz_show_original_names' not in st.session_state:
+        st.session_state.quizizz_show_original_names = False
+    
     # =========================================================================
     # Header with inconspicuous login status
     # =========================================================================
@@ -258,10 +352,21 @@ def render_quizizz_tab(course, meta):
         
         st.subheader("📊 Quiz Results")
         
-        # Create full name column
+        # Create full name column (original Quizizz name)
         if 'First Name' in df.columns:
-            df['Full Name'] = df['First Name'].fillna('') + ' ' + df['Last Name'].fillna('')
-            df['Full Name'] = df['Full Name'].str.strip()
+            df['Quizizz Name'] = df['First Name'].fillna('') + ' ' + df['Last Name'].fillna('')
+            df['Quizizz Name'] = df['Quizizz Name'].str.strip()
+        
+        # Apply name mappings to create Matched Name column
+        name_mappings = st.session_state.quizizz_name_mappings
+        if 'Quizizz Name' in df.columns:
+            df['Matched Name'] = df['Quizizz Name'].apply(
+                lambda x: name_mappings.get(x, x)  # Use mapped name if exists, else original
+            )
+            # Count how many names are mapped
+            mapped_count = sum(1 for qn in df['Quizizz Name'].unique() if qn in name_mappings)
+        else:
+            mapped_count = 0
         
         # Summary metrics
         col1, col2, col3, col4 = st.columns(4)
@@ -271,7 +376,7 @@ def render_quizizz_tab(course, meta):
             unique_quizzes = df['Quiz Name'].nunique() if 'Quiz Name' in df.columns else 0
             st.metric("Quizzes", unique_quizzes)
         with col3:
-            unique_students = df['Full Name'].nunique() if 'Full Name' in df.columns else 0
+            unique_students = df['Matched Name'].nunique() if 'Matched Name' in df.columns else 0
             st.metric("Students", unique_students)
         with col4:
             try:
@@ -285,11 +390,15 @@ def render_quizizz_tab(course, meta):
                 avg_accuracy = 0
             st.metric("Avg Accuracy", f"{avg_accuracy:.1f}%")
         
+        # Determine which name column to display based on toggle state
+        show_original = st.session_state.quizizz_show_original_names
+        display_name_col = 'Quizizz Name' if show_original else 'Matched Name'
+        
         # Filter by quiz
         quiz_names = ['All'] + sorted(df['Quiz Name'].unique().tolist()) if 'Quiz Name' in df.columns else ['All']
         selected_quiz = st.selectbox("Filter by Quiz", quiz_names, key="quizizz_filter")
         
-        if selected_quiz == 'All' and 'Full Name' in df.columns:
+        if selected_quiz == 'All' and 'Matched Name' in df.columns:
             # ===== CONSOLIDATED VIEW =====
             st.caption("📊 **Consolidated Summary** - Aggregated results per student across all quizzes")
             
@@ -308,6 +417,7 @@ def render_quizizz_tab(course, meta):
                 if col in df_numeric.columns:
                     df_numeric[f'{col}_Num'] = pd.to_numeric(df_numeric[col], errors='coerce')
             
+            # Group by the selected display name column
             agg_dict = {'Quiz Name': 'count'}
             if 'Score_Num' in df_numeric.columns:
                 agg_dict['Score_Num'] = 'sum'
@@ -318,9 +428,10 @@ def render_quizizz_tab(course, meta):
             if 'Incorrect_Num' in df_numeric.columns:
                 agg_dict['Incorrect_Num'] = 'sum'
             
-            consolidated = df_numeric.groupby('Full Name').agg(agg_dict).reset_index()
+            consolidated = df_numeric.groupby(display_name_col).agg(agg_dict).reset_index()
             
             rename_map = {
+                display_name_col: 'Name',
                 'Quiz Name': 'Quizzes Taken',
                 'Score_Num': 'Total Score',
                 'Accuracy_Num': 'Avg Accuracy',
@@ -341,9 +452,22 @@ def render_quizizz_tab(course, meta):
             
             st.dataframe(consolidated, width="stretch", hide_index=True)
             
-            # Action buttons row
-            csv = consolidated.to_csv(index=False)
-            col1, col2, col3 = st.columns([1, 1, 4])
+            # Action buttons row - CSV includes both name columns for reference
+            # Build a comprehensive CSV with both Quizizz and Matched names
+            csv_df = df_numeric.groupby(['Quizizz Name', 'Matched Name']).agg(agg_dict).reset_index()
+            csv_df = csv_df.rename(columns={
+                'Quiz Name': 'Quizzes Taken',
+                'Score_Num': 'Total Score',
+                'Accuracy_Num': 'Avg Accuracy',
+                'Correct_Num': 'Total Correct',
+                'Incorrect_Num': 'Total Incorrect'
+            })
+            if 'Total Score' in csv_df.columns:
+                csv_df = csv_df.sort_values('Total Score', ascending=False)
+            csv_df.insert(0, 'Rank', range(1, len(csv_df) + 1))
+            csv = csv_df.to_csv(index=False)
+            
+            col1, col2, col3, col4 = st.columns([1, 1, 1, 1])
             with col1:
                 st.download_button(
                     label="📥 Download CSV",
@@ -355,21 +479,59 @@ def render_quizizz_tab(course, meta):
             with col2:
                 if st.button("🔗 Name Matching", key="name_match_btn_consolidated"):
                     st.session_state.show_name_matching = True
+            with col3:
+                # Toggle button for showing original vs matched names
+                toggle_label = "👤 Quizizz Names" if not show_original else "👤 Moodle Names"
+                toggle_help = f"Currently showing {'original Quizizz' if show_original else 'matched Moodle'} names. {mapped_count} names matched."
+                if st.button(toggle_label, key="toggle_names_consolidated", help=toggle_help):
+                    st.session_state.quizizz_show_original_names = not show_original
+                    st.rerun()
+            with col4:
+                # Publish to public leaderboard - requires group selection
+                from streamlit_modules.pages.tryhackme import extract_batch_name
+                group = st.session_state.get('selected_group', {})
+                group_name = group.get('name', '') if group else ''
+                batch_name = extract_batch_name(group_name) if group_name else ''
+                
+                if batch_name:
+                    publish_label = f"📤 Publish → {batch_name.upper()}"
+                    if st.button(publish_label, key="publish_leaderboard_consolidated", help="Update public leaderboard"):
+                        with st.spinner("Publishing..."):
+                            success, msg = publish_to_leaderboard(
+                                course_id, course['name'], group_name,
+                                consolidated, unique_quizzes
+                            )
+                            if success:
+                                st.success(f"✅ {msg}")
+                            else:
+                                st.error(f"❌ {msg}")
+                else:
+                    st.button("📤 Publish", key="publish_leaderboard_consolidated", disabled=True, 
+                              help="Select a group in sidebar to enable publishing")
         else:
             # ===== INDIVIDUAL QUIZ VIEW =====
             display_df = df.copy()
             if selected_quiz != 'All':
                 display_df = df[df['Quiz Name'] == selected_quiz]
             
-            display_cols = ['Quiz Name', 'Full Name', 'Score', 'Accuracy', 'Correct', 'Incorrect', 
+            # Use selected name column based on toggle
+            display_cols = ['Quiz Name', display_name_col, 'Score', 'Accuracy', 'Correct', 'Incorrect', 
                            'Total Time Taken', 'Started At']
             display_cols = [c for c in display_cols if c in display_df.columns]
             
-            st.dataframe(display_df[display_cols], width="stretch", hide_index=True)
+            # Rename column for display
+            show_df = display_df[display_cols].copy()
+            show_df = show_df.rename(columns={display_name_col: 'Name'})
             
-            # Action buttons row
-            csv = display_df.to_csv(index=False)
-            col1, col2, col3 = st.columns([1, 1, 4])
+            st.dataframe(show_df, width="stretch", hide_index=True)
+            
+            # Action buttons row - CSV includes both name columns
+            csv_cols = ['Quiz Name', 'Quizizz Name', 'Matched Name', 'Score', 'Accuracy', 'Correct', 'Incorrect', 
+                       'Total Time Taken', 'Started At']
+            csv_cols = [c for c in csv_cols if c in display_df.columns]
+            csv = display_df[csv_cols].to_csv(index=False)
+            
+            col1, col2, col3 = st.columns([1, 1, 1])
             with col1:
                 st.download_button(
                     label="📥 Download CSV",
@@ -381,6 +543,13 @@ def render_quizizz_tab(course, meta):
             with col2:
                 if st.button("🔗 Name Matching", key="name_match_btn_individual"):
                     st.session_state.show_name_matching = True
+            with col3:
+                # Toggle button for showing original vs matched names
+                toggle_label = "👤 Quizizz Names" if not show_original else "👤 Moodle Names"
+                toggle_help = f"Currently showing {'original Quizizz' if show_original else 'matched Moodle'} names. {mapped_count} names matched."
+                if st.button(toggle_label, key="toggle_names_individual", help=toggle_help):
+                    st.session_state.quizizz_show_original_names = not show_original
+                    st.rerun()
         
         st.divider()
     else:
@@ -533,14 +702,14 @@ def render_quizizz_tab(course, meta):
     if st.session_state.show_name_matching and st.session_state.quizizz_data is not None:
         df = st.session_state.quizizz_data.copy()
         if 'First Name' in df.columns:
-            df['Full Name'] = df['First Name'].fillna('') + ' ' + df['Last Name'].fillna('')
-            df['Full Name'] = df['Full Name'].str.strip()
+            df['Quizizz Name'] = df['First Name'].fillna('') + ' ' + df['Last Name'].fillna('')
+            df['Quizizz Name'] = df['Quizizz Name'].str.strip()
         
         @st.dialog("🔗 Name Matching")
         def show_name_matching_dialog():
             st.caption("Match Quizizz names to Moodle students")
             
-            quizizz_names = df['Full Name'].unique().tolist() if 'Full Name' in df.columns else []
+            quizizz_names = df['Quizizz Name'].unique().tolist() if 'Quizizz Name' in df.columns else []
             
             moodle_names = []
             # Fetch student names from Feedback form (complete list, unlike Quiz tab)
@@ -600,22 +769,35 @@ def render_quizizz_tab(course, meta):
                 st.info(f"Found {len(moodle_names)} Moodle students")
                 
                 match_results = []
+                auto_matched = {}  # Track auto-matched names to save
+                
                 for qname in quizizz_names:
                     if qname in st.session_state.quizizz_name_mappings:
+                        # Already manually mapped
                         match_results.append({
                             'Quizizz Name': qname,
                             'Moodle Name': st.session_state.quizizz_name_mappings[qname],
                             'Confidence': 100,
-                            'Status': '✅ Manual'
+                            'Status': '✅ Saved'
                         })
                     else:
                         best_match, score = fuzzy_match_name(qname, moodle_names)
-                        match_results.append({
-                            'Quizizz Name': qname,
-                            'Moodle Name': best_match or '❓ No match',
-                            'Confidence': score,
-                            'Status': '✅ Auto' if score >= 80 else ('⚠️ Low' if score >= 50 else '❌ None')
-                        })
+                        if score >= 80 and best_match:
+                            # High confidence auto-match - will be saved
+                            auto_matched[qname] = best_match
+                            match_results.append({
+                                'Quizizz Name': qname,
+                                'Moodle Name': best_match,
+                                'Confidence': score,
+                                'Status': '✅ Auto'
+                            })
+                        else:
+                            match_results.append({
+                                'Quizizz Name': qname,
+                                'Moodle Name': best_match or '❓ No match',
+                                'Confidence': score,
+                                'Status': '⚠️ Low' if score >= 50 else '❌ None'
+                            })
                 
                 match_df = pd.DataFrame(match_results)
                 st.dataframe(
@@ -629,6 +811,7 @@ def render_quizizz_tab(course, meta):
                     }
                 )
                 
+                # Show low confidence matches for manual mapping
                 low_confidence = match_df[match_df['Confidence'] < 80]
                 if not low_confidence.empty:
                     st.caption("Manual mapping for low-confidence matches:")
@@ -638,18 +821,34 @@ def render_quizizz_tab(course, meta):
                         with col1:
                             st.text(qname)
                         with col2:
+                            # Get current saved value
+                            current_value = st.session_state.quizizz_name_mappings.get(qname, '-- Select --')
+                            try:
+                                default_idx = (['-- Select --'] + moodle_names).index(current_value)
+                            except ValueError:
+                                default_idx = 0
+                            
                             selected = st.selectbox(
                                 "Map to:",
                                 ['-- Select --'] + moodle_names,
+                                index=default_idx,
                                 key=f"map_{qname}",
                                 label_visibility="collapsed"
                             )
                             if selected != '-- Select --':
                                 st.session_state.quizizz_name_mappings[qname] = selected
-                    
-                    if st.button("💾 Save Mappings"):
-                        save_name_mappings(course_id, st.session_state.quizizz_name_mappings)
-                        st.success("✓ Saved!")
+                
+                # Save button - saves both auto-matched and manual mappings to disk
+                saved_count = len(st.session_state.quizizz_name_mappings)
+                new_auto_count = len(auto_matched)
+                total_to_save = saved_count + new_auto_count
+                
+                if st.button(f"💾 Save All Mappings ({total_to_save} total)"):
+                    # Add auto-matched names to session state
+                    st.session_state.quizizz_name_mappings.update(auto_matched)
+                    # Save to disk
+                    save_name_mappings(course_id, st.session_state.quizizz_name_mappings)
+                    st.success(f"✓ Saved {len(st.session_state.quizizz_name_mappings)} mappings!")
             else:
                 st.warning("No student names found. Check if a Feedback form exists in this course.")
             

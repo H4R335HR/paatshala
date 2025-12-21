@@ -8,7 +8,7 @@ import logging
 import streamlit as st
 
 from core.auth import setup_session
-from core.api import fetch_quiz_scores_all, get_quizzes, get_available_groups
+from core.api import fetch_quiz_scores_all, get_quizzes, get_available_groups, clean_name
 from core.persistence import (
     load_csv_from_disk, save_csv_to_disk, 
     save_meta, dataframe_to_csv
@@ -115,8 +115,16 @@ def render_quiz_tab(course, meta):
             st.warning("No quiz data found (no practice quizzes or no attempts)")
     
     if st.session_state.quiz_data:
+        import pandas as pd
+        # Create display-friendly dataframe with cleaned names
+        df = pd.DataFrame(st.session_state.quiz_data)
+        
+        # Clean names - remove batch suffix from Student Name column
+        if 'Student Name' in df.columns:
+            df['Student Name'] = df['Student Name'].apply(clean_name)
+        
         st.dataframe(
-            st.session_state.quiz_data,
+            df,
             width="stretch",
             hide_index=True
         )

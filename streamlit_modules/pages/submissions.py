@@ -7,7 +7,7 @@ import logging
 from datetime import datetime, timedelta
 import streamlit as st
 
-from core.api import fetch_submissions, fetch_tasks_list, get_assignment_dates, update_assignment_dates
+from core.api import fetch_submissions, fetch_tasks_list, get_assignment_dates, update_assignment_dates, clean_name
 from core.auth import setup_session
 from core.persistence import (
     load_csv_from_disk, save_csv_to_disk, 
@@ -323,8 +323,16 @@ def render_submissions_tab(course, meta):
                 st.session_state.submissions_group_id = selected_group_id
             
             if display_data:
+                import pandas as pd
+                # Create a display-friendly dataframe
+                df = pd.DataFrame(display_data)
+                
+                # Clean names - remove batch suffix from Name column
+                if 'Name' in df.columns:
+                    df['Name'] = df['Name'].apply(clean_name)
+                
                 st.dataframe(
-                    display_data,
+                    df,
                     width="stretch",
                     hide_index=True
                 )
@@ -337,3 +345,4 @@ def render_submissions_tab(course, meta):
                     mime="text/csv",
                     key=f"download_submissions_{module_id}_{selected_group_id}"
                 )
+

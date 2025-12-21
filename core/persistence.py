@@ -430,10 +430,19 @@ def dataframe_to_csv(rows, columns=None):
     
     from io import StringIO
     output = StringIO()
-    if columns is None:
-        columns = list(rows[0].keys())
     
-    writer = csv.DictWriter(output, fieldnames=columns)
+    if columns is None:
+        # Collect all unique keys from all rows to handle varying fields
+        all_keys = set()
+        for r in rows:
+            all_keys.update(r.keys())
+        # Preserve order: start with first row's keys, then add any extras
+        columns = list(rows[0].keys())
+        for key in all_keys:
+            if key not in columns:
+                columns.append(key)
+    
+    writer = csv.DictWriter(output, fieldnames=columns, extrasaction='ignore')
     writer.writeheader()
     # Handle None values by converting to empty string for CSV
     rows_clean = [{k: (v if v is not None else "") for k, v in r.items()} for r in rows]

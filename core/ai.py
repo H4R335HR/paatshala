@@ -322,3 +322,516 @@ def delete_rubric(course_id: int, module_id: int, group_id: Optional[int] = None
     except Exception as e:
         logger.error(f"Failed to delete rubric: {e}")
         return False
+
+
+# =============================================================================
+# AI SCORING FUNCTIONS
+# =============================================================================
+
+EVALUATIONS_DIR = "evaluations"
+
+
+def fetch_github_content(repo_url: str, pat: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Fetch README and file listing from a GitHub repository.
+    
+    Args:
+        repo_url: GitHub repository URL
+        pat: Optional Personal Access Token for higher rate limits
+    
+    Returns:
+        Dict with 'readme', 'files', 'error' keys
+    """
+    import requests
+    import re
+    import base64
+    
+    result = {
+        "readme": "",
+        "files": [],
+        "error": None
+    }
+    
+    # Extract owner/repo from URL
+    # Handles: github.com/owner/repo, github.com/owner/repo.git, etc.
+    match = re.search(r'github\.com/([^/]+)/([^/\s]+)', repo_url)
+    if not match:
+        result["error"] = "Could not parse GitHub URL"
+        return result
+    
+    owner = match.group(1)
+    repo = match.group(2).removesuffix('.git').rstrip('/')
+    
+    # Set up headers
+    headers = {"Accept": "application/vnd.github.v3+json"}
+    if pat:
+        headers["Authorization"] = f"token {pat}"
+    
+    try:
+        # Fetch README
+        readme_url = f"https://api.github.com/repos/{owner}/{repo}/readme"
+        readme_resp = requests.get(readme_url, headers=headers, timeout=10)
+        
+        if readme_resp.status_code == 200:
+            readme_data = readme_resp.json()
+            # Decode base64 content
+            if readme_data.get("encoding") == "base64":
+                result["readme"] = base64.b64decode(readme_data.get("content", "")).decode("utf-8", errors="ignore")
+            else:
+                result["readme"] = readme_data.get("content", "")
+        elif readme_resp.status_code == 404:
+            result["readme"] = "(No README found)"
+        elif readme_resp.status_code == 403:
+            result["error"] = "GitHub API rate limit reached"
+            return result
+        
+        # Fetch file listing
+        contents_url = f"https://api.github.com/repos/{owner}/{repo}/contents"
+        contents_resp = requests.get(contents_url, headers=headers, timeout=10)
+        
+        if contents_resp.status_code == 200:
+            files = contents_resp.json()
+            result["files"] = [
+                {"name": f.get("name"), "type": f.get("type"), "size": f.get("size", 0)}
+                for f in files if isinstance(f, dict)
+            ]
+        elif contents_resp.status_code == 403:
+            result["error"] = "GitHub API rate limit reached"
+            
+    except requests.exceptions.RequestException as e:
+        result["error"] = f"Network error: {str(e)}"
+    except Exception as e:
+        result["error"] = f"Error fetching GitHub content: {str(e)}"
+    
+    return result
+
+
+def fetch_submission_content(row: Dict, course_id: int = None) -> Dict[str, Any]:
+    """
+    Extract evaluable content from a submission based on its type.
+    
+    Args:
+        row: Submission row dict
+        course_id: Course ID for file path construction
+    
+    Returns:
+        Dict with 'type', 'content', 'summary', 'error' keys
+    """
+    import re
+    import ast
+    
+    result = {
+        "type": "unknown",
+        "content": "",
+        "summary": "",
+        "error": None
+    }
+    
+    submission_text = row.get("Submission", "")
+    submission_type = row.get("Submission_Type", "")
+    submission_files = row.get("Submission_Files", [])
+    
+    # Parse submission files if it's a string
+    if isinstance(submission_files, str) and submission_files.startswith('['):
+        try:
+            submission_files = ast.literal_eval(submission_files)
+        except:
+            submission_files = []
+    
+    # Determine type if not set
+    if not submission_type:
+        if submission_files:
+            submission_type = "file"
+        elif "http" in submission_text.lower():
+            submission_type = "link"
+        elif submission_text.strip():
+            submission_type = "text"
+        else:
+            submission_type = "empty"
+    
+    result["type"] = submission_type
+    
+    if submission_type == "empty" or not submission_text.strip():
+        result["summary"] = "No submission"
+        result["content"] = ""
+        return result
+    
+    if submission_type == "link":
+        # Extract URL
+        url_match = re.search(r'(https?://[^\s]+)', submission_text)
+        if url_match:
+            url = url_match.group(1)
+            result["summary"] = f"Link submission: {url}"
+            
+            if "github.com" in url:
+                # Fetch GitHub content
+                pat = get_config("github_pat")
+                github_content = fetch_github_content(url, pat)
+                
+                if github_content.get("error"):
+                    result["error"] = github_content["error"]
+                    result["content"] = f"GitHub URL: {url}\n\n(Could not fetch content: {github_content['error']})"
+                else:
+                    files_list = "\n".join([f"- {f['name']} ({f['type']})" for f in github_content.get("files", [])])
+                    result["content"] = f"""GitHub Repository: {url}
+
+## Files in Repository:
+{files_list or "(empty)"}
+
+## README:
+{github_content.get('readme', '(No README)')}
+"""
+            else:
+                # Non-GitHub link - can't fetch content
+                result["content"] = f"Submitted URL: {url}\n\n(Cannot fetch content from non-GitHub URLs)"
+        else:
+            result["content"] = submission_text
+            result["summary"] = "Text with no valid URL"
+    
+    elif submission_type == "file":
+        # File submission
+        if submission_files:
+            file_names = [f[0] if isinstance(f, (list, tuple)) else str(f) for f in submission_files]
+            result["summary"] = f"File submission: {', '.join(file_names)}"
+            
+            # Try to read downloaded files
+            file_contents = []
+            for f in submission_files:
+                fname = f[0] if isinstance(f, (list, tuple)) else str(f)
+                file_contents.append(f"File: {fname}")
+                
+                # Check if file is downloaded locally
+                if course_id:
+                    safe_student = "".join([c for c in row.get('Name', 'Unknown') if c.isalnum() or c in (' ', '-', '_')]).strip()
+                    safe_filename = "".join([c for c in fname if c.isalnum() or c in (' ', '-', '_', '.')]).strip()
+                    local_path = Path(f"output/course_{course_id}/downloads/{safe_student}/{safe_filename}")
+                    
+                    if local_path.exists():
+                        try:
+                            # Only read text files
+                            if local_path.suffix.lower() in ['.txt', '.py', '.js', '.html', '.css', '.md', '.json', '.xml', '.csv']:
+                                with open(local_path, 'r', encoding='utf-8', errors='ignore') as fp:
+                                    content = fp.read()
+                                    file_contents.append(f"--- Content of {fname} ---\n{content[:5000]}")  # Limit size
+                            else:
+                                file_contents.append(f"(Binary file - cannot read content)")
+                        except Exception as e:
+                            file_contents.append(f"(Error reading file: {e})")
+                    else:
+                        file_contents.append(f"(File not downloaded locally)")
+            
+            result["content"] = "\n\n".join(file_contents)
+        else:
+            result["summary"] = "File submission (no files listed)"
+            result["content"] = submission_text
+    
+    elif submission_type == "text":
+        result["summary"] = f"Text submission ({len(submission_text)} chars)"
+        result["content"] = submission_text
+    
+    return result
+
+
+def score_submission(
+    submission_content: Dict[str, Any],
+    rubric: List[Dict],
+    task_description: str,
+    student_name: str = ""
+) -> Optional[Dict[str, Any]]:
+    """
+    Score a submission using Gemini AI against the provided rubric.
+    
+    Args:
+        submission_content: Dict from fetch_submission_content()
+        rubric: List of rubric criteria dicts
+        task_description: The task/assignment description
+        student_name: Optional student name for context
+    
+    Returns:
+        Dict with 'total_score', 'criteria_scores', 'comments', 'error'
+    """
+    client = get_gemini_client()
+    if not client:
+        return {"error": "Gemini API not configured"}
+    
+    # Handle empty submissions
+    if submission_content.get("type") == "empty" or not submission_content.get("content"):
+        return {
+            "total_score": 0,
+            "criteria_scores": [
+                {"criterion": c["criterion"], "score": 0, "max_score": c["weight_percent"], "comment": "No submission"}
+                for c in rubric
+            ],
+            "comments": "No submission was provided for this assignment.",
+            "error": None
+        }
+    
+    # Build rubric text for prompt
+    rubric_text = "\n".join([
+        f"- {c['criterion']} ({c['weight_percent']}%): {c['description']}"
+        for c in rubric
+    ])
+    
+    prompt = f"""You are evaluating a student submission for an assignment.
+
+## Task Description:
+{task_description}
+
+## Scoring Rubric:
+{rubric_text}
+
+## Student Submission:
+Type: {submission_content.get('type', 'unknown')}
+Summary: {submission_content.get('summary', '')}
+
+Content:
+{submission_content.get('content', '(No content available)')[:8000]}
+
+## Instructions:
+1. Evaluate the submission against EACH criterion in the rubric
+2. Assign a score (0 to the max weight) for each criterion
+3. Provide brief constructive feedback
+
+Return ONLY a valid JSON object with this structure (no markdown):
+{{
+  "criteria_scores": [
+    {{"criterion": "Criterion Name", "score": 25, "max_score": 30, "comment": "Brief feedback"}},
+    ...
+  ],
+  "overall_comments": "2-3 sentences of overall feedback for the student"
+}}
+
+Be fair but thorough. If content couldn't be fetched, base your evaluation on what's available."""
+
+    try:
+        model = get_config("gemini_model") or "gemini-2.5-flash"
+        
+        response = client.models.generate_content(
+            model=model,
+            contents=prompt
+        )
+        
+        response_text = response.text.strip()
+        
+        # Remove markdown code fencing if present
+        if response_text.startswith("```"):
+            lines = response_text.split("\n")
+            response_text = "\n".join(lines[1:-1] if lines[-1].startswith("```") else lines[1:])
+        
+        result = json.loads(response_text)
+        
+        # Calculate total score
+        criteria_scores = result.get("criteria_scores", [])
+        total_score = sum(c.get("score", 0) for c in criteria_scores)
+        
+        return {
+            "total_score": total_score,
+            "criteria_scores": criteria_scores,
+            "comments": result.get("overall_comments", ""),
+            "error": None
+        }
+        
+    except json.JSONDecodeError as e:
+        logger.error(f"Failed to parse scoring response: {e}")
+        return {"error": f"Failed to parse AI response: {e}"}
+    except Exception as e:
+        logger.error(f"Error scoring submission: {e}")
+        return {"error": f"Scoring error: {e}"}
+
+
+def save_evaluation(course_id: int, module_id: int, student_name: str, evaluation: Dict, group_id: Optional[int] = None) -> bool:
+    """
+    Save an evaluation result to disk.
+    
+    Args:
+        course_id: Course ID
+        module_id: Assignment module ID
+        student_name: Student name (used in filename)
+        evaluation: Evaluation result dict
+        group_id: Optional group ID
+    
+    Returns:
+        True if saved successfully
+    """
+    try:
+        eval_dir = Path("output") / f"course_{course_id}" / EVALUATIONS_DIR / f"mod{module_id}"
+        if group_id:
+            eval_dir = eval_dir / f"grp{group_id}"
+        eval_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Sanitize student name for filename
+        safe_name = "".join([c for c in student_name if c.isalnum() or c in (' ', '-', '_')]).strip().replace(' ', '_')
+        filename = f"eval_{safe_name}.json"
+        filepath = eval_dir / filename
+        
+        doc = {
+            "student_name": student_name,
+            "module_id": module_id,
+            "group_id": group_id,
+            "evaluated_at": datetime.now().isoformat(),
+            **evaluation
+        }
+        
+        with open(filepath, "w", encoding="utf-8") as f:
+            json.dump(doc, f, indent=2, ensure_ascii=False)
+        
+        logger.info(f"Saved evaluation to {filepath}")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Failed to save evaluation: {e}")
+        return False
+
+
+def load_evaluation(course_id: int, module_id: int, student_name: str, group_id: Optional[int] = None) -> Optional[Dict]:
+    """
+    Load an evaluation result from disk.
+    
+    Args:
+        course_id: Course ID
+        module_id: Assignment module ID
+        student_name: Student name
+        group_id: Optional group ID
+    
+    Returns:
+        Evaluation dict or None if not found
+    """
+    eval_dir = Path("output") / f"course_{course_id}" / EVALUATIONS_DIR / f"mod{module_id}"
+    if group_id:
+        eval_dir = eval_dir / f"grp{group_id}"
+    
+    safe_name = "".join([c for c in student_name if c.isalnum() or c in (' ', '-', '_')]).strip().replace(' ', '_')
+    filename = f"eval_{safe_name}.json"
+    filepath = eval_dir / filename
+    
+    if filepath.exists():
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            logger.error(f"Failed to load evaluation: {e}")
+    
+    return None
+
+
+def refine_evaluation(
+    current_evaluation: Dict,
+    instructions: str,
+    submission_content: Dict,
+    rubric: List[Dict],
+    task_description: str = ""
+) -> Optional[Dict[str, Any]]:
+    """
+    Refine an existing evaluation based on user feedback/questions.
+    
+    Args:
+        current_evaluation: The current evaluation dict with scores and comments
+        instructions: User's questions, clarifications, or adjustment requests
+        submission_content: The original submission content
+        rubric: The rubric criteria
+        task_description: The task description for context
+    
+    Returns:
+        Updated evaluation dict with 'total_score', 'criteria_scores', 'comments', 'conversation'
+    """
+    client = get_gemini_client()
+    if not client:
+        return {"error": "Gemini API not configured"}
+    
+    # Format current evaluation
+    eval_summary = f"Total Score: {current_evaluation.get('total_score', 0)}/100\n\n"
+    for cs in current_evaluation.get('criteria_scores', []):
+        eval_summary += f"- {cs.get('criterion')}: {cs.get('score')}/{cs.get('max_score')} - {cs.get('comment', '')}\n"
+    eval_summary += f"\nOverall Comments: {current_evaluation.get('comments', '')}"
+    
+    # Format rubric
+    rubric_text = "\n".join([
+        f"- {c['criterion']} ({c['weight_percent']}%): {c['description']}"
+        for c in rubric
+    ])
+    
+    # Get conversation history if exists
+    conversation_history = current_evaluation.get('conversation', [])
+    conversation_text = ""
+    if conversation_history:
+        for msg in conversation_history[-5:]:  # Last 5 exchanges
+            conversation_text += f"\n{msg['role'].upper()}: {msg['content']}"
+    
+    prompt = f"""You are helping a teacher review and potentially adjust an AI-generated evaluation of a student submission.
+
+## Task Description:
+{task_description}
+
+## Rubric:
+{rubric_text}
+
+## Submission Summary:
+Type: {submission_content.get('type', 'unknown')}
+{submission_content.get('summary', '')}
+
+## Current Evaluation:
+{eval_summary}
+{f"## Previous Discussion:{conversation_text}" if conversation_text else ""}
+
+## Teacher's Message:
+{instructions}
+
+## Instructions:
+1. If the teacher is asking a question, answer it directly and explain your reasoning
+2. If the teacher requests score adjustments, update the scores accordingly with justification
+3. If the teacher provides additional context, incorporate it into your evaluation
+4. Always be helpful and explain your reasoning
+
+Return a JSON object with this structure (no markdown):
+{{
+  "criteria_scores": [
+    {{"criterion": "Criterion Name", "score": 25, "max_score": 30, "comment": "Updated feedback"}},
+    ...
+  ],
+  "overall_comments": "Updated overall feedback",
+  "response_to_teacher": "Your direct response to the teacher's question/request"
+}}
+
+If no score changes are needed (just answering a question), keep the original scores."""
+
+    try:
+        model = get_config("gemini_model") or "gemini-2.5-flash"
+        
+        response = client.models.generate_content(
+            model=model,
+            contents=prompt
+        )
+        
+        response_text = response.text.strip()
+        
+        # Remove markdown code fencing if present
+        if response_text.startswith("```"):
+            lines = response_text.split("\n")
+            response_text = "\n".join(lines[1:-1] if lines[-1].startswith("```") else lines[1:])
+        
+        result = json.loads(response_text)
+        
+        # Calculate total score
+        criteria_scores = result.get("criteria_scores", [])
+        total_score = sum(c.get("score", 0) for c in criteria_scores)
+        
+        # Update conversation history
+        new_conversation = conversation_history.copy()
+        new_conversation.append({"role": "teacher", "content": instructions})
+        new_conversation.append({"role": "ai", "content": result.get("response_to_teacher", "")})
+        
+        return {
+            "total_score": total_score,
+            "criteria_scores": criteria_scores,
+            "comments": result.get("overall_comments", current_evaluation.get("comments", "")),
+            "response_to_teacher": result.get("response_to_teacher", ""),
+            "conversation": new_conversation,
+            "error": None
+        }
+        
+    except json.JSONDecodeError as e:
+        logger.error(f"Failed to parse refinement response: {e}")
+        return {"error": f"Failed to parse AI response: {e}"}
+    except Exception as e:
+        logger.error(f"Error refining evaluation: {e}")
+        return {"error": f"Refinement error: {e}"}

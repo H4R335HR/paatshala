@@ -12,7 +12,7 @@ import ast
 from core.auth import setup_session
 from core.api import evaluate_submission, download_file
 from core.persistence import save_csv_to_disk, get_config
-from core.ai import generate_rubric, save_rubric, load_rubric, refine_rubric
+from core.ai import generate_rubric, save_rubric, load_rubric, refine_rubric, fetch_submission_content, score_submission, save_evaluation, load_evaluation, refine_evaluation
 from streamlit_modules.ui.components import format_timestamp
 
 logger = logging.getLogger(__name__)
@@ -226,6 +226,11 @@ def render_evaluation_tab(course, meta):
     
     with st.expander("Submission Content", expanded=True):
         st.text(row.get('Submission', ''))
+    
+    # =========================================================================
+    # AI SCORING SECTION
+    # =========================================================================
+    _render_ai_scoring_section(course, row, idx, data)
 
 
 def _render_file_submission(course, row, idx):
@@ -494,3 +499,269 @@ def _show_refine_dialog(rubric_key, current_rubric, task_description, module_id)
     with col2:
         if st.button("Cancel", use_container_width=True):
             st.rerun()
+
+
+def _render_ai_scoring_section(course, row, idx, data):
+    """Render the AI scoring section for an individual submission."""
+    st.divider()
+    st.markdown("### 🤖 AI Scoring")
+    
+    # Get module info
+    module_id = row.get('Module ID')
+    if not module_id:
+        st.warning("Cannot score: Module ID not available")
+        return
+    
+    # Check for rubric
+    selected_group_id = None
+    if st.session_state.selected_group:
+        selected_group_id = st.session_state.selected_group['id']
+    
+    rubric_key = f"rubric_{module_id}"
+    if selected_group_id:
+        rubric_key += f"_grp{selected_group_id}"
+    
+    # Load rubric if not in session
+    if rubric_key not in st.session_state or st.session_state[rubric_key] is None:
+        existing = load_rubric(course['id'], module_id, selected_group_id)
+        if existing and 'criteria' in existing:
+            st.session_state[rubric_key] = existing['criteria']
+        else:
+            st.session_state[rubric_key] = None
+    
+    rubric = st.session_state.get(rubric_key)
+    
+    if not rubric:
+        st.info("⚠️ No rubric found for this task. Generate one in the 'Scoring Rubric' section above first.")
+        return
+    
+    # Check for existing evaluation
+    student_name = row.get('Name', 'Unknown')
+    existing_eval = load_evaluation(course['id'], module_id, student_name, selected_group_id)
+    
+    # Display existing evaluation if present
+    if existing_eval and existing_eval.get('total_score') is not None:
+        _display_evaluation_results(existing_eval, rubric)
+        
+        # Show conversation history if exists
+        conversation = existing_eval.get('conversation', [])
+        if conversation:
+            with st.expander("💬 Previous Discussion", expanded=False):
+                for msg in conversation:
+                    if msg['role'] == 'teacher':
+                        st.markdown(f"**You:** {msg['content']}")
+                    else:
+                        st.markdown(f"**AI:** {msg['content']}")
+        
+        # Action buttons: Re-Score and Discuss
+        col1, col2, col3 = st.columns([1, 1, 2])
+        with col1:
+            rescore = st.button("🔄 Re-Score", key=f"rescore_{idx}")
+        with col2:
+            discuss = st.button("💬 Discuss", key=f"discuss_{idx}")
+        
+        if rescore:
+            _perform_scoring(course, row, rubric, module_id, selected_group_id, data)
+        
+        if discuss:
+            _show_discuss_dialog(course, row, existing_eval, rubric, module_id, selected_group_id, idx)
+    else:
+        # Get task description
+        task_description = _get_task_description(module_id)
+        
+        if not task_description:
+            st.warning("⚠️ Task description not available. Fetch tasks in Submissions tab first.")
+        
+        # Score button
+        col1, col2, col3 = st.columns([1, 1, 2])
+        with col1:
+            if st.button("🎯 Score with AI", key=f"score_{idx}", type="primary"):
+                _perform_scoring(course, row, rubric, module_id, selected_group_id, data)
+        
+        with col2:
+            st.caption(f"Using {len(rubric)} criteria")
+
+
+def _get_task_description(module_id):
+    """Get task description from session state tasks data."""
+    if not st.session_state.tasks_data:
+        return ""
+    
+    for task in st.session_state.tasks_data:
+        if str(task.get('Module ID')) == str(module_id):
+            return task.get('description', '')
+    
+    return ""
+
+
+def _perform_scoring(course, row, rubric, module_id, group_id, data):
+    """Perform AI scoring on a submission."""
+    with st.spinner("Fetching submission content..."):
+        submission_content = fetch_submission_content(row, course['id'])
+    
+    if submission_content.get('error'):
+        st.warning(f"⚠️ {submission_content['error']}")
+    
+    with st.spinner("Scoring with AI..."):
+        task_description = _get_task_description(module_id)
+        result = score_submission(
+            submission_content,
+            rubric,
+            task_description,
+            row.get('Name', '')
+        )
+    
+    if result and result.get('error'):
+        st.error(f"❌ Scoring failed: {result['error']}")
+        return
+    
+    if result:
+        # Save evaluation
+        student_name = row.get('Name', 'Unknown')
+        save_evaluation(course['id'], module_id, student_name, result, group_id)
+        
+        st.success(f"✓ Scored: **{result['total_score']}/100**")
+        st.rerun()
+
+
+def _display_evaluation_results(evaluation, rubric):
+    """Display evaluation results with score breakdown and comments."""
+    
+    # Total score with visual indicator
+    total_score = evaluation.get('total_score', 0)
+    
+    # Color based on score
+    if total_score >= 80:
+        score_color = "green"
+        score_emoji = "🎉"
+    elif total_score >= 60:
+        score_color = "orange"
+        score_emoji = "👍"
+    elif total_score >= 40:
+        score_color = "yellow"
+        score_emoji = "⚠️"
+    else:
+        score_color = "red"
+        score_emoji = "❌"
+    
+    st.markdown(f"## {score_emoji} Score: **{total_score}/100**")
+    
+    # Criteria breakdown
+    criteria_scores = evaluation.get('criteria_scores', [])
+    if criteria_scores:
+        st.markdown("#### Per-Criterion Breakdown")
+        
+        # Create a dataframe for display
+        breakdown_data = []
+        for cs in criteria_scores:
+            breakdown_data.append({
+                "Criterion": cs.get('criterion', ''),
+                "Score": f"{cs.get('score', 0)}/{cs.get('max_score', 0)}",
+                "Feedback": cs.get('comment', '')
+            })
+        
+        st.dataframe(
+            breakdown_data,
+            width="stretch",
+            hide_index=True,
+            column_config={
+                "Criterion": st.column_config.TextColumn("Criterion", width="medium"),
+                "Score": st.column_config.TextColumn("Score", width="small"),
+                "Feedback": st.column_config.TextColumn("Feedback", width="large"),
+            }
+        )
+    
+    # Overall comments
+    comments = evaluation.get('comments', '')
+    if comments:
+        st.markdown("#### 💬 Overall Feedback")
+        st.info(comments)
+        
+        # Copy button
+        if st.button("📋 Copy Feedback", key="copy_feedback"):
+            st.code(comments, language=None)
+            st.caption("Select and copy the text above")
+    
+    # Metadata
+    scored_at = evaluation.get('evaluated_at', '')
+    if scored_at:
+        st.caption(f"Scored: {format_timestamp(scored_at)}")
+
+
+@st.dialog("💬 Discuss Evaluation with AI", width="large")
+def _show_discuss_dialog(course, row, current_eval, rubric, module_id, group_id, idx):
+    """Show dialog for discussing/refining the evaluation with AI."""
+    
+    student_name = row.get('Name', 'Unknown')
+    
+    # Show current score summary
+    st.markdown(f"**Student:** {student_name}")
+    st.markdown(f"**Current Score:** {current_eval.get('total_score', 0)}/100")
+    
+    # Show criteria summary
+    with st.expander("📊 Current Breakdown", expanded=False):
+        for cs in current_eval.get('criteria_scores', []):
+            st.text(f"• {cs.get('criterion')}: {cs.get('score')}/{cs.get('max_score')}")
+    
+    st.divider()
+    
+    # Input for user's message
+    st.markdown("**Ask a question or request changes:**")
+    user_message = st.text_area(
+        "Your message",
+        placeholder="Examples:\n• Why did you give a low score for code quality?\n• The student actually did include error handling, please reconsider\n• Can you be more lenient on documentation for beginners?\n• Increase the score for functionality by 10 points",
+        height=120,
+        key=f"discuss_input_{idx}",
+        label_visibility="collapsed"
+    )
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        send_btn = st.button("📤 Send", type="primary", use_container_width=True, disabled=not user_message)
+    
+    with col2:
+        if st.button("Cancel", use_container_width=True):
+            st.rerun()
+    
+    if send_btn and user_message:
+        with st.spinner("Fetching submission content..."):
+            submission_content = fetch_submission_content(row, course['id'])
+        
+        with st.spinner("AI is thinking..."):
+            task_description = _get_task_description(module_id)
+            result = refine_evaluation(
+                current_eval,
+                user_message,
+                submission_content,
+                rubric,
+                task_description
+            )
+        
+        if result and result.get('error'):
+            st.error(f"❌ Error: {result['error']}")
+        elif result:
+            # Show AI response
+            st.divider()
+            st.markdown("### 🤖 AI Response")
+            st.info(result.get('response_to_teacher', 'No response'))
+            
+            # Check if scores changed
+            old_score = current_eval.get('total_score', 0)
+            new_score = result.get('total_score', 0)
+            
+            if old_score != new_score:
+                st.markdown(f"**Score Updated:** {old_score} → **{new_score}**")
+                
+                # Show what changed
+                with st.expander("📊 Updated Breakdown"):
+                    for cs in result.get('criteria_scores', []):
+                        st.text(f"• {cs.get('criterion')}: {cs.get('score')}/{cs.get('max_score')}")
+            
+            # Save button
+            if st.button("💾 Save & Close", type="primary", use_container_width=True):
+                save_evaluation(course['id'], module_id, student_name, result, group_id)
+                st.success("✓ Saved!")
+                st.rerun()
+
+
