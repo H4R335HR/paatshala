@@ -123,6 +123,14 @@ CONFIG_SCHEMA = {
             "default": "",
             "type": "text"
         }
+    },
+    "Display": {
+        "max_inline_size_kb": {
+            "label": "Max Inline File Size (KB)",
+            "help": "Maximum file size in KB to display inline (images, code files from GitHub). Default: 512",
+            "default": "512",
+            "type": "text"
+        }
     }
 }
 

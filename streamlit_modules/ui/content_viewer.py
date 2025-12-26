@@ -42,8 +42,15 @@ LANGUAGE_MAP = {
     '.php': 'php',
 }
 
-# Maximum file size to display inline (100KB)
-MAX_INLINE_SIZE = 100000
+# Maximum file size to display inline - now configurable via settings
+# Default: 512KB (512 * 1024 = 524288 bytes)
+def get_max_inline_size():
+    """Get max inline file size from config (in bytes)."""
+    try:
+        size_kb = int(get_config("max_inline_size_kb") or 512)
+        return size_kb * 1024
+    except (ValueError, TypeError):
+        return 512 * 1024  # 512KB default
 
 
 def render_pdf_viewer(pdf_path: str, unique_key: str = ""):
@@ -143,9 +150,11 @@ def render_pdf_viewer(pdf_path: str, unique_key: str = ""):
 
 def render_github_viewer(repo_url: str, pat: Optional[str] = None):
     """
-    Interactive GitHub repository browser with file tree and content preview.
+    Interactive GitHub repository browser with file table and content preview.
+    Follows file explorer + preview pattern (table on top, preview below).
     """
     import re
+    import pandas as pd
     
     # Parse repo URL
     match = re.search(r'github\.com/([^/]+)/([^/\s]+)', repo_url)
@@ -160,68 +169,147 @@ def render_github_viewer(repo_url: str, pat: Optional[str] = None):
     
     # Session state keys for this repo
     tree_key = f"gh_tree_{repo_id}"
-    expanded_key = f"gh_expanded_{repo_id}"
     selected_key = f"gh_selected_{repo_id}"
     content_cache_key = f"gh_content_{repo_id}"
+    current_path_key = f"gh_path_{repo_id}"
     
     # Initialize state
-    if expanded_key not in st.session_state:
-        st.session_state[expanded_key] = set()
     if selected_key not in st.session_state:
         st.session_state[selected_key] = None
     if content_cache_key not in st.session_state:
         st.session_state[content_cache_key] = {}
+    if current_path_key not in st.session_state:
+        st.session_state[current_path_key] = ""  # Root directory
     
     # Header
     st.markdown(f"### 📂 Repository: [{owner}/{repo}]({repo_url})")
     
-    # Fetch root contents if not cached
-    if tree_key not in st.session_state:
+    # Current path for the file list
+    current_path = st.session_state[current_path_key]
+    cache_key = f"{tree_key}_{current_path}"
+    
+    # Fetch contents for current path
+    if cache_key not in st.session_state:
         with st.spinner("Loading repository contents..."):
             from core.ai import fetch_github_content
-            result = fetch_github_content(repo_url, pat)
-            if result.get("error"):
-                st.error(f"Could not load repository: {result['error']}")
-                return
-            st.session_state[tree_key] = {
-                "files": result.get("files", []),
-                "readme": result.get("readme", "")
-            }
+            if current_path:
+                # Fetch subdirectory
+                files = _fetch_directory_contents(owner, repo, current_path, pat, repo_id)
+                readme = ""
+            else:
+                # Fetch root
+                result = fetch_github_content(repo_url, pat)
+                if result.get("error"):
+                    st.error(f"Could not load repository: {result['error']}")
+                    return
+                files = result.get("files", [])
+                readme = result.get("readme", "")
+            st.session_state[cache_key] = {"files": files, "readme": readme}
     
-    tree_data = st.session_state[tree_key]
-    files = tree_data.get("files", [])
-    readme = tree_data.get("readme", "")
+    data = st.session_state[cache_key]
+    files = data.get("files", [])
+    readme = data.get("readme", "")
     
-    # Layout: file tree on left, preview on right
-    col_tree, col_preview = st.columns([1, 2])
+    # === SECTION 1: Breadcrumb Navigation ===
+    if current_path:
+        parts = current_path.split("/")
+        breadcrumb = "📁 "
+        if st.button("🏠 Root", key=f"gh_root_{repo_id}"):
+            st.session_state[current_path_key] = ""
+            st.session_state[selected_key] = None
+            st.rerun()
+        for i, part in enumerate(parts):
+            path_so_far = "/".join(parts[:i+1])
+            col1, col2 = st.columns([0.1, 1])
+            with col2:
+                st.caption(f"→ {part}")
     
-    with col_tree:
-        st.markdown("**Files**")
-        _render_file_tree(
-            files=files,
-            repo_url=repo_url,
-            current_path="",
+    # === SECTION 2: File List Table ===
+    st.markdown("#### 📂 Files")
+    
+    # Build file list for dataframe
+    file_list = []
+    file_map = {}  # Map index to file info
+    
+    for i, f in enumerate(files):
+        name = f.get("name", "")
+        file_type = "📁 Directory" if f.get("type") == "dir" else Path(name).suffix.upper().replace(".", "") or "File"
+        size = f.get("size", 0)
+        size_str = f"{size / 1024:.1f} KB" if size > 0 else "—"
+        
+        icon = "📁" if f.get("type") == "dir" else _get_file_icon(name)
+        
+        file_list.append({
+            "": icon,
+            "Name": name,
+            "Type": file_type if f.get("type") != "dir" else "Directory",
+            "Size": size_str,
+        })
+        file_map[i] = f
+    
+    if file_list:
+        df = pd.DataFrame(file_list)
+        
+        event = st.dataframe(
+            df,
+            hide_index=True,
+            on_select="rerun",
+            selection_mode="single-row",
+            key=f"gh_table_{repo_id}_{current_path}",
+            width="stretch"
+        )
+        
+        # Handle selection
+        if event and event.selection and len(event.selection.rows) > 0:
+            selected_idx = event.selection.rows[0]
+            selected_file = file_map.get(selected_idx)
+            
+            if selected_file:
+                if selected_file.get("type") == "dir":
+                    # Navigate into directory
+                    new_path = selected_file.get("path", selected_file.get("name"))
+                    st.session_state[current_path_key] = new_path
+                    st.session_state[selected_key] = None
+                    st.rerun()
+                else:
+                    # Select file for preview
+                    file_path = selected_file.get("path", selected_file.get("name"))
+                    st.session_state[selected_key] = file_path
+    else:
+        st.info("📭 No files in this directory")
+    
+    st.caption("👆 Click a row to preview file or navigate into directory")
+    
+    # === SECTION 3: Preview Pane ===
+    st.divider()
+    
+    selected = st.session_state.get(selected_key)
+    if selected:
+        st.markdown("#### 👁️ Preview")
+        _render_file_preview(
+            selected_path=selected,
             owner=owner,
             repo=repo,
             pat=pat,
             repo_id=repo_id
         )
-    
-    with col_preview:
-        selected = st.session_state.get(selected_key)
-        if selected:
-            _render_file_preview(
-                selected_path=selected,
-                owner=owner,
-                repo=repo,
-                pat=pat,
-                repo_id=repo_id
-            )
-        elif readme:
-            st.markdown("**README.md**")
-            st.markdown(readme[:5000] if len(readme) > 5000 else readme)
-        else:
-            st.info("👈 Select a file to preview")
+    elif readme and not current_path:
+        st.markdown("#### 📖 README.md")
+        st.markdown(readme[:5000] if len(readme) > 5000 else readme)
+    else:
+        st.info("👆 Select a file above to preview")
+
+
+def _get_file_icon(filename: str) -> str:
+    """Get appropriate icon for file type."""
+    ext = Path(filename).suffix.lower()
+    icons = {
+        '.py': '🐍', '.js': '📜', '.ts': '📘', '.html': '🌐', '.css': '🎨',
+        '.json': '📋', '.md': '📝', '.txt': '📄', '.pdf': '📕', '.doc': '📄',
+        '.docx': '📄', '.jpg': '🖼️', '.jpeg': '🖼️', '.png': '🖼️', '.gif': '🖼️',
+        '.svg': '🖼️', '.zip': '📦', '.tar': '📦', '.gz': '📦',
+    }
+    return icons.get(ext, '📄')
 
 
 def _render_file_tree(files: List[Dict], repo_url: str, current_path: str,
@@ -302,13 +390,8 @@ def _render_file_tree(files: List[Dict], repo_url: str, current_path: str,
 
 
 def _fetch_directory_contents(owner: str, repo: str, path: str, pat: Optional[str], repo_id: str):
-    """Fetch contents of a subdirectory."""
+    """Fetch contents of a subdirectory and return as list."""
     import requests
-    import base64
-    
-    subdir_key = f"gh_subdir_{repo_id}_{path}"
-    if subdir_key in st.session_state:
-        return  # Already cached
     
     headers = {"Accept": "application/vnd.github.v3+json"}
     if pat:
@@ -320,16 +403,21 @@ def _fetch_directory_contents(owner: str, repo: str, path: str, pat: Optional[st
         
         if resp.status_code == 200:
             files = resp.json()
-            st.session_state[subdir_key] = [
-                {"name": f.get("name"), "type": f.get("type"), "size": f.get("size", 0)}
+            return [
+                {
+                    "name": f.get("name"), 
+                    "type": f.get("type"), 
+                    "size": f.get("size", 0),
+                    "path": f.get("path", "")
+                }
                 for f in files if isinstance(f, dict)
             ]
         elif resp.status_code == 403:
-            st.session_state[subdir_key] = [{"name": "(Rate limit reached)", "type": "file", "size": 0}]
+            return [{"name": "(Rate limit reached)", "type": "file", "size": 0, "path": ""}]
         else:
-            st.session_state[subdir_key] = [{"name": f"(Error: {resp.status_code})", "type": "file", "size": 0}]
+            return [{"name": f"(Error: {resp.status_code})", "type": "file", "size": 0, "path": ""}]
     except Exception as e:
-        st.session_state[subdir_key] = [{"name": f"(Error: {e})", "type": "file", "size": 0}]
+        return [{"name": f"(Error: {e})", "type": "file", "size": 0, "path": ""}]
 
 
 def _render_file_preview(selected_path: str, owner: str, repo: str, 
@@ -357,7 +445,7 @@ def _render_file_preview(selected_path: str, owner: str, repo: str,
                 data = resp.json()
                 size = data.get("size", 0)
                 
-                if size > MAX_INLINE_SIZE:
+                if size > get_max_inline_size():
                     content_data = {
                         "error": None,
                         "content": None,
@@ -375,7 +463,8 @@ def _render_file_preview(selected_path: str, owner: str, repo: str,
                         "error": None,
                         "content": content,
                         "too_large": False,
-                        "size": size
+                        "size": size,
+                        "download_url": data.get("download_url", "")
                     }
             elif resp.status_code == 403:
                 content_data = {"error": "GitHub API rate limit reached", "content": None}
@@ -392,7 +481,33 @@ def _render_file_preview(selected_path: str, owner: str, repo: str,
     
     # Display
     filename = Path(selected_path).name
-    st.markdown(f"**{selected_path}**")
+    ext = Path(filename).suffix.lower()
+    size = content_data.get("size", 0)
+    download_url = content_data.get("download_url", "")
+    
+    # File info panel (like DOCX viewer)
+    size_str = f"{size / 1024:.1f} KB" if size > 0 else "—"
+    file_type = ext.upper().replace(".", "") if ext else "File"
+    
+    info_html = f'''
+    <div style="background: #2d2d2d; border-radius: 6px; padding: 10px 15px; margin-bottom: 10px; 
+                display: flex; flex-wrap: wrap; gap: 20px; align-items: center; font-size: 13px; color: #ccc;">
+        <div style="display: flex; align-items: center; gap: 6px;">
+            <span style="color: #888;">📄 File:</span>
+            <span style="color: #fff; font-weight: 500;">{filename}</span>
+        </div>
+        <div style="display: flex; align-items: center; gap: 6px;">
+            <span style="color: #888;">📁 Type:</span>
+            <span style="color: #fff; font-weight: 500;">{file_type}</span>
+        </div>
+        <div style="display: flex; align-items: center; gap: 6px;">
+            <span style="color: #888;">📊 Size:</span>
+            <span style="color: #fff; font-weight: 500;">{size_str}</span>
+        </div>
+        {f'<a href="{download_url}" target="_blank" style="color: #4da6ff; text-decoration: none;">📥 Download</a>' if download_url else ''}
+    </div>
+    '''
+    st.components.v1.html(info_html, height=50)
     
     if content_data.get("error"):
         st.error(content_data["error"])
@@ -401,23 +516,213 @@ def _render_file_preview(selected_path: str, owner: str, repo: str,
     if content_data.get("too_large"):
         size_kb = content_data.get("size", 0) / 1024
         st.warning(f"⚠️ File too large to display inline ({size_kb:.1f} KB)")
-        download_url = content_data.get("download_url", "")
         if download_url:
             st.markdown(f"[📥 Download {filename}]({download_url})")
         return
-    
     content = content_data.get("content", "")
-    ext = Path(filename).suffix.lower()
     
     # Render based on file type
     if ext == '.md':
         st.markdown(content)
     elif ext in LANGUAGE_MAP:
         st.code(content, language=LANGUAGE_MAP[ext])
-    elif ext in ['.png', '.jpg', '.jpeg', '.gif', '.svg']:
-        st.info("🖼️ Image files cannot be previewed from GitHub API directly.")
+    elif ext in ['.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp', '.bmp']:
+        # Display image from raw GitHub URL
+        if download_url:
+            st.image(download_url, caption=filename, width="stretch")
+        else:
+            st.warning("🖼️ Could not load image - no download URL available")
+    elif ext in ['.zip', '.7z', '.rar', '.tar', '.gz']:
+        # Archive files - fetch and display contents with drill-down
+        import requests
+        import zipfile
+        import io
+        import pandas as pd
+        
+        if ext == '.zip' and download_url:
+            # Session state keys for ZIP navigation
+            zip_cache_key = f"gh_zip_{repo_id}_{selected_path}"
+            zip_file_key = f"gh_zip_file_{repo_id}_{selected_path}"
+            
+            # Fetch ZIP from GitHub raw URL
+            if zip_cache_key not in st.session_state:
+                with st.spinner("Fetching archive..."):
+                    try:
+                        resp = requests.get(download_url, timeout=30)
+                        if resp.status_code == 200:
+                            st.session_state[zip_cache_key] = resp.content
+                        else:
+                            st.session_state[zip_cache_key] = None
+                    except Exception:
+                        st.session_state[zip_cache_key] = None
+            
+            zip_data = st.session_state.get(zip_cache_key)
+            selected_zip_file = st.session_state.get(zip_file_key)
+            
+            if zip_data:
+                try:
+                    with zipfile.ZipFile(io.BytesIO(zip_data), 'r') as zf:
+                        # Check if password protected
+                        is_encrypted = any(info.flag_bits & 0x1 for info in zf.infolist())
+                        known_password = "ictkerala.org" if is_encrypted else None
+                        
+                        if is_encrypted:
+                            try:
+                                zf.setpassword(known_password.encode())
+                            except Exception:
+                                pass
+                        
+                        if selected_zip_file:
+                            # === DRILL-DOWN VIEW: Show selected file from ZIP ===
+                            st.markdown("#### 📄 File from Archive")
+                            
+                            # Back button
+                            if st.button("🔙 Back to Archive", key=f"zip_back_{repo_id}"):
+                                del st.session_state[zip_file_key]
+                                st.rerun()
+                            
+                            # Get file info
+                            try:
+                                file_info = zf.getinfo(selected_zip_file)
+                                file_size = file_info.file_size
+                                file_name = Path(selected_zip_file).name
+                                file_ext = Path(file_name).suffix.lower()
+                                
+                                # Info panel for file inside ZIP
+                                size_str = f"{file_size / 1024:.1f} KB" if file_size > 0 else "—"
+                                file_type_str = file_ext.upper().replace(".", "") if file_ext else "File"
+                                
+                                info_html = f'''
+                                <div style="background: #2d2d2d; border-radius: 6px; padding: 10px 15px; margin: 10px 0; 
+                                            display: flex; flex-wrap: wrap; gap: 20px; align-items: center; font-size: 13px; color: #ccc;">
+                                    <div style="display: flex; align-items: center; gap: 6px;">
+                                        <span style="color: #888;">📄 File:</span>
+                                        <span style="color: #fff; font-weight: 500;">{file_name}</span>
+                                    </div>
+                                    <div style="display: flex; align-items: center; gap: 6px;">
+                                        <span style="color: #888;">📁 Type:</span>
+                                        <span style="color: #fff; font-weight: 500;">{file_type_str}</span>
+                                    </div>
+                                    <div style="display: flex; align-items: center; gap: 6px;">
+                                        <span style="color: #888;">📊 Size:</span>
+                                        <span style="color: #fff; font-weight: 500;">{size_str}</span>
+                                    </div>
+                                    <div style="display: flex; align-items: center; gap: 6px;">
+                                        <span style="color: #888;">📦 From:</span>
+                                        <span style="color: #fff; font-weight: 500;">{filename}</span>
+                                    </div>
+                                </div>
+                                '''
+                                st.components.v1.html(info_html, height=50)
+                                
+                                # Read file content
+                                try:
+                                    file_content = zf.read(selected_zip_file, pwd=known_password.encode() if known_password else None)
+                                    
+                                    # Render based on file type
+                                    if file_ext in ['.txt', '.md', '.csv', '.log']:
+                                        text_content = file_content.decode('utf-8', errors='ignore')
+                                        if file_ext == '.md':
+                                            st.markdown(text_content)
+                                        else:
+                                            st.code(text_content[:50000], language=None)
+                                    elif file_ext in LANGUAGE_MAP:
+                                        text_content = file_content.decode('utf-8', errors='ignore')
+                                        st.code(text_content[:50000], language=LANGUAGE_MAP[file_ext])
+                                    elif file_ext in ['.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp', '.bmp']:
+                                        st.image(file_content, caption=file_name, width="stretch")
+                                    elif file_ext == '.json':
+                                        text_content = file_content.decode('utf-8', errors='ignore')
+                                        st.code(text_content, language='json')
+                                    else:
+                                        # Try to display as text for files without extension or unknown types
+                                        try:
+                                            text_content = file_content.decode('utf-8')
+                                            # Check if it looks like text (mostly printable)
+                                            if text_content and sum(c.isprintable() or c in '\n\r\t' for c in text_content) / len(text_content) > 0.9:
+                                                st.code(text_content[:50000], language=None)
+                                            else:
+                                                st.info(f"📦 Binary file ({file_type_str}) - cannot display inline")
+                                        except UnicodeDecodeError:
+                                            st.info(f"📦 Binary file ({file_type_str}) - cannot display inline")
+                                except Exception as e:
+                                    st.error(f"❌ Error reading file: {e}")
+                            except KeyError:
+                                st.error(f"❌ File not found in archive: {selected_zip_file}")
+                                del st.session_state[zip_file_key]
+                        else:
+                            # === ARCHIVE LIST VIEW ===
+                            st.markdown("#### 📦 Archive Contents")
+                            
+                            if is_encrypted:
+                                st.info("🔐 Password-protected archive")
+                                st.success("✅ Unlocked with known password")
+                            
+                            # Build file list
+                            file_list = []
+                            file_map = {}
+                            total_size = 0
+                            
+                            for i, info in enumerate(zf.infolist()):
+                                if not info.is_dir():
+                                    size = info.file_size
+                                    total_size += size
+                                    fname = info.filename
+                                    fext = Path(fname).suffix.lower()
+                                    icon = _get_file_icon(fname)
+                                    
+                                    file_list.append({
+                                        "": icon,
+                                        "Name": Path(fname).name,
+                                        "Path": fname if "/" in fname else "—",
+                                        "Size": f"{size / 1024:.1f} KB" if size > 0 else "—",
+                                    })
+                                    file_map[len(file_list) - 1] = fname
+                            
+                            if file_list:
+                                df = pd.DataFrame(file_list)
+                                
+                                event = st.dataframe(
+                                    df,
+                                    hide_index=True,
+                                    on_select="rerun",
+                                    selection_mode="single-row",
+                                    key=f"zip_table_{repo_id}_{selected_path}",
+                                    width="stretch"
+                                )
+                                
+                                # Handle selection
+                                if event and event.selection and len(event.selection.rows) > 0:
+                                    selected_idx = event.selection.rows[0]
+                                    selected_file_in_zip = file_map.get(selected_idx)
+                                    if selected_file_in_zip:
+                                        st.session_state[zip_file_key] = selected_file_in_zip
+                                        st.rerun()
+                                
+                                st.caption(f"📊 {len(file_list)} file(s) • Total: {total_size / 1024:.1f} KB • 👆 Click to preview")
+                            else:
+                                st.info("📭 Empty archive")
+                                
+                except zipfile.BadZipFile:
+                    st.error("❌ Invalid or corrupted ZIP file")
+                except Exception as e:
+                    st.error(f"❌ Error reading archive: {e}")
+            else:
+                st.warning("Could not fetch archive from GitHub")
+                if download_url:
+                    st.markdown(f"[📥 Download {filename}]({download_url})")
+        else:
+            st.info(f"🗜️ {ext.upper()} archives not supported for inline viewing")
+            if download_url:
+                st.markdown(f"[📥 Download {filename}]({download_url})")
     else:
-        st.code(content, language=None)
+        # For other binary files, don't show garbled content
+        if content and not content.isprintable():
+            st.info(f"📦 Binary file ({file_type}) - download to view")
+            if download_url:
+                st.markdown(f"[📥 Download {filename}]({download_url})")
+        else:
+            st.code(content, language=None)
 
 
 def render_submission_content(row: Dict[str, Any], course_id: int):

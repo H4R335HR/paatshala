@@ -584,6 +584,241 @@ def _render_file_submission(course, row, idx):
             elif ext in ['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp']:
                 st.image(str(path), caption=fname, width="stretch")
             
+            elif ext in ['.docx', '.doc']:
+                # DOCX viewer using mammoth.js (converts to HTML)
+                # Page count estimated client-side based on rendered height
+                
+                # Extract metadata for info panel
+                doc_meta = {
+                    'words': '—', 'edit_time': '—', 'app': '—', 
+                    'meta_pages': '—', 'template': '—', 'warning': '',
+                    'author': '—', 'last_modified_by': '—', 'revision': '—'
+                }
+                try:
+                    import zipfile
+                    import xml.etree.ElementTree as ET
+                    with zipfile.ZipFile(path, 'r') as zf:
+                        # Extract from app.xml
+                        if 'docProps/app.xml' in zf.namelist():
+                            app_xml = zf.read('docProps/app.xml')
+                            root = ET.fromstring(app_xml)
+                            for elem in root.iter():
+                                tag = elem.tag.split('}')[-1] if '}' in elem.tag else elem.tag
+                                if tag == 'Words' and elem.text:
+                                    doc_meta['words'] = elem.text
+                                elif tag == 'TotalTime' and elem.text:
+                                    doc_meta['edit_time'] = f"{elem.text} min"
+                                elif tag == 'Application' and elem.text:
+                                    doc_meta['app'] = elem.text.strip()
+                                elif tag == 'Pages' and elem.text:
+                                    doc_meta['meta_pages'] = elem.text
+                                elif tag == 'Template' and elem.text:
+                                    doc_meta['template'] = elem.text
+                        
+                        # Extract from core.xml (author info)
+                        if 'docProps/core.xml' in zf.namelist():
+                            core_xml = zf.read('docProps/core.xml')
+                            root = ET.fromstring(core_xml)
+                            for elem in root.iter():
+                                tag = elem.tag.split('}')[-1] if '}' in elem.tag else elem.tag
+                                if tag == 'creator' and elem.text:
+                                    doc_meta['author'] = elem.text.strip()
+                                elif tag == 'lastModifiedBy' and elem.text:
+                                    doc_meta['last_modified_by'] = elem.text.strip()
+                                elif tag == 'revision' and elem.text:
+                                    doc_meta['revision'] = elem.text
+                        
+                        # Check for suspicious patterns
+                        try:
+                            words = int(doc_meta['words']) if doc_meta['words'] != '—' else 0
+                            edit_mins = int(doc_meta['edit_time'].replace(' min', '')) if doc_meta['edit_time'] != '—' else 0
+                            if edit_mins > 0 and words > 0:
+                                wpm = words / edit_mins
+                                if wpm > 100:  # More than 100 words/min is suspicious
+                                    doc_meta['warning'] = f'⚠️ High words/min ratio ({wpm:.0f}) - possible copy-paste'
+                        except:
+                            pass
+                except Exception:
+                    pass  # Metadata extraction failed, continue with defaults
+                
+                with open(path, "rb") as f:
+                    docx_bytes = f.read()
+                b64_docx = base64.b64encode(docx_bytes).decode('utf-8')
+                
+                mammoth_html = f'''
+                <style>
+                    #docxContainer_{idx} {{
+                        width: 100%;
+                        background: #ffffff;
+                        border-radius: 8px;
+                        padding: 10px;
+                    }}
+                    #docxContainer_{idx}:fullscreen {{
+                        background: #ffffff;
+                        padding: 20px;
+                    }}
+                    #docxScroller_{idx} {{
+                        max-height: 600px;
+                        overflow-y: auto;
+                        background: #ffffff;
+                        border-radius: 4px;
+                        padding: 20px 30px;
+                        color: #333;
+                        font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+                        line-height: 1.6;
+                    }}
+                    #docxContainer_{idx}:fullscreen #docxScroller_{idx} {{
+                        max-height: calc(100vh - 80px);
+                    }}
+                    #docxContent_{idx} h1 {{ font-size: 1.8em; margin: 0.8em 0; color: #222; }}
+                    #docxContent_{idx} h2 {{ font-size: 1.5em; margin: 0.7em 0; color: #333; }}
+                    #docxContent_{idx} h3 {{ font-size: 1.2em; margin: 0.6em 0; color: #444; }}
+                    #docxContent_{idx} p {{ margin: 0.5em 0; }}
+                    #docxContent_{idx} table {{ border-collapse: collapse; width: 100%; margin: 1em 0; }}
+                    #docxContent_{idx} td, #docxContent_{idx} th {{ border: 1px solid #ddd; padding: 8px; }}
+                    #docxContent_{idx} ul, #docxContent_{idx} ol {{ padding-left: 2em; }}
+                    .docx-controls {{
+                        display: flex;
+                        justify-content: flex-end;
+                        gap: 10px;
+                        margin-bottom: 10px;
+                    }}
+                    .docx-btn {{
+                        background: #333;
+                        color: white;
+                        border: 1px solid #555;
+                        padding: 6px 12px;
+                        border-radius: 4px;
+                        cursor: pointer;
+                        font-size: 13px;
+                    }}
+                    .docx-btn:hover {{ background: #444; }}
+                    #docxStatus_{idx} {{ color: #666; font-size: 13px; }}
+                    .docx-info-panel {{
+                        background: #2d2d2d;
+                        border-radius: 6px;
+                        padding: 10px 15px;
+                        margin-bottom: 10px;
+                        display: flex;
+                        flex-wrap: wrap;
+                        gap: 20px;
+                        align-items: center;
+                        font-size: 13px;
+                        color: #ccc;
+                    }}
+                    .docx-info-item {{
+                        display: flex;
+                        align-items: center;
+                        gap: 6px;
+                    }}
+                    .docx-info-label {{ color: #888; }}
+                    .docx-info-value {{ color: #fff; font-weight: 500; }}
+                    .docx-warning {{
+                        background: #553300;
+                        color: #ffaa00;
+                        padding: 4px 10px;
+                        border-radius: 4px;
+                        font-size: 12px;
+                    }}
+                </style>
+                
+                <div id="docxContainer_{idx}">
+                    <div class="docx-info-panel">
+                        <div class="docx-info-item">
+                            <span class="docx-info-label">👤 Author:</span>
+                            <span class="docx-info-value">{doc_meta['author']}</span>
+                        </div>
+                        <div class="docx-info-item">
+                            <span class="docx-info-label">📝 Words:</span>
+                            <span class="docx-info-value">{doc_meta['words']}</span>
+                        </div>
+                        <div class="docx-info-item">
+                            <span class="docx-info-label">📄 Meta pages:</span>
+                            <span class="docx-info-value">{doc_meta['meta_pages']}</span>
+                        </div>
+                        <div class="docx-info-item">
+                            <span class="docx-info-label">⏱️ Edit time:</span>
+                            <span class="docx-info-value">{doc_meta['edit_time']}</span>
+                        </div>
+                        <div class="docx-info-item">
+                            <span class="docx-info-label">🔄 Revisions:</span>
+                            <span class="docx-info-value">{doc_meta['revision']}</span>
+                        </div>
+                        <div class="docx-info-item">
+                            <span class="docx-info-label">📋 Template:</span>
+                            <span class="docx-info-value">{doc_meta['template']}</span>
+                        </div>
+                        {f'<div class="docx-warning">{doc_meta["warning"]}</div>' if doc_meta['warning'] else ''}
+                    </div>
+                    <div class="docx-controls">
+                        <span id="docxStatus_{idx}">Loading document...</span>
+                        <button class="docx-btn" onclick="toggleDocxFullscreen_{idx}()" id="docxFsBtn_{idx}">⛶ Fullscreen</button>
+                    </div>
+                    <div id="docxScroller_{idx}">
+                        <div id="docxContent_{idx}"></div>
+                    </div>
+                </div>
+                
+                <script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js"></script>
+                <script>
+                    (async function() {{
+                        const b64 = "{b64_docx}";
+                        const binary = atob(b64);
+                        const bytes = new Uint8Array(binary.length);
+                        for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+                        
+                        try {{
+                            const result = await mammoth.convertToHtml({{ arrayBuffer: bytes.buffer }});
+                            const contentDiv = document.getElementById('docxContent_{idx}');
+                            contentDiv.innerHTML = result.value;
+                            
+                            // Estimate page count based on rendered height
+                            // A4/Letter page at 96dpi ≈ 1050px height (with margins)
+                            setTimeout(() => {{
+                                const contentHeight = contentDiv.scrollHeight;
+                                const pageHeightPx = 1050;
+                                const estimatedPages = Math.max(1, Math.ceil(contentHeight / pageHeightPx));
+                                document.getElementById('docxStatus_{idx}').textContent = 
+                                    '📄 ~' + estimatedPages + ' page(s) (estimated)';
+                            }}, 100);  // Small delay to ensure content is fully rendered
+                            
+                            if (result.messages.length > 0) {{
+                                console.log('Mammoth warnings:', result.messages);
+                            }}
+                        }} catch (err) {{
+                            document.getElementById('docxContent_{idx}').innerHTML = 
+                                '<p style="color:red;">Error loading document: ' + err.message + '</p>';
+                            document.getElementById('docxStatus_{idx}').textContent = '❌ Error';
+                        }}
+                        
+                        window.toggleDocxFullscreen_{idx} = function() {{
+                            const cont = document.getElementById('docxContainer_{idx}');
+                            const btn = document.getElementById('docxFsBtn_{idx}');
+                            
+                            if (document.fullscreenElement) {{
+                                document.exitFullscreen();
+                                btn.textContent = '⛶ Fullscreen';
+                            }} else {{
+                                cont.requestFullscreen().then(() => {{
+                                    btn.textContent = '✕ Exit';
+                                }}).catch(err => {{
+                                    alert('Fullscreen not available: ' + err.message);
+                                }});
+                            }}
+                        }};
+                        
+                        document.addEventListener('fullscreenchange', () => {{
+                            const btn = document.getElementById('docxFsBtn_{idx}');
+                            if (btn && !document.fullscreenElement) {{
+                                btn.textContent = '⛶ Fullscreen';
+                            }}
+                        }});
+                    }})();
+                </script>
+                '''
+                st.components.v1.html(mammoth_html, height=700)
+                st.caption("💡 Scroll through document • Fullscreen mode")
+            
             elif ext in ['.txt', '.md', '.py', '.js', '.html', '.css', '.json', '.xml', '.yaml', '.yml', '.csv', '.log']:
                 try:
                     with open(path, 'r', encoding='utf-8', errors='ignore') as f:
@@ -593,6 +828,59 @@ def _render_file_submission(course, row, idx):
                     st.code(content[:50000], language=lang_map.get(ext))
                 except:
                     st.warning("Could not read file content")
+            
+            elif ext in ['.zip', '.7z', '.rar', '.tar', '.gz', '.tar.gz']:
+                # ZIP file contents listing
+                import zipfile
+                
+                st.markdown("#### 📦 Archive Contents")
+                
+                if ext == '.zip':
+                    try:
+                        with zipfile.ZipFile(path, 'r') as zf:
+                            # Check if password protected
+                            is_encrypted = any(info.flag_bits & 0x1 for info in zf.infolist())
+                            
+                            if is_encrypted:
+                                st.info("🔐 Password-protected archive")
+                                # Try known password
+                                known_password = "ictkerala.org"
+                                try:
+                                    zf.setpassword(known_password.encode())
+                                    # Test if password works by reading first file
+                                    test_info = zf.infolist()[0] if zf.infolist() else None
+                                    if test_info and test_info.file_size > 0:
+                                        zf.read(test_info.filename, pwd=known_password.encode())
+                                    st.success(f"✅ Unlocked with known password")
+                                except Exception:
+                                    st.warning("⚠️ Could not unlock - password may be different")
+                            
+                            # List contents
+                            file_list = []
+                            total_size = 0
+                            for info in zf.infolist():
+                                if not info.is_dir():
+                                    size = info.file_size
+                                    total_size += size
+                                    file_list.append({
+                                        "📄 Name": info.filename,
+                                        "Size": f"{size / 1024:.1f} KB" if size > 0 else "—",
+                                        "Compressed": f"{info.compress_size / 1024:.1f} KB" if info.compress_size > 0 else "—"
+                                    })
+                            
+                            if file_list:
+                                import pandas as pd
+                                df = pd.DataFrame(file_list)
+                                st.dataframe(df, hide_index=True, width="stretch")
+                                st.caption(f"📊 {len(file_list)} file(s) • Total: {total_size / 1024:.1f} KB")
+                            else:
+                                st.info("📭 Empty archive")
+                    except zipfile.BadZipFile:
+                        st.error("❌ Invalid or corrupted ZIP file")
+                    except Exception as e:
+                        st.error(f"❌ Error reading archive: {e}")
+                else:
+                    st.info(f"📦 {ext.upper()} archive - extraction not supported, use Download button")
             
             else:
                 st.info(f"📦 Binary file ({ext}) - use Download button to view")
