@@ -211,6 +211,17 @@ def main():
                         session = setup_session(st.session_state.session_id)
                         st.session_state.course_groups = get_course_groups(session, current_course_id)
                         st.session_state._groups_course_id = current_course_id  # Track which course these belong to
+                        
+                        # Restore last selected group for this course
+                        if st.session_state.course_groups and st.session_state.selected_group is None:
+                            last = load_last_session()
+                            last_group_id = last.get('group_id')
+                            if last_group_id:
+                                for g in st.session_state.course_groups:
+                                    if g['id'] == last_group_id:
+                                        st.session_state.selected_group = g
+                                        logger.info(f"Restored last selected group: {g['name']}")
+                                        break
                     
                     if st.session_state.course_groups:
                         group_options = {"All": None}

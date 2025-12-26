@@ -221,11 +221,9 @@ def render_evaluation_tab(course, meta):
     # Render based on ASSIGNMENT type (overrides individual submission type for UI structure)
     if assignment_type == 'file':
         _render_file_submission(course, row, idx)
+        # Preview is now integrated into _render_file_submission (file explorer pattern)
     else:
         _render_link_submission(row, sub_type)
-    
-    with st.expander("Submission Content", expanded=True):
-        st.text(row.get('Submission', ''))
     
     # =========================================================================
     # AI SCORING SECTION
@@ -234,52 +232,397 @@ def render_evaluation_tab(course, meta):
 
 
 def _render_file_submission(course, row, idx):
-    """Render file submission view"""
+    """Render file submission with file explorer + preview pattern"""
+    import hashlib
+    import base64
+    from datetime import datetime
+    
     submission_files = _parse_submission_files(row.get('Submission_Files'))
     
-    if submission_files:
-        st.markdown("#### 📂 Submitted Files")
-        for fname, furl in submission_files:
-            # Construct local path to check existence
-            safe_student = "".join([c for c in row.get('Name', 'Unknown') if c.isalnum() or c in (' ', '-', '_')]).strip()
-            safe_filename = "".join([c for c in fname if c.isalnum() or c in (' ', '-', '_', '.')]).strip()
-            local_path = Path(f"output/course_{course['id']}/downloads/{safe_student}/{safe_filename}")
-            
-            col_d1, col_d2 = st.columns([3, 1])
-            with col_d1:
-                st.text(fname)
-            with col_d2:
-                if local_path.exists():
-                    with open(local_path, "rb") as f:
-                        st.download_button(
-                            label="📂 Download",
-                            data=f,
-                            file_name=fname,
-                            mime="application/octet-stream",
-                            key=f"dl_{idx}_{fname}",
-                            use_container_width=True
-                        )
-                else:
-                    if st.button("⬇️ Fetch", key=f"fetch_{idx}_{fname}", use_container_width=True):
-                        with st.spinner("Fetching from server..."):
-                            session = setup_session(st.session_state.session_id)
-                            saved_path = download_file(session, furl, course['id'], row.get('Name', 'Unknown'), fname)
-                            if saved_path:
-                                st.success("Fetched!")
-                                st.rerun()
-                            else:
-                                st.error("Failed to fetch")
-    else:
+    if not submission_files:
         st.warning("⚠️ No file submitted")
+        return
+    
+    # Build file list data
+    safe_student = "".join([c for c in row.get('Name', 'Unknown') if c.isalnum() or c in (' ', '-', '_')]).strip()
+    
+    file_list = []
+    file_paths = {}  # Map index to path for preview
+    
+    for i, (fname, furl) in enumerate(submission_files):
+        safe_filename = "".join([c for c in fname if c.isalnum() or c in (' ', '-', '_', '.')]).strip()
+        local_path = Path(f"output/course_{course['id']}/downloads/{safe_student}/{safe_filename}")
+        
+        file_info = {
+            "📄 Name": fname,
+            "Type": Path(fname).suffix.upper().replace(".", "") or "Unknown",
+            "Size": "—",
+            "Modified": "—",
+            "MD5": "—",
+            "Status": "❌ Not fetched"
+        }
+        
+        if local_path.exists():
+            stat = local_path.stat()
+            file_info["Size"] = f"{stat.st_size / 1024:.1f} KB"
+            file_info["Modified"] = datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M")
+            
+            # Compute MD5 (cached approach for performance)
+            md5_key = f"md5_{hash(str(local_path))}"
+            if md5_key not in st.session_state:
+                with open(local_path, "rb") as f:
+                    st.session_state[md5_key] = hashlib.md5(f.read()).hexdigest()[:12]
+            file_info["MD5"] = st.session_state[md5_key]
+            file_info["Status"] = "✅ Ready"
+            file_paths[i] = str(local_path)
+        else:
+            file_paths[i] = None
+        
+        file_list.append(file_info)
+    
+    # === SECTION 1: File List Table ===
+    st.markdown("#### 📂 Submitted Files")
+    
+    import pandas as pd
+    df = pd.DataFrame(file_list)
+    
+    # Display with selection
+    event = st.dataframe(
+        df,
+        hide_index=True,
+        on_select="rerun",
+        selection_mode="single-row",
+        key=f"file_explorer_{idx}",
+        width="stretch"
+    )
+    
+    # Get selected file index
+    selected_file_idx = None
+    if event and event.selection and len(event.selection.rows) > 0:
+        selected_file_idx = event.selection.rows[0]
+    
+    # === SECTION 2: Actions & Preview ===
+    if selected_file_idx is not None:
+        fname = submission_files[selected_file_idx][0]
+        furl = submission_files[selected_file_idx][1]
+        local_path = file_paths.get(selected_file_idx)
+        
+        st.divider()
+        
+        # Action buttons
+        col1, col2, col3 = st.columns([2, 1, 1])
+        with col1:
+            st.markdown(f"**Selected:** {fname}")
+        
+        if local_path and Path(local_path).exists():
+            path = Path(local_path)
+            
+            with col2:
+                # View in browser button for PDFs
+                if fname.lower().endswith('.pdf'):
+                    with open(path, "rb") as f:
+                        pdf_data = f.read()
+                    b64_pdf = base64.b64encode(pdf_data).decode('utf-8')
+                    view_html = f'''
+                        <button onclick="openPdf()" style="width: 100%; padding: 0.4rem; 
+                               background-color: #262730; color: white;
+                               border-radius: 0.5rem; cursor: pointer;
+                               border: 1px solid #444;">👁️ Open in Browser</button>
+                        <script>
+                            function openPdf() {{
+                                const binary = atob("{b64_pdf}");
+                                const bytes = new Uint8Array(binary.length);
+                                for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+                                window.open(URL.createObjectURL(new Blob([bytes], {{type:'application/pdf'}})), '_blank');
+                            }}
+                        </script>
+                    '''
+                    st.components.v1.html(view_html, height=40)
+            
+            with col3:
+                with open(path, "rb") as f:
+                    st.download_button(
+                        label="📥 Download",
+                        data=f,
+                        file_name=fname,
+                        mime="application/octet-stream",
+                        key=f"dl_preview_{idx}_{selected_file_idx}",
+                        use_container_width=True
+                    )
+            
+            # === Preview Pane ===
+            st.markdown("#### 👁️ Preview")
+            ext = path.suffix.lower()
+            
+            if ext == '.pdf':
+                # PDF viewing options
+                try:
+                    import fitz  # PyMuPDF
+                    
+                    doc = fitz.open(str(path))
+                    num_pages = len(doc)
+                    
+                    # View mode toggle - PDF.js is default
+                    view_mode = st.radio(
+                        "View mode",
+                        ["🔍 PDF.js Viewer", "📄 Rendered Pages", "📝 Text Only"],
+                        horizontal=True,
+                        key=f"pdf_view_mode_{idx}_{selected_file_idx}",
+                        label_visibility="collapsed"
+                    )
+                    
+                    if view_mode == "📄 Rendered Pages":
+                        # Render pages as images
+                        st.caption(f"📑 {num_pages} page(s)")
+                        
+                        if num_pages <= 5:
+                            for page_num in range(num_pages):
+                                page = doc[page_num]
+                                mat = fitz.Matrix(1.5, 1.5)
+                                pix = page.get_pixmap(matrix=mat)
+                                img_bytes = pix.tobytes("png")
+                                st.image(img_bytes, caption=f"Page {page_num + 1}", width="stretch")
+                        else:
+                            page_num = st.slider(
+                                "Page", 1, num_pages, 1, 
+                                key=f"pdf_page_{idx}_{selected_file_idx}"
+                            ) - 1
+                            
+                            page = doc[page_num]
+                            mat = fitz.Matrix(1.5, 1.5)
+                            pix = page.get_pixmap(matrix=mat)
+                            img_bytes = pix.tobytes("png")
+                            st.image(img_bytes, caption=f"Page {page_num + 1} of {num_pages}", width="stretch")
+                    
+                    elif view_mode == "🔍 PDF.js Viewer":
+                        # PDF.js direct canvas rendering with scroll + fullscreen
+                        doc.close()  # Close fitz doc before reading raw bytes
+                        
+                        with open(path, "rb") as f:
+                            pdf_bytes = f.read()
+                        b64_pdf = base64.b64encode(pdf_bytes).decode('utf-8')
+                        
+                        # Use PDF.js library with scrollable multi-page view
+                        pdfjs_html = f'''
+                        <style>
+                            #pdfContainer_{idx} {{ 
+                                width: 100%; 
+                                background: #525659; 
+                                border-radius: 8px; 
+                                padding: 10px;
+                                text-align: center;
+                            }}
+                            #pdfContainer_{idx}.fullscreen {{
+                                position: fixed;
+                                top: 0; left: 0; right: 0; bottom: 0;
+                                z-index: 9999;
+                                border-radius: 0;
+                                padding: 20px;
+                            }}
+                            #pdfScroller_{idx} {{
+                                max-height: 600px;
+                                overflow-y: auto;
+                                background: #3a3a3a;
+                                border-radius: 4px;
+                                padding: 10px;
+                            }}
+                            #pdfContainer_{idx}:fullscreen {{
+                                background: #525659;
+                                padding: 20px;
+                            }}
+                            #pdfContainer_{idx}:fullscreen #pdfScroller_{idx} {{
+                                max-height: calc(100vh - 80px);
+                            }}
+                            .pdf-page-canvas {{
+                                max-width: 100%; 
+                                box-shadow: 0 2px 10px rgba(0,0,0,0.3);
+                                margin-bottom: 15px;
+                                display: block;
+                                margin-left: auto;
+                                margin-right: auto;
+                            }}
+                            .pdf-controls_{idx} {{
+                                display: flex;
+                                justify-content: center;
+                                align-items: center;
+                                gap: 12px;
+                                margin-bottom: 10px;
+                                color: white;
+                                font-family: sans-serif;
+                                flex-wrap: wrap;
+                            }}
+                            .pdf-btn {{
+                                background: #333;
+                                color: white;
+                                border: 1px solid #555;
+                                padding: 6px 12px;
+                                border-radius: 4px;
+                                cursor: pointer;
+                                font-size: 13px;
+                            }}
+                            .pdf-btn:hover {{ background: #444; }}
+                        </style>
+                        
+                        <div id="pdfContainer_{idx}">
+                            <div class="pdf-controls_{idx}">
+                                <span id="pageInfo_{idx}">Loading...</span>
+                                <span>|</span>
+                                <span>Zoom:</span>
+                                <button class="pdf-btn" onclick="zoomOut_{idx}()">−</button>
+                                <span id="zoomLevel_{idx}">100%</span>
+                                <button class="pdf-btn" onclick="zoomIn_{idx}()">+</button>
+                                <span>|</span>
+                                <button class="pdf-btn" onclick="toggleFullscreen_{idx}()" id="fsBtn_{idx}">⛶ Fullscreen</button>
+                            </div>
+                            <div id="pdfScroller_{idx}">
+                                <div id="pdfPages_{idx}"></div>
+                            </div>
+                        </div>
+                        
+                        <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+                        <script>
+                            (async function() {{
+                                const pdfjsLib = window['pdfjs-dist/build/pdf'];
+                                pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+                                
+                                const b64 = "{b64_pdf}";
+                                const binary = atob(b64);
+                                const bytes = new Uint8Array(binary.length);
+                                for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+                                
+                                let pdfDoc = null;
+                                let scale = 1.5;
+                                const container = document.getElementById('pdfPages_{idx}');
+                                
+                                async function renderAllPages() {{
+                                    container.innerHTML = '';
+                                    for (let num = 1; num <= pdfDoc.numPages; num++) {{
+                                        const page = await pdfDoc.getPage(num);
+                                        const viewport = page.getViewport({{ scale: scale }});
+                                        
+                                        const canvas = document.createElement('canvas');
+                                        canvas.className = 'pdf-page-canvas';
+                                        canvas.height = viewport.height;
+                                        canvas.width = viewport.width;
+                                        container.appendChild(canvas);
+                                        
+                                        const ctx = canvas.getContext('2d');
+                                        await page.render({{ canvasContext: ctx, viewport: viewport }}).promise;
+                                    }}
+                                    document.getElementById('pageInfo_{idx}').textContent = pdfDoc.numPages + ' page(s)';
+                                    document.getElementById('zoomLevel_{idx}').textContent = Math.round(scale*100/1.5) + '%';
+                                }}
+                                
+                                window.zoomIn_{idx} = function() {{ scale += 0.25; renderAllPages(); }};
+                                window.zoomOut_{idx} = function() {{ if (scale > 0.5) {{ scale -= 0.25; renderAllPages(); }} }};
+                                
+                                window.toggleFullscreen_{idx} = function() {{
+                                    const cont = document.getElementById('pdfContainer_{idx}');
+                                    const btn = document.getElementById('fsBtn_{idx}');
+                                    
+                                    if (document.fullscreenElement) {{
+                                        document.exitFullscreen();
+                                        btn.textContent = '⛶ Fullscreen';
+                                    }} else {{
+                                        cont.requestFullscreen().then(() => {{
+                                            btn.textContent = '✕ Exit';
+                                        }}).catch(err => {{
+                                            alert('Fullscreen not available: ' + err.message);
+                                        }});
+                                    }}
+                                }};
+                                
+                                // Listen for fullscreen changes
+                                document.addEventListener('fullscreenchange', () => {{
+                                    const btn = document.getElementById('fsBtn_{idx}');
+                                    if (!document.fullscreenElement) {{
+                                        btn.textContent = '⛶ Fullscreen';
+                                    }}
+                                }});
+                                
+                                try {{
+                                    pdfDoc = await pdfjsLib.getDocument({{ data: bytes }}).promise;
+                                    await renderAllPages();
+                                }} catch (err) {{
+                                    document.getElementById('pageInfo_{idx}').textContent = 'Error: ' + err.message;
+                                }}
+                            }})();
+                        </script>
+                        '''
+                        st.components.v1.html(pdfjs_html, height=700)
+                        st.caption("💡 Scroll through pages • Zoom in/out • Fullscreen mode")
+                        
+                        # Re-open doc for page count if needed later
+                        doc = fitz.open(str(path))
+                    
+                    else:
+                        # Text-only mode
+                        from core.ai import extract_pdf_text
+                        text_content = extract_pdf_text(str(path))
+                        if text_content.startswith("(") and text_content.endswith(")"):
+                            st.warning(text_content)
+                        else:
+                            st.text_area(
+                                "Extracted Text",
+                                value=text_content,
+                                height=400,
+                                key=f"preview_text_{idx}_{selected_file_idx}",
+                                disabled=True,
+                                label_visibility="collapsed"
+                            )
+                    
+                    doc.close()
+                    
+                except ImportError:
+                    st.warning("PyMuPDF not installed - showing text only")
+                    from core.ai import extract_pdf_text
+                    text_content = extract_pdf_text(str(path))
+                    st.text_area("Extracted Text", value=text_content, height=400, disabled=True)
+                except Exception as e:
+                    st.error(f"Error rendering PDF: {e}")
+            
+            elif ext in ['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp']:
+                st.image(str(path), caption=fname, width="stretch")
+            
+            elif ext in ['.txt', '.md', '.py', '.js', '.html', '.css', '.json', '.xml', '.yaml', '.yml', '.csv', '.log']:
+                try:
+                    with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+                        content = f.read()
+                    lang_map = {'.py': 'python', '.js': 'javascript', '.html': 'html', '.css': 'css', 
+                               '.json': 'json', '.xml': 'xml', '.yaml': 'yaml', '.yml': 'yaml'}
+                    st.code(content[:50000], language=lang_map.get(ext))
+                except:
+                    st.warning("Could not read file content")
+            
+            else:
+                st.info(f"📦 Binary file ({ext}) - use Download button to view")
+        
+        else:
+            # File not fetched yet
+            with col2:
+                if st.button("⬇️ Fetch File", key=f"fetch_preview_{idx}_{selected_file_idx}", use_container_width=True):
+                    with st.spinner("Fetching from server..."):
+                        session = setup_session(st.session_state.session_id)
+                        saved_path = download_file(session, furl, course['id'], row.get('Name', 'Unknown'), fname)
+                        if saved_path:
+                            st.success("Fetched!")
+                            st.rerun()
+                        else:
+                            st.error("Failed to fetch")
+            
+            st.info("👆 Click 'Fetch File' to download and preview this file")
+    else:
+        st.caption("👆 Click a row above to select a file for preview")
 
 
 def _render_link_submission(row, sub_type):
     """Render link/text submission view"""
     if sub_type == 'link' or (sub_type == 'empty' and row.get('Eval_Last_Checked')):
         # Show analysis if it's a link OR if we have checked it
+        link = row.get('Eval_Link', '')
+        
         if row.get('Eval_Last_Checked'):
-            st.markdown(f"**Submission Link:** [{row.get('Eval_Link')}]({row.get('Eval_Link')})")
-            
+            # Show validation status
             c1, c2 = st.columns(2)
             with c1:
                 valid = row.get('Eval_Link_Valid') or 'N/A'
@@ -292,6 +635,13 @@ def _render_link_submission(row, sub_type):
                 st.info(f"Repo Status: {repo_status}")
                 if row.get('Eval_Is_Fork') == 'Yes':
                     st.caption(f"Fork of: {row.get('Eval_Parent')}")
+            
+            # For GitHub URLs, show interactive browser
+            if link and 'github.com' in link:
+                from streamlit_modules.ui.content_viewer import render_github_viewer
+                render_github_viewer(link, get_config('github_pat'))
+            else:
+                st.markdown(f"**Submission Link:** [{link}]({link})")
         else:
             st.warning("Analysis not run yet. Click 'Refresh Analysis'.")
     

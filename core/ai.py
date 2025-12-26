@@ -42,6 +42,55 @@ def get_gemini_client():
         return None
 
 
+def extract_pdf_text(pdf_path: str, max_chars: int = 100000) -> str:
+    """
+    Extract text content from a PDF file using PyMuPDF.
+    
+    Args:
+        pdf_path: Path to the PDF file
+        max_chars: Maximum characters to extract (default 100KB)
+    
+    Returns:
+        Extracted text content, or error message if extraction fails
+    """
+    try:
+        import fitz  # PyMuPDF
+        
+        doc = fitz.open(pdf_path)
+        text_parts = []
+        total_chars = 0
+        
+        for page_num in range(len(doc)):
+            page = doc[page_num]
+            page_text = page.get_text()
+            
+            if total_chars + len(page_text) > max_chars:
+                # Truncate to fit limit
+                remaining = max_chars - total_chars
+                if remaining > 0:
+                    text_parts.append(page_text[:remaining])
+                    text_parts.append(f"\n\n[Truncated at {max_chars} characters - PDF has {len(doc)} pages]")
+                break
+            else:
+                text_parts.append(f"--- Page {page_num + 1} ---\n{page_text}")
+                total_chars += len(page_text)
+        
+        doc.close()
+        
+        full_text = "\n".join(text_parts)
+        if not full_text.strip():
+            return "(PDF contains no extractable text - may be a scanned image)"
+        
+        return full_text
+        
+    except ImportError:
+        logger.error("PyMuPDF not installed - cannot extract PDF text")
+        return "(PDF extraction unavailable - PyMuPDF not installed)"
+    except Exception as e:
+        logger.error(f"Failed to extract PDF text: {e}")
+        return f"(Error extracting PDF text: {e})"
+
+
 def generate_rubric(task_description: str) -> Optional[List[Dict[str, Any]]]:
     """
     Generate a scoring rubric from a task description using Gemini API.
@@ -508,11 +557,23 @@ def fetch_submission_content(row: Dict, course_id: int = None) -> Dict[str, Any]
                     
                     if local_path.exists():
                         try:
-                            # Only read text files
-                            if local_path.suffix.lower() in ['.txt', '.py', '.js', '.html', '.css', '.md', '.json', '.xml', '.csv']:
-                                with open(local_path, 'r', encoding='utf-8', errors='ignore') as fp:
-                                    content = fp.read()
-                                    file_contents.append(f"--- Content of {fname} ---\n{content[:5000]}")  # Limit size
+                            file_size = local_path.stat().st_size
+                            
+                            # Handle PDFs specially
+                            if local_path.suffix.lower() == '.pdf':
+                                pdf_text = extract_pdf_text(str(local_path))
+                                file_contents.append(f"--- Content of {fname} (PDF) ---\n{pdf_text}")
+                            # Read text files up to 100KB
+                            elif local_path.suffix.lower() in ['.txt', '.py', '.js', '.html', '.css', '.md', '.json', '.xml', '.csv', '.java', '.c', '.cpp', '.h', '.sh', '.bat', '.ps1', '.yaml', '.yml', '.ini', '.cfg', '.conf', '.log', '.sql']:
+                                if file_size > 100000:
+                                    file_contents.append(f"(File too large: {file_size / 1024:.1f}KB - content not loaded)")
+                                else:
+                                    with open(local_path, 'r', encoding='utf-8', errors='ignore') as fp:
+                                        content = fp.read()
+                                        file_contents.append(f"--- Content of {fname} ---\n{content}")
+                            # Handle images - just note they exist
+                            elif local_path.suffix.lower() in ['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.svg']:
+                                file_contents.append(f"(Image file: {fname} - {file_size / 1024:.1f}KB)")
                             else:
                                 file_contents.append(f"(Binary file - cannot read content)")
                         except Exception as e:

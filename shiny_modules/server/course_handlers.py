@@ -6,7 +6,7 @@ Handles course data loading, caching, and background refresh.
 from shiny import reactive, ui
 from core.auth import setup_session
 from core.api import get_courses, get_topics, get_course_groups, get_course_grade_items
-from core.persistence import save_cache, load_cache
+from core.persistence import save_cache, load_cache, save_last_session, load_last_session
 import threading
 from queue import Queue
 import logging
@@ -60,6 +60,18 @@ def register_course_handlers(
             logger.info("Loaded courses from cache (instant)")
             courses_data.set(cached)
             courses_loaded_from_cache.set(True)
+            
+            # Restore last selected course from session
+            last_session = load_last_session()
+            last_course_id = last_session.get("last_course_id")
+            if last_course_id:
+                # Check if the saved course exists in available courses
+                course_ids = [str(c['id']) for c in cached]
+                if last_course_id in course_ids:
+                    logger.info(f"Restoring last selected course: {last_course_id}")
+                    ui.update_select("course_id", selected=last_course_id)
+                else:
+                    logger.info(f"Last course {last_course_id} not in available courses, skipping restore")
         else:
             # No cache - must fetch live
             logger.info("No cached courses, fetching live...")
@@ -68,6 +80,15 @@ def register_course_handlers(
                 live = get_courses(s)
                 courses_data.set(live)
                 save_cache("courses", live)
+                
+                # Restore last selected course from session
+                last_session = load_last_session()
+                last_course_id = last_session.get("last_course_id")
+                if last_course_id:
+                    course_ids = [str(c['id']) for c in live]
+                    if last_course_id in course_ids:
+                        logger.info(f"Restoring last selected course: {last_course_id}")
+                        ui.update_select("course_id", selected=last_course_id)
             except Exception as e:
                 logger.error(f"Error fetching courses: {e}")
     
@@ -108,6 +129,12 @@ def register_course_handlers(
     def load_data():
         cid = input.course_id()
         if not cid: return
+        
+        # Save selected course to session for persistence across refreshes
+        if cid and cid != "__custom__":
+            save_last_session({"last_course_id": cid})
+            logger.info(f"Saved last course ID: {cid}")
+        
         is_edit_mode_on.set(False)
         selected_indices.set([])  # Reset selection
         
