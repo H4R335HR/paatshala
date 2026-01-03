@@ -295,22 +295,25 @@ def render_tryhackme_tab(course, meta):
                 st.error(f"❌ Error parsing leaderboard response: {e}")
                 return
         
-        # Fetch scoreboard (HTML page)
+        # Fetch scoreboard (JSON API)
         with st.spinner("Fetching scoreboard data..."):
             try:
-                scoreboard_url = f"{base_url}?b={effective_batch}"
+                scoreboard_url = f"{base_url}?action=scoreboard&b={effective_batch}"
                 response = requests.get(scoreboard_url, headers=DEFAULT_HEADERS, timeout=30)
                 response.raise_for_status()
                 
-                # Parse the HTML to extract scoreboard data
-                scoreboard_data, batch_info = parse_scoreboard_html(response.text)
-                st.session_state.thm_scoreboard_data = scoreboard_data
-                st.session_state.thm_batch_info = batch_info
+                scoreboard_json = response.json()
+                
+                if scoreboard_json.get('error'):
+                    st.error(f"❌ Error: {scoreboard_json['error']}")
+                elif scoreboard_json.get('success'):
+                    st.session_state.thm_scoreboard_data = scoreboard_json.get('data', [])
+                    st.session_state.thm_batch_info = scoreboard_json.get('batch_info', {})
                 
             except requests.exceptions.RequestException as e:
                 st.error(f"❌ Network error fetching scoreboard: {e}")
-            except Exception as e:
-                st.error(f"❌ Error parsing scoreboard: {e}")
+            except ValueError as e:
+                st.error(f"❌ Error parsing scoreboard response: {e}")
         
         # Save fetched data to disk for persistence
         if st.session_state.thm_leaderboard_data:
@@ -561,33 +564,47 @@ def render_leaderboard_section():
 def render_scoreboard_section():
     """Render the scoreboard tab content"""
     data = st.session_state.thm_scoreboard_data
+    batch_info = st.session_state.thm_batch_info or {}
     
     if not data:
         st.info("No scoreboard data available. Click 'Fetch Data' to load.")
         return
     
-    # Convert to DataFrame
-    df = pd.DataFrame(data)
+    # Prepare display data
+    display_data = []
+    for i, user in enumerate(data, 1):
+        row = {
+            'Rank': i,
+            'Name': user.get('name', 'Unknown'),
+            'Weekly': user.get('weekly_points', 0),
+            'Bonus': user.get('bonus', 0),
+            'Total': user.get('total', 0)
+        }
+        display_data.append(row)
+    
+    df = pd.DataFrame(display_data)
     
     if df.empty:
         st.info("No scoreboard data to display.")
         return
     
-    # Summary
-    if 'Total' in df.columns:
-        total_points = df['Total'].sum()
-        avg_points = df['Total'].mean()
-        max_points = df['Total'].max()
-        
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric("Total Points", total_points)
-        with col2:
-            st.metric("Avg Points", f"{avg_points:.1f}")
-        with col3:
-            st.metric("Max Points", max_points)
-        
-        st.divider()
+    # Summary metrics
+    total_points = df['Total'].sum()
+    avg_points = df['Total'].mean()
+    max_points = df['Total'].max()
+    total_bonus = df['Bonus'].sum()
+    
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("Participants", len(df))
+    with col2:
+        st.metric("Total Points", total_points)
+    with col3:
+        st.metric("Total Bonus", total_bonus)
+    with col4:
+        st.metric("Top Score", max_points)
+    
+    st.divider()
     
     # Download button
     col1, col2 = st.columns([1, 4])
@@ -603,14 +620,12 @@ def render_scoreboard_section():
     
     # Prepare column config
     column_config = {
+        "Rank": st.column_config.NumberColumn("🏅 Rank", width="small"),
         "Name": st.column_config.TextColumn("👤 Name", width="medium"),
+        "Weekly": st.column_config.NumberColumn("📅 Weekly", width="small"),
+        "Bonus": st.column_config.NumberColumn("⭐ Bonus", width="small"),
         "Total": st.column_config.NumberColumn("🏆 Total", width="small")
     }
-    
-    # Add week columns
-    for col in df.columns:
-        if col.startswith('Week'):
-            column_config[col] = st.column_config.TextColumn(f"📅 {col}", width="small")
     
     st.dataframe(
         df,
@@ -619,16 +634,50 @@ def render_scoreboard_section():
         column_config=column_config
     )
     
+    # Week breakdown expander - as compact table
+    with st.expander("📊 Week-by-Week Breakdown"):
+        # Find max week across all users
+        max_week = 0
+        for user in data:
+            weeks = user.get('weeks', {})
+            if weeks:
+                user_max = max(int(w) for w in weeks.keys())
+                max_week = max(max_week, user_max)
+        
+        if max_week > 0:
+            # Build table data with compact week headers
+            week_table_data = []
+            for user in data:
+                row = {'Name': user.get('name', 'Unknown')}
+                weeks = user.get('weeks', {})
+                for w in range(1, max_week + 1):
+                    week_data = weeks.get(str(w)) or weeks.get(w)
+                    row[str(w)] = week_data.get('points', 0) if week_data else '-'
+                week_table_data.append(row)
+            
+            week_df = pd.DataFrame(week_table_data)
+            
+            # Compact column config
+            week_col_config = {"Name": st.column_config.TextColumn("Name", width="medium")}
+            for w in range(1, max_week + 1):
+                week_col_config[str(w)] = st.column_config.TextColumn(f"{w}", width="small")
+            
+            st.dataframe(week_df, hide_index=True, column_config=week_col_config)
+    
     # How it works info
     with st.expander("ℹ️ How Scoring Works"):
-        st.markdown("""
-        Every Monday at midnight, a snapshot is taken of everyone's completed rooms on TryHackMe.
-        
+        st.markdown(f"""
+        **Weekly Points** (Every Monday snapshot):
         - **Week 1:** Complete at least 1 room → **+5 points**
         - **Week 2+:** Complete more rooms than previous week → **+5 points**
         - No progress = **0 points**
         
-        *Consistency is key! 🎯*
+        **Leaderboard Bonus** (Top 3 by rooms completed):
+        - 🥇 **1st:** 20% of max weekly points
+        - 🥈 **2nd:** 10% of max weekly points
+        - 🥉 **3rd:** 5% of max weekly points
+        
+        *Bonus is ephemeral — it changes as the leaderboard changes!*
         """)
 
 
