@@ -91,6 +91,140 @@ def extract_pdf_text(pdf_path: str, max_chars: int = 100000) -> str:
         return f"(Error extracting PDF text: {e})"
 
 
+def extract_docx_text(docx_path: str, max_chars: int = 100000) -> str:
+    """
+    Extract content from a DOCX file as semantic HTML using mammoth.
+    
+    This preserves document structure (headings, lists, tables, emphasis)
+    which gives the AI better context for evaluation compared to plain text.
+    
+    Args:
+        docx_path: Path to the DOCX file
+        max_chars: Maximum characters to extract (default 100KB)
+    
+    Returns:
+        HTML content, or error message if extraction fails
+    """
+    try:
+        import mammoth
+        
+        with open(docx_path, "rb") as docx_file:
+            result = mammoth.convert_to_html(docx_file)
+            html_content = result.value
+            
+            # Log any conversion warnings
+            if result.messages:
+                for msg in result.messages[:5]:  # Limit logged warnings
+                    logger.debug(f"Mammoth conversion warning: {msg}")
+            
+            if not html_content.strip():
+                return "(DOCX contains no extractable content)"
+            
+            # Truncate if too long
+            if len(html_content) > max_chars:
+                html_content = html_content[:max_chars] + f"\n\n[Truncated at {max_chars} characters]"
+            
+            return html_content
+        
+    except ImportError:
+        logger.error("mammoth not installed - cannot extract DOCX content")
+        return "(DOCX extraction unavailable - mammoth not installed)"
+    except Exception as e:
+        logger.error(f"Failed to extract DOCX content: {e}")
+        return f"(Error extracting DOCX content: {e})"
+
+
+def extract_zip_listing(zip_path: str, password: str = "ictkerala.org") -> str:
+    """
+    Extract file listing and content from a ZIP archive for AI context.
+    
+    For encrypted ZIPs, uses the known password.
+    For DOCX files inside the ZIP, extracts and converts to HTML for AI evaluation.
+    
+    Args:
+        zip_path: Path to the ZIP file
+        password: Password to try for encrypted ZIPs
+    
+    Returns:
+        File listing string with content, or error message if extraction fails
+    """
+    try:
+        import zipfile
+        import io
+        
+        with zipfile.ZipFile(zip_path, 'r') as zf:
+            # Check if encrypted
+            is_encrypted = any(info.flag_bits & 0x1 for info in zf.infolist())
+            pwd = password.encode() if is_encrypted else None
+            
+            if is_encrypted:
+                try:
+                    zf.setpassword(pwd)
+                except:
+                    pass
+            
+            file_list = []
+            content_sections = []
+            total_size = 0
+            
+            for info in zf.infolist():
+                if not info.is_dir():
+                    total_size += info.file_size
+                    size_str = f"{info.file_size / 1024:.1f} KB" if info.file_size > 0 else "—"
+                    file_list.append(f"- {info.filename} ({size_str})")
+                    
+                    # Try to extract content from known file types
+                    ext = Path(info.filename).suffix.lower()
+                    try:
+                        file_bytes = zf.read(info.filename, pwd=pwd)
+                        
+                        # DOCX files - convert to HTML with mammoth
+                        if ext in ['.docx']:
+                            try:
+                                import mammoth
+                                result = mammoth.convert_to_html(io.BytesIO(file_bytes))
+                                # Strip HTML tags for cleaner AI input
+                                import re
+                                clean_text = re.sub(r'<[^>]+>', ' ', result.value)
+                                clean_text = re.sub(r'\s+', ' ', clean_text).strip()
+                                if clean_text:
+                                    content_sections.append(f"\n--- Content of {info.filename} ---\n{clean_text[:20000]}")
+                            except Exception as e:
+                                # DOCX might be password-protected itself
+                                content_sections.append(f"\n--- {info.filename} ---\n(Could not read DOCX: {e})")
+                        
+                        # Plain text files
+                        elif ext in ['.txt', '.md', '.csv', '.log', '.py', '.js', '.html', '.css', '.json']:
+                            try:
+                                text_content = file_bytes.decode('utf-8', errors='ignore')
+                                if text_content.strip():
+                                    content_sections.append(f"\n--- Content of {info.filename} ---\n{text_content[:10000]}")
+                            except:
+                                pass
+                    except Exception as e:
+                        logger.debug(f"Could not extract {info.filename}: {e}")
+            
+            if file_list:
+                listing = f"ZIP Archive Contents ({len(file_list)} files, {total_size / 1024:.1f} KB total):\n"
+                listing += "\n".join(file_list[:50])  # Limit to 50 files
+                if len(file_list) > 50:
+                    listing += f"\n... and {len(file_list) - 50} more files"
+                
+                # Add extracted content
+                if content_sections:
+                    listing += "\n\n" + "\n".join(content_sections)
+                
+                return listing
+            else:
+                return "(Empty ZIP archive)"
+                
+    except zipfile.BadZipFile:
+        return "(Invalid or corrupted ZIP file)"
+    except Exception as e:
+        logger.error(f"Failed to list ZIP contents: {e}")
+        return f"(Error reading ZIP: {e})"
+
+
 def generate_rubric(task_description: str) -> Optional[List[Dict[str, Any]]]:
     """
     Generate a scoring rubric from a task description using Gemini API.
@@ -563,6 +697,14 @@ def fetch_submission_content(row: Dict, course_id: int = None) -> Dict[str, Any]
                             if local_path.suffix.lower() == '.pdf':
                                 pdf_text = extract_pdf_text(str(local_path))
                                 file_contents.append(f"--- Content of {fname} (PDF) ---\n{pdf_text}")
+                            # Handle DOCX files
+                            elif local_path.suffix.lower() in ['.docx', '.doc']:
+                                docx_text = extract_docx_text(str(local_path))
+                                file_contents.append(f"--- Content of {fname} (Word Document) ---\n{docx_text}")
+                            # Handle ZIP archives
+                            elif local_path.suffix.lower() == '.zip':
+                                zip_listing = extract_zip_listing(str(local_path))
+                                file_contents.append(f"--- {fname} ---\n{zip_listing}")
                             # Read text files up to 100KB
                             elif local_path.suffix.lower() in ['.txt', '.py', '.js', '.html', '.css', '.md', '.json', '.xml', '.csv', '.java', '.c', '.cpp', '.h', '.sh', '.bat', '.ps1', '.yaml', '.yml', '.ini', '.cfg', '.conf', '.log', '.sql']:
                                 if file_size > 100000:

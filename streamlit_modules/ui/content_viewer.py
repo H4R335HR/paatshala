@@ -53,99 +53,429 @@ def get_max_inline_size():
         return 512 * 1024  # 512KB default
 
 
-def render_pdf_viewer(pdf_path: str, unique_key: str = ""):
+def render_pdf_viewer(pdf_bytes: bytes, filename: str = "document.pdf", unique_key: str = ""):
     """
-    PDF content viewer that extracts and displays text content.
-    
-    Shows extracted text in a scrollable container with download button
-    for the original PDF file.
+    Rich PDF viewer using pdf.js with zoom, fullscreen, and multi-page support.
     
     Args:
-        pdf_path: Path to the PDF file to display.
+        pdf_bytes: The raw bytes of the PDF file
+        filename: Display name for the document  
         unique_key: Optional unique key suffix to prevent duplicate key errors
-                    when the same PDF is displayed in multiple places.
     """
     try:
-        path = Path(pdf_path)
-        if not path.exists():
-            st.warning(f"⚠️ PDF file not found: {path.name}")
+        if not pdf_bytes or len(pdf_bytes) < 10:
+            st.warning("⚠️ Empty or invalid PDF data")
             return
         
-        file_size = path.stat().st_size
-        file_name = path.name
+        b64_pdf = base64.b64encode(pdf_bytes).decode('utf-8')
+        idx = unique_key or hash(pdf_bytes[:100])
         
-        # Generate a unique key combining path hash and optional suffix
-        key_base = f"pdf_dl_{hash(str(path))}"
-        if unique_key:
-            key_base = f"{key_base}_{unique_key}"
+        # PDF.js viewer with zoom, fullscreen, multi-page scrolling
+        pdfjs_html = f'''
+        <style>
+            #pdfContainer_{idx} {{ 
+                width: 100%; 
+                background: #525659; 
+                border-radius: 8px; 
+                padding: 10px;
+                text-align: center;
+            }}
+            #pdfContainer_{idx}:fullscreen {{
+                background: #525659;
+                padding: 20px;
+            }}
+            #pdfScroller_{idx} {{
+                max-height: 550px;
+                overflow-y: auto;
+                background: #3a3a3a;
+                border-radius: 4px;
+                padding: 10px;
+            }}
+            #pdfContainer_{idx}:fullscreen #pdfScroller_{idx} {{
+                max-height: calc(100vh - 80px);
+            }}
+            .pdf-page-canvas_{idx} {{
+                max-width: 100%; 
+                box-shadow: 0 2px 10px rgba(0,0,0,0.3);
+                margin-bottom: 15px;
+                display: block;
+                margin-left: auto;
+                margin-right: auto;
+            }}
+            .pdf-controls_{idx} {{
+                display: flex;
+                justify-content: center;
+                align-items: center;
+                gap: 12px;
+                margin-bottom: 10px;
+                color: white;
+                font-family: sans-serif;
+                flex-wrap: wrap;
+            }}
+            .pdf-btn_{idx} {{
+                background: #333;
+                color: white;
+                border: 1px solid #555;
+                padding: 6px 12px;
+                border-radius: 4px;
+                cursor: pointer;
+                font-size: 13px;
+            }}
+            .pdf-btn_{idx}:hover {{ background: #444; }}
+        </style>
         
-        # Show file info header with action buttons
-        col1, col2, col3 = st.columns([3, 1, 1])
-        with col1:
-            st.markdown(f"📄 **{file_name}** ({file_size / 1024:.1f} KB)")
-        with col2:
-            # View in new tab button - opens PDF in browser's native viewer
-            with open(path, "rb") as f:
-                pdf_data = f.read()
-            b64_pdf = base64.b64encode(pdf_data).decode('utf-8')
-            
-            # Use JavaScript to create blob URL and open in new tab (bypasses Chrome data URL blocking)
-            view_html = f'''
-                <button onclick="openPdf()" style="width: 100%; padding: 0.4rem 0.75rem; 
-                       background-color: #262730; color: white; text-align: center;
-                       border-radius: 0.5rem; font-size: 0.875rem; cursor: pointer;
-                       border: 1px solid #444;">
-                    👁️ View
-                </button>
-                <script>
-                    function openPdf() {{
-                        const b64 = "{b64_pdf}";
-                        const binary = atob(b64);
-                        const len = binary.length;
-                        const bytes = new Uint8Array(len);
-                        for (let i = 0; i < len; i++) {{
-                            bytes[i] = binary.charCodeAt(i);
-                        }}
-                        const blob = new Blob([bytes], {{ type: 'application/pdf' }});
-                        const url = URL.createObjectURL(blob);
-                        window.open(url, '_blank');
+        <div id="pdfContainer_{idx}">
+            <div class="pdf-controls_{idx}">
+                <span id="pageInfo_{idx}">Loading...</span>
+                <span>|</span>
+                <span>Zoom:</span>
+                <button class="pdf-btn_{idx}" onclick="zoomOut_{idx}()">−</button>
+                <span id="zoomLevel_{idx}">100%</span>
+                <button class="pdf-btn_{idx}" onclick="zoomIn_{idx}()">+</button>
+                <span>|</span>
+                <button class="pdf-btn_{idx}" onclick="toggleFullscreen_{idx}()" id="fsBtn_{idx}">⛶ Fullscreen</button>
+            </div>
+            <div id="pdfScroller_{idx}">
+                <div id="pdfPages_{idx}"></div>
+            </div>
+        </div>
+        
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+        <script>
+            (async function() {{
+                const pdfjsLib = window['pdfjs-dist/build/pdf'];
+                pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+                
+                const b64 = "{b64_pdf}";
+                const binary = atob(b64);
+                const bytes = new Uint8Array(binary.length);
+                for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+                
+                let pdfDoc = null;
+                let scale = 1.5;
+                const container = document.getElementById('pdfPages_{idx}');
+                
+                async function renderAllPages() {{
+                    container.innerHTML = '';
+                    for (let num = 1; num <= pdfDoc.numPages; num++) {{
+                        const page = await pdfDoc.getPage(num);
+                        const viewport = page.getViewport({{ scale: scale }});
+                        
+                        const canvas = document.createElement('canvas');
+                        canvas.className = 'pdf-page-canvas_{idx}';
+                        canvas.height = viewport.height;
+                        canvas.width = viewport.width;
+                        container.appendChild(canvas);
+                        
+                        const ctx = canvas.getContext('2d');
+                        await page.render({{ canvasContext: ctx, viewport: viewport }}).promise;
                     }}
-                </script>
-            '''
-            st.components.v1.html(view_html, height=40)
-        with col3:
-            with open(path, "rb") as f:
-                st.download_button(
-                    label="📥 Download",
-                    data=f,
-                    file_name=file_name,
-                    mime="application/pdf",
-                    key=key_base,
-                    use_container_width=True
-                )
+                    document.getElementById('pageInfo_{idx}').textContent = pdfDoc.numPages + ' page(s)';
+                    document.getElementById('zoomLevel_{idx}').textContent = Math.round(scale*100/1.5) + '%';
+                }}
+                
+                window.zoomIn_{idx} = function() {{ scale += 0.25; renderAllPages(); }};
+                window.zoomOut_{idx} = function() {{ if (scale > 0.5) {{ scale -= 0.25; renderAllPages(); }} }};
+                
+                window.toggleFullscreen_{idx} = function() {{
+                    const cont = document.getElementById('pdfContainer_{idx}');
+                    const btn = document.getElementById('fsBtn_{idx}');
+                    
+                    if (document.fullscreenElement) {{
+                        document.exitFullscreen();
+                        btn.textContent = '⛶ Fullscreen';
+                    }} else {{
+                        cont.requestFullscreen().then(() => {{
+                            btn.textContent = '✕ Exit';
+                        }}).catch(err => {{
+                            alert('Fullscreen not available: ' + err.message);
+                        }});
+                    }}
+                }};
+                
+                document.addEventListener('fullscreenchange', () => {{
+                    const btn = document.getElementById('fsBtn_{idx}');
+                    if (btn && !document.fullscreenElement) {{
+                        btn.textContent = '⛶ Fullscreen';
+                    }}
+                }});
+                
+                try {{
+                    pdfDoc = await pdfjsLib.getDocument({{ data: bytes }}).promise;
+                    await renderAllPages();
+                }} catch (err) {{
+                    document.getElementById('pageInfo_{idx}').textContent = 'Error: ' + err.message;
+                }}
+            }})();
+        </script>
+        '''
+        st.components.v1.html(pdfjs_html, height=650)
+        st.caption("💡 Scroll through pages • Zoom in/out • Fullscreen mode")
         
-        # Extract and display text content
-        from core.ai import extract_pdf_text
-        
-        with st.spinner("Extracting PDF content..."):
-            text_content = extract_pdf_text(str(path))
-        
-        if text_content.startswith("(") and text_content.endswith(")"):
-            # Error or special message from extraction
-            st.warning(text_content)
-        else:
-            # Display extracted text in a scrollable container
-            st.text_area(
-                "📝 Extracted Content",
-                value=text_content,
-                height=400,
-                key=f"pdf_text_{key_base}",
-                disabled=True
-            )
-            
     except Exception as e:
         logger.error(f"Error rendering PDF viewer: {e}")
         st.error(f"Could not display PDF: {e}")
+
+
+def render_docx_viewer(docx_bytes: bytes, filename: str = "document.docx", unique_key: str = ""):
+    """
+    DOCX content viewer using mammoth.js with document metadata display.
+    
+    Provides rich viewing experience with:
+    - Document metadata (author, words, edit time, revisions, template)
+    - Fullscreen support
+    - Page estimation from rendered height
+    
+    Args:
+        docx_bytes: The raw bytes of the DOCX file
+        filename: Display name for the document
+        unique_key: Optional unique key suffix to prevent duplicate key errors
+    """
+    try:
+        import io
+        
+        # Check if DOCX is valid (should start with "PK" - ZIP magic bytes)
+        if len(docx_bytes) < 4 or docx_bytes[:2] != b'PK':
+            st.warning("🔐 This document appears to be password-protected and cannot be previewed.")
+            st.info("💡 The student may have applied password protection to the DOCX file itself.")
+            return
+        
+        # Extract metadata from DOCX
+        doc_meta = {
+            'author': '—',
+            'words': '—',
+            'meta_pages': '—',
+            'edit_time': '—',
+            'revision': '—',
+            'template': '—',
+            'warning': ''
+        }
+        
+        try:
+            import zipfile
+            import xml.etree.ElementTree as ET
+            
+            with zipfile.ZipFile(io.BytesIO(docx_bytes), 'r') as zf:
+                # Extract from app.xml (words, pages, edit time, template)
+                if 'docProps/app.xml' in zf.namelist():
+                    app_xml = zf.read('docProps/app.xml')
+                    root = ET.fromstring(app_xml)
+                    for elem in root.iter():
+                        tag = elem.tag.split('}')[-1] if '}' in elem.tag else elem.tag
+                        if tag == 'Words' and elem.text:
+                            doc_meta['words'] = elem.text
+                        elif tag == 'TotalTime' and elem.text:
+                            try:
+                                mins = int(elem.text)
+                                if mins < 60:
+                                    doc_meta['edit_time'] = f"{mins} min"
+                                else:
+                                    doc_meta['edit_time'] = f"{mins // 60}h {mins % 60}m"
+                            except:
+                                doc_meta['edit_time'] = f"{elem.text} min"
+                        elif tag == 'Pages' and elem.text:
+                            doc_meta['meta_pages'] = elem.text
+                        elif tag == 'Template' and elem.text:
+                            doc_meta['template'] = elem.text
+                
+                # Extract from core.xml (author, revision)
+                if 'docProps/core.xml' in zf.namelist():
+                    core_xml = zf.read('docProps/core.xml')
+                    root = ET.fromstring(core_xml)
+                    for elem in root.iter():
+                        tag = elem.tag.split('}')[-1] if '}' in elem.tag else elem.tag
+                        if tag == 'creator' and elem.text:
+                            doc_meta['author'] = elem.text.strip()
+                        elif tag == 'revision' and elem.text:
+                            doc_meta['revision'] = elem.text
+                
+                # Check for suspicious patterns (high words/min)
+                try:
+                    words = int(doc_meta['words']) if doc_meta['words'] != '—' else 0
+                    edit_time_str = doc_meta['edit_time']
+                    if edit_time_str != '—':
+                        if 'h' in edit_time_str:
+                            parts = edit_time_str.replace('h', ' ').replace('m', '').split()
+                            edit_mins = int(parts[0]) * 60 + int(parts[1]) if len(parts) > 1 else int(parts[0]) * 60
+                        else:
+                            edit_mins = int(edit_time_str.replace(' min', ''))
+                        if edit_mins > 0 and words > 0:
+                            wpm = words / edit_mins
+                            if wpm > 100:  # More than 100 words/min is suspicious
+                                doc_meta['warning'] = f'⚠️ High words/min ratio ({wpm:.0f}) - possible copy-paste'
+                except:
+                    pass
+        except Exception:
+            pass  # Metadata extraction failed, continue with defaults
+        
+        b64_docx = base64.b64encode(docx_bytes).decode('utf-8')
+        idx = unique_key or hash(docx_bytes[:100])
+        
+        mammoth_html = f'''
+        <style>
+            #docxContainer_{idx} {{
+                width: 100%;
+                background: #ffffff;
+                border-radius: 8px;
+                padding: 10px;
+            }}
+            #docxContainer_{idx}:fullscreen {{
+                background: #ffffff;
+                padding: 20px;
+            }}
+            #docxScroller_{idx} {{
+                max-height: 500px;
+                overflow-y: auto;
+                background: #ffffff;
+                border-radius: 4px;
+                padding: 20px 30px;
+                color: #333;
+                font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+                line-height: 1.6;
+            }}
+            #docxContainer_{idx}:fullscreen #docxScroller_{idx} {{
+                max-height: calc(100vh - 80px);
+            }}
+            #docxContent_{idx} h1 {{ font-size: 1.8em; margin: 0.8em 0; color: #222; }}
+            #docxContent_{idx} h2 {{ font-size: 1.5em; margin: 0.7em 0; color: #333; }}
+            #docxContent_{idx} h3 {{ font-size: 1.2em; margin: 0.6em 0; color: #444; }}
+            #docxContent_{idx} p {{ margin: 0.5em 0; }}
+            #docxContent_{idx} table {{ border-collapse: collapse; width: 100%; margin: 1em 0; }}
+            #docxContent_{idx} td, #docxContent_{idx} th {{ border: 1px solid #ddd; padding: 8px; }}
+            #docxContent_{idx} ul, #docxContent_{idx} ol {{ padding-left: 2em; }}
+            .docx-controls_{idx} {{
+                display: flex;
+                justify-content: flex-end;
+                gap: 10px;
+                margin-bottom: 10px;
+            }}
+            .docx-btn_{idx} {{
+                background: #333;
+                color: white;
+                border: 1px solid #555;
+                padding: 6px 12px;
+                border-radius: 4px;
+                cursor: pointer;
+                font-size: 13px;
+            }}
+            .docx-btn_{idx}:hover {{ background: #444; }}
+            #docxStatus_{idx} {{ color: #666; font-size: 13px; }}
+            .docx-info-panel_{idx} {{
+                background: #2d2d2d;
+                border-radius: 6px;
+                padding: 10px 15px;
+                margin-bottom: 10px;
+                display: flex;
+                flex-wrap: wrap;
+                gap: 20px;
+                align-items: center;
+                font-size: 13px;
+                color: #ccc;
+            }}
+            .docx-info-item_{idx} {{
+                display: flex;
+                align-items: center;
+                gap: 6px;
+            }}
+            .docx-info-label_{idx} {{ color: #888; }}
+            .docx-info-value_{idx} {{ color: #fff; font-weight: 500; }}
+        </style>
+        
+        <div id="docxContainer_{idx}">
+            <div class="docx-info-panel_{idx}">
+                <div class="docx-info-item_{idx}">
+                    <span class="docx-info-label_{idx}">👤 Author:</span>
+                    <span class="docx-info-value_{idx}">{doc_meta['author']}</span>
+                </div>
+                <div class="docx-info-item_{idx}">
+                    <span class="docx-info-label_{idx}">📝 Words:</span>
+                    <span class="docx-info-value_{idx}">{doc_meta['words']}</span>
+                </div>
+                <div class="docx-info-item_{idx}">
+                    <span class="docx-info-label_{idx}">📄 Meta pages:</span>
+                    <span class="docx-info-value_{idx}">{doc_meta['meta_pages']}</span>
+                </div>
+                <div class="docx-info-item_{idx}">
+                    <span class="docx-info-label_{idx}">⏱️ Edit time:</span>
+                    <span class="docx-info-value_{idx}">{doc_meta['edit_time']}</span>
+                </div>
+                <div class="docx-info-item_{idx}">
+                    <span class="docx-info-label_{idx}">🔄 Revisions:</span>
+                    <span class="docx-info-value_{idx}">{doc_meta['revision']}</span>
+                </div>
+                <div class="docx-info-item_{idx}">
+                    <span class="docx-info-label_{idx}">📋 Template:</span>
+                    <span class="docx-info-value_{idx}">{doc_meta['template']}</span>
+                </div>
+                {f'<div style="background: #553300; color: #ffaa00; padding: 4px 10px; border-radius: 4px; font-size: 12px;">{doc_meta["warning"]}</div>' if doc_meta['warning'] else ''}
+            </div>
+            <div class="docx-controls_{idx}">
+                <span id="docxStatus_{idx}">Loading document...</span>
+                <button class="docx-btn_{idx}" onclick="toggleDocxFullscreen_{idx}()" id="docxFsBtn_{idx}">⛶ Fullscreen</button>
+            </div>
+            <div id="docxScroller_{idx}">
+                <div id="docxContent_{idx}"></div>
+            </div>
+        </div>
+        
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js"></script>
+        <script>
+            (async function() {{
+                const b64 = "{b64_docx}";
+                const binary = atob(b64);
+                const bytes = new Uint8Array(binary.length);
+                for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+                
+                try {{
+                    const result = await mammoth.convertToHtml({{ arrayBuffer: bytes.buffer }});
+                    const contentDiv = document.getElementById('docxContent_{idx}');
+                    contentDiv.innerHTML = result.value;
+                    
+                    // Estimate page count based on rendered height
+                    setTimeout(() => {{
+                        const contentHeight = contentDiv.scrollHeight;
+                        const pageHeightPx = 1050;
+                        const estimatedPages = Math.max(1, Math.ceil(contentHeight / pageHeightPx));
+                        document.getElementById('docxStatus_{idx}').textContent = 
+                            '📄 ~' + estimatedPages + ' page(s) (estimated)';
+                    }}, 100);
+                }} catch (err) {{
+                    document.getElementById('docxContent_{idx}').innerHTML = 
+                        '<p style="color:red;">Error loading document: ' + err.message + '</p>';
+                    document.getElementById('docxStatus_{idx}').textContent = '❌ Error';
+                }}
+                
+                window.toggleDocxFullscreen_{idx} = function() {{
+                    const cont = document.getElementById('docxContainer_{idx}');
+                    const btn = document.getElementById('docxFsBtn_{idx}');
+                    
+                    if (document.fullscreenElement) {{
+                        document.exitFullscreen();
+                        btn.textContent = '⛶ Fullscreen';
+                    }} else {{
+                        cont.requestFullscreen().then(() => {{
+                            btn.textContent = '✕ Exit';
+                        }}).catch(err => {{
+                            alert('Fullscreen not available: ' + err.message);
+                        }});
+                    }}
+                }};
+                
+                document.addEventListener('fullscreenchange', () => {{
+                    const btn = document.getElementById('docxFsBtn_{idx}');
+                    if (btn && !document.fullscreenElement) {{
+                        btn.textContent = '⛶ Fullscreen';
+                    }}
+                }});
+            }})();
+        </script>
+        '''
+        st.components.v1.html(mammoth_html, height=650)
+        st.caption("💡 Scroll through document • Fullscreen mode available")
+        
+    except Exception as e:
+        logger.error(f"Error rendering DOCX viewer: {e}")
+        st.error(f"Could not display DOCX: {e}")
 
 
 def render_github_viewer(repo_url: str, pat: Optional[str] = None):
@@ -532,6 +862,44 @@ def _render_file_preview(selected_path: str, owner: str, repo: str,
             st.image(download_url, caption=filename, width="stretch")
         else:
             st.warning("🖼️ Could not load image - no download URL available")
+    elif ext == '.pdf':
+        # PDF file - fetch and use PDF viewer
+        if download_url:
+            import requests
+            
+            with st.spinner("Fetching PDF..."):
+                try:
+                    resp = requests.get(download_url, timeout=30)
+                    if resp.status_code == 200:
+                        # Use the shared PDF viewer with bytes directly
+                        render_pdf_viewer(resp.content, filename, unique_key=f"gh_{hash(download_url)}")
+                    else:
+                        st.warning(f"Could not fetch PDF (HTTP {resp.status_code})")
+                        st.markdown(f"[📥 Download {filename}]({download_url})")
+                except Exception as e:
+                    st.error(f"Error fetching PDF: {e}")
+                    st.markdown(f"[📥 Download {filename}]({download_url})")
+        else:
+            st.info("📕 PDF file - no download URL available")
+    elif ext in ['.docx', '.doc']:
+        # DOCX file - fetch and reuse existing DOCX viewer
+        if download_url:
+            import requests
+            
+            with st.spinner("Fetching document..."):
+                try:
+                    resp = requests.get(download_url, timeout=30)
+                    if resp.status_code == 200:
+                        # Use the shared DOCX viewer
+                        render_docx_viewer(resp.content, filename, unique_key=f"gh_{hash(download_url)}")
+                    else:
+                        st.warning(f"Could not fetch DOCX (HTTP {resp.status_code})")
+                        st.markdown(f"[📥 Download {filename}]({download_url})")
+                except Exception as e:
+                    st.error(f"Error fetching DOCX: {e}")
+                    st.markdown(f"[📥 Download {filename}]({download_url})")
+        else:
+            st.info("📄 DOCX file - no download URL available")
     elif ext in ['.zip', '.7z', '.rar', '.tar', '.gz']:
         # Archive files - fetch and display contents with drill-down
         import requests
@@ -562,7 +930,7 @@ def _render_file_preview(selected_path: str, owner: str, repo: str,
             if zip_data:
                 try:
                     with zipfile.ZipFile(io.BytesIO(zip_data), 'r') as zf:
-                        # Check if password protected
+                        # Check if ZIP archive is password protected
                         is_encrypted = any(info.flag_bits & 0x1 for info in zf.infolist())
                         known_password = "ictkerala.org" if is_encrypted else None
                         
@@ -634,6 +1002,9 @@ def _render_file_preview(selected_path: str, owner: str, repo: str,
                                     elif file_ext == '.json':
                                         text_content = file_content.decode('utf-8', errors='ignore')
                                         st.code(text_content, language='json')
+                                    elif file_ext in ['.docx', '.doc']:
+                                        # Use the reusable DOCX viewer
+                                        render_docx_viewer(file_content, file_name, unique_key=f"zip_{hash(selected_zip_file)}")
                                     else:
                                         # Try to display as text for files without extension or unknown types
                                         try:
