@@ -147,7 +147,7 @@ def render_workshop_tab(course, meta):
             fetch_btn = st.button(
                 "🔄 Refresh" if existing_data else "📥 Fetch",
                 key="fetch_workshop_submissions",
-                use_container_width=True
+                width="stretch"
             )
         
         # Load existing or fetch new
@@ -221,7 +221,7 @@ def render_workshop_tab(course, meta):
                         f"{'✓ ' if is_current else ''}{phase_name}",
                         key=f"phase_btn_{phase_name}",
                         type=btn_type,
-                        use_container_width=True,
+                        width="stretch",
                         disabled=is_current
                     ):
                         with st.spinner(f"Switching to {phase_name}..."):
@@ -357,7 +357,7 @@ def render_workshop_tab(course, meta):
                 data=csv_data,
                 file_name=f"workshop_submissions_{course['id']}.csv",
                 mime="text/csv",
-                use_container_width=True
+                width="stretch"
             )
         
         with btn_col2:
@@ -369,5 +369,5 @@ def render_workshop_tab(course, meta):
                 st.link_button(
                     label="🔗 Open in Paatshala",
                     url=workshop_url,
-                    use_container_width=True
+                    width="stretch"
                 )

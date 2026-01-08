@@ -45,7 +45,7 @@ def render_tasks_tab(course, meta):
         fetch_tasks = st.button(
             "🔄 Refresh" if st.session_state.tasks_data else "📥 Fetch",
             key="fetch_tasks",
-            use_container_width=True
+            width="stretch"
         )
     
     if fetch_tasks:

@@ -44,6 +44,8 @@ LANGUAGE_MAP = {
 
 # Maximum file size to display inline - now configurable via settings
 # Default: 512KB (512 * 1024 = 524288 bytes)
+MAX_INLINE_SIZE = 512 * 1024  # Legacy constant for backwards compatibility
+
 def get_max_inline_size():
     """Get max inline file size from config (in bytes)."""
     try:
@@ -51,6 +53,164 @@ def get_max_inline_size():
         return size_kb * 1024
     except (ValueError, TypeError):
         return 512 * 1024  # 512KB default
+
+
+# ============================================================================
+# SHARED FILE TYPE CONSTANTS
+# ============================================================================
+
+# Image file extensions
+IMAGE_EXTENSIONS = ['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.svg']
+
+# Text/log file extensions (beyond code files in LANGUAGE_MAP)
+TEXT_EXTENSIONS = ['.txt', '.log', '.csv', '.md']
+
+# Archive file extensions
+ARCHIVE_EXTENSIONS = ['.zip', '.7z', '.rar', '.tar', '.gz']
+
+
+# ============================================================================
+# SHARED CONTENT RENDERING HELPERS
+# ============================================================================
+
+def is_image_file(filename: str) -> bool:
+    """Check if filename is an image based on extension."""
+    return Path(filename).suffix.lower() in IMAGE_EXTENSIONS
+
+
+def is_code_file(filename: str) -> bool:
+    """Check if filename is a code file with syntax highlighting support."""
+    return Path(filename).suffix.lower() in LANGUAGE_MAP
+
+
+def is_text_file(filename: str) -> bool:
+    """Check if filename is a plain text file."""
+    return Path(filename).suffix.lower() in TEXT_EXTENSIONS
+
+
+def is_archive_file(filename: str) -> bool:
+    """Check if filename is an archive."""
+    return Path(filename).suffix.lower() in ARCHIVE_EXTENSIONS
+
+
+def get_language_for_file(filename: str) -> Optional[str]:
+    """Get syntax highlighting language for a file based on extension."""
+    ext = Path(filename).suffix.lower()
+    return LANGUAGE_MAP.get(ext)
+
+
+def render_code_content(content: str, filename: str = "", max_chars: int = 50000):
+    """
+    Render code/text content with appropriate syntax highlighting.
+    
+    Args:
+        content: The text content to display
+        filename: Optional filename to determine syntax highlighting
+        max_chars: Maximum characters to display (default 50KB)
+    """
+    # Truncate if needed
+    if len(content) > max_chars:
+        display_content = content[:max_chars] + f"\n\n[Truncated at {max_chars} characters]"
+    else:
+        display_content = content
+    
+    # Get language from filename
+    language = get_language_for_file(filename) if filename else None
+    
+    # Render with syntax highlighting
+    st.code(display_content, language=language)
+
+
+def render_image_content(image_source, caption: str = ""):
+    """
+    Render an image from various sources.
+    
+    Args:
+        image_source: Can be a file path (str/Path), bytes, or URL
+        caption: Optional caption for the image
+    """
+    st.image(image_source, caption=caption, width="stretch")
+
+
+def render_text_content(content: str, label: str = "", max_chars: int = 50000, height: int = 400):
+    """
+    Render plain text content in a disabled text area.
+    
+    Args:
+        content: Text content to display
+        label: Optional label for the text area
+        max_chars: Maximum characters to display
+        height: Height of text area in pixels
+    """
+    if len(content) > max_chars:
+        display_content = content[:max_chars] + f"\n\n[Truncated at {max_chars} characters]"
+    else:
+        display_content = content
+    
+    st.text_area(
+        label or "Content",
+        value=display_content,
+        height=height,
+        disabled=True,
+        label_visibility="collapsed" if not label else "visible"
+    )
+
+
+def render_file_info_panel(filename: str, file_type: str = "", size_bytes: int = 0, 
+                           extra_info: Dict[str, str] = None, download_url: str = ""):
+    """
+    Render a consistent file info panel used across viewers.
+    
+    Args:
+        filename: Name of the file
+        file_type: File type string (e.g., "PDF", "DOCX")
+        size_bytes: File size in bytes
+        extra_info: Additional key-value pairs to display
+        download_url: Optional download URL
+    """
+    size_str = f"{size_bytes / 1024:.1f} KB" if size_bytes > 0 else "—"
+    if not file_type:
+        file_type = Path(filename).suffix.upper().replace(".", "") or "File"
+    
+    # Build info items
+    info_items = [
+        f'<div style="display: flex; align-items: center; gap: 6px;">'
+        f'<span style="color: #888;">📄 File:</span>'
+        f'<span style="color: #fff; font-weight: 500;">{filename}</span>'
+        f'</div>',
+        f'<div style="display: flex; align-items: center; gap: 6px;">'
+        f'<span style="color: #888;">📁 Type:</span>'
+        f'<span style="color: #fff; font-weight: 500;">{file_type}</span>'
+        f'</div>',
+        f'<div style="display: flex; align-items: center; gap: 6px;">'
+        f'<span style="color: #888;">📊 Size:</span>'
+        f'<span style="color: #fff; font-weight: 500;">{size_str}</span>'
+        f'</div>',
+    ]
+    
+    # Add extra info
+    if extra_info:
+        for key, value in extra_info.items():
+            info_items.append(
+                f'<div style="display: flex; align-items: center; gap: 6px;">'
+                f'<span style="color: #888;">{key}:</span>'
+                f'<span style="color: #fff; font-weight: 500;">{value}</span>'
+                f'</div>'
+            )
+    
+    # Add download link
+    if download_url:
+        info_items.append(
+            f'<a href="{download_url}" target="_blank" style="color: #4da6ff; text-decoration: none;">📥 Download</a>'
+        )
+    
+    info_html = f'''
+    <div style="background: #2d2d2d; border-radius: 6px; padding: 10px 15px; margin-bottom: 10px; 
+                display: flex; flex-wrap: wrap; gap: 20px; align-items: center; font-size: 13px; color: #ccc;">
+        {''.join(info_items)}
+    </div>
+    '''
+    st.components.v1.html(info_html, height=50)
 
 
 def render_pdf_viewer(pdf_bytes: bytes, filename: str = "document.pdf", unique_key: str = ""):
@@ -67,8 +227,20 @@ def render_pdf_viewer(pdf_bytes: bytes, filename: str = "document.pdf", unique_k
             st.warning("⚠️ Empty or invalid PDF data")
             return
         
+        # Large PDFs (>1MB) can cause JavaScript loading issues with inline base64
+        if len(pdf_bytes) > 1024 * 1024:  # 1MB limit
+            st.warning(f"⚠️ PDF is large ({len(pdf_bytes) / 1024 / 1024:.1f} MB). Download for best viewing experience.")
+            st.download_button(
+                label=f"📥 Download {filename}",
+                data=pdf_bytes,
+                file_name=filename,
+                mime="application/pdf",
+                key=f"dl_large_pdf_{unique_key or abs(hash(pdf_bytes[:100]))}"
+            )
+            return
+        
         b64_pdf = base64.b64encode(pdf_bytes).decode('utf-8')
-        idx = unique_key or hash(pdf_bytes[:100])
+        idx = unique_key or abs(hash(pdf_bytes[:100]))
         
         # PDF.js viewer with zoom, fullscreen, multi-page scrolling
         pdfjs_html = f'''
@@ -664,7 +836,7 @@ def _render_file_tree(files: List[Dict], repo_url: str, current_path: str,
             is_expanded = full_path in st.session_state.get(expanded_key, set())
             icon = "📂" if is_expanded else "📁"
             
-            if st.button(f"{icon} {name}", key=f"dir_{repo_id}_{full_path}", use_container_width=True):
+            if st.button(f"{icon} {name}", key=f"dir_{repo_id}_{full_path}", width="stretch"):
                 # Toggle expansion
                 if is_expanded:
                     st.session_state[expanded_key].discard(full_path)
@@ -714,7 +886,7 @@ def _render_file_tree(files: List[Dict], repo_url: str, current_path: str,
             
             btn_label = f"{icon} {name}{size_str}"
             if st.button(btn_label, key=f"file_{repo_id}_{full_path}", 
-                        use_container_width=True, type="primary" if is_selected else "secondary"):
+                        width="stretch", type="primary" if is_selected else "secondary"):
                 st.session_state[selected_key] = full_path
                 st.rerun()
 
@@ -856,10 +1028,10 @@ def _render_file_preview(selected_path: str, owner: str, repo: str,
         st.markdown(content)
     elif ext in LANGUAGE_MAP:
         st.code(content, language=LANGUAGE_MAP[ext])
-    elif ext in ['.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp', '.bmp']:
+    elif ext in IMAGE_EXTENSIONS:
         # Display image from raw GitHub URL
         if download_url:
-            st.image(download_url, caption=filename, width="stretch")
+            render_image_content(download_url, caption=filename)
         else:
             st.warning("🖼️ Could not load image - no download URL available")
     elif ext == '.pdf':
@@ -997,14 +1169,22 @@ def _render_file_preview(selected_path: str, owner: str, repo: str,
                                     elif file_ext in LANGUAGE_MAP:
                                         text_content = file_content.decode('utf-8', errors='ignore')
                                         st.code(text_content[:50000], language=LANGUAGE_MAP[file_ext])
-                                    elif file_ext in ['.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp', '.bmp']:
-                                        st.image(file_content, caption=file_name, width="stretch")
+                                    elif file_ext in IMAGE_EXTENSIONS:
+                                        render_image_content(file_content, caption=file_name)
                                     elif file_ext == '.json':
                                         text_content = file_content.decode('utf-8', errors='ignore')
                                         st.code(text_content, language='json')
+                                    elif file_ext == '.pdf':
+                                        # Use the reusable PDF viewer for PDFs inside ZIP
+                                        if len(file_content) < 100:
+                                            st.warning(f"⚠️ PDF appears empty or corrupted ({len(file_content)} bytes)")
+                                        else:
+                                            # Show size info and render
+                                            st.caption(f"📄 Loading PDF ({len(file_content) / 1024:.1f} KB)...")
+                                            render_pdf_viewer(file_content, file_name, unique_key=f"zip_{abs(hash(selected_zip_file))}")
                                     elif file_ext in ['.docx', '.doc']:
                                         # Use the reusable DOCX viewer
-                                        render_docx_viewer(file_content, file_name, unique_key=f"zip_{hash(selected_zip_file)}")
+                                        render_docx_viewer(file_content, file_name, unique_key=f"zip_{abs(hash(selected_zip_file))}")
                                     else:
                                         # Try to display as text for files without extension or unknown types
                                         try:
@@ -1160,20 +1340,19 @@ def render_submission_content(row: Dict[str, Any], course_id: int):
                             key=f"pdf_content_{hash(str(local_path))}",
                             disabled=True
                         )
-                elif ext in ['.png', '.jpg', '.jpeg', '.gif', '.bmp']:
-                    st.image(str(local_path), caption=fname, width="stretch")
+                elif ext in IMAGE_EXTENSIONS:
+                    render_image_content(str(local_path), caption=fname)
                 elif ext in LANGUAGE_MAP or ext in ['.txt', '.log', '.csv']:
                     file_size = local_path.stat().st_size
-                    if file_size > MAX_INLINE_SIZE:
+                    if file_size > get_max_inline_size():
                         st.warning(f"⚠️ {fname} is too large ({file_size / 1024:.1f}KB)")
                         with open(local_path, "rb") as file:
                             st.download_button(f"📥 Download {fname}", file, fname)
                     else:
                         with open(local_path, 'r', encoding='utf-8', errors='ignore') as file:
                             content = file.read()
-                        lang = LANGUAGE_MAP.get(ext, None)
                         st.markdown(f"**{fname}**")
-                        st.code(content, language=lang)
+                        render_code_content(content, fname)
                 else:
                     st.markdown(f"**{fname}** (Binary file)")
                     with open(local_path, "rb") as file:

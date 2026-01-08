@@ -12,7 +12,7 @@ import time
 logger = logging.getLogger(__name__)
 
 from .auth import setup_session, PAATSHALA_HOST, BASE
-from .parser import parse_assign_view, parse_grading_table
+from .parser import parse_assign_view, parse_grading_table, extract_assignment_id
 
 DEFAULT_THREADS = 4
 
@@ -1522,9 +1522,15 @@ def get_available_groups(session, module_id, activity_type='assign'):
     except:
         return []
 
-
 def fetch_submissions(session_id, module_id, group_id=None):
-    """Fetch submissions for a specific task/module"""
+    """
+    Fetch submissions for a specific task/module.
+    
+    Returns:
+        tuple: (submissions_list, assignment_id) where:
+            - submissions_list: List of submission dicts from parse_grading_table
+            - assignment_id: The Moodle assignment instance ID (for grade submission API)
+    """
     session = setup_session(session_id)
     
     url = f"{BASE}/mod/assign/view.php?id={module_id}&action=grading"
@@ -1534,10 +1540,124 @@ def fetch_submissions(session_id, module_id, group_id=None):
     try:
         resp = session.get(url, timeout=30)
         if not resp.ok:
-            return []
-        return parse_grading_table(resp.text)
+            return [], None
+        
+        submissions = parse_grading_table(resp.text)
+        
+        # The grading table page doesn't contain assignment_id
+        # We need to fetch the grader page for one student to get it
+        assignment_id = None
+        
+        # Try to get assignment_id from the grading table first (might work for some Moodle versions)
+        assignment_id = extract_assignment_id(resp.text)
+        
+        # If not found and we have submissions, fetch the grader page for the first student
+        if not assignment_id and submissions:
+            first_user_id = submissions[0].get('User_ID')
+            if first_user_id:
+                grader_url = f"{BASE}/mod/assign/view.php?id={module_id}&action=grader&userid={first_user_id}"
+                try:
+                    grader_resp = session.get(grader_url, timeout=15)
+                    if grader_resp.ok:
+                        assignment_id = extract_assignment_id(grader_resp.text)
+                except:
+                    pass  # Failed to get grader page, assignment_id remains None
+        
+        return submissions, assignment_id
     except:
-        return []
+        return [], None
+
+
+
+def submit_grade(session, assignment_id, user_id, module_id, grade, feedback_html, sesskey):
+    """
+    Submit a grade and feedback comment to Moodle for a student.
+    
+    Uses the mod_assign_submit_grading_form AJAX API.
+    
+    Args:
+        session: Moodle session object
+        assignment_id: The assignment instance ID (NOT module ID)
+        user_id: The Moodle user ID of the student
+        module_id: The course module ID (cmid)
+        grade: The numeric grade to assign
+        feedback_html: HTML-formatted feedback comment
+        sesskey: Session key for AJAX requests
+    
+    Returns:
+        dict: {'success': bool, 'error': str or None}
+    """
+    import urllib.parse
+    
+    url = f"{BASE}/lib/ajax/service.php"
+    params = {
+        "sesskey": sesskey,
+        "info": "mod_assign_submit_grading_form"
+    }
+    
+    # Build the form data that goes inside jsonformdata
+    # This mimics the actual Moodle grading form
+    form_data = {
+        "id": module_id,
+        "rownum": 0,
+        "useridlistid": "",
+        "attemptnumber": -1,
+        "ajax": 0,
+        "userid": 0,  # This is for the form, not the actual student
+        "sendstudentnotifications": "false",
+        "action": "submitgrade",
+        "sesskey": sesskey,
+        f"_qf__mod_assign_grade_form_{user_id}": 1,
+        "grade": grade,
+        "assignfeedbackcomments_editor[text]": feedback_html,
+        "assignfeedbackcomments_editor[format]": 1,  # HTML format
+        "assignfeedbackcomments_editor[itemid]": 0,  # Will be auto-assigned
+        "assignfeedback_editpdf_haschanges": "false"
+    }
+    
+    # URL-encode the form data
+    encoded_form_data = urllib.parse.urlencode(form_data)
+    # Add quotes around it as Moodle expects
+    json_form_data = f'"{encoded_form_data}"'
+    
+    payload = [{
+        "index": 0,
+        "methodname": "mod_assign_submit_grading_form",
+        "args": {
+            "assignmentid": str(assignment_id),
+            "userid": int(user_id),
+            "jsonformdata": json_form_data
+        }
+    }]
+    
+    try:
+        resp = session.post(url, params=params, json=payload, timeout=30)
+        logger.info(f"Submit grade response status: {resp.status_code}")
+        
+        if resp.ok:
+            try:
+                data = resp.json()
+                logger.info(f"Submit grade response: {str(data)[:500]}")
+                
+                if isinstance(data, list) and data:
+                    result = data[0]
+                    if result.get("error"):
+                        error_msg = result.get("exception", {}).get("message", "Unknown error")
+                        logger.error(f"Moodle returned error: {error_msg}")
+                        return {"success": False, "error": error_msg}
+                    # Success - data should contain the result
+                    return {"success": True, "error": None}
+                else:
+                    return {"success": False, "error": "Unexpected response format"}
+            except Exception as e:
+                logger.error(f"Error parsing grade submission response: {e}")
+                return {"success": False, "error": f"Response parse error: {e}"}
+        else:
+            logger.error(f"Grade submission request failed: {resp.status_code}")
+            return {"success": False, "error": f"HTTP {resp.status_code}"}
+    except Exception as e:
+        logger.error(f"Error submitting grade: {e}")
+        return {"success": False, "error": str(e)}
 
 
 def get_workshops(session, course_id):

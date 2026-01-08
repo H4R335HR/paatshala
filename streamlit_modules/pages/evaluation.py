@@ -9,12 +9,15 @@ import pandas as pd
 import streamlit as st
 import ast
 
+from core.api import evaluate_submission, download_file, get_assignment_dates, submit_grade, get_fresh_sesskey
 from core.auth import setup_session
-from core.api import evaluate_submission, download_file
 from core.persistence import save_csv_to_disk, get_config
 from core.ai import generate_rubric, save_rubric, load_rubric, refine_rubric, fetch_submission_content, score_submission, save_evaluation, load_evaluation, refine_evaluation
 from streamlit_modules.ui.components import format_timestamp
-from streamlit_modules.ui.content_viewer import render_docx_viewer, render_pdf_viewer
+from streamlit_modules.ui.content_viewer import (
+    render_docx_viewer, render_pdf_viewer, 
+    IMAGE_EXTENSIONS, LANGUAGE_MAP, render_code_content, render_image_content
+)
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +30,7 @@ def get_display_dataframe(data):
         display_data.append({
             "Name": r.get('Name'),
             "Status": r.get('Status'),
+            "Submitted": format_timestamp(r.get('Last Modified', '')),
             "Link": r.get('Eval_Link'),
             "Valid?": r.get('Eval_Link_Valid'),
             "Repo Status": r.get('Eval_Repo_Status'),
@@ -68,7 +72,7 @@ def render_evaluation_tab(course, meta):
         st.metric("Evaluated Submissions", f"{evaluated} / {total}")
     
     with col2:
-        if st.button("🚀 Evaluate Pending", use_container_width=True, disabled=(evaluated == total)):
+        if st.button("🚀 Evaluate Pending", width="stretch", disabled=(evaluated == total)):
             progress_bar = st.progress(0, text="Evaluating pending submissions...")
             pending_indices = [i for i, r in enumerate(data) if not r.get('Eval_Last_Checked')]
             count = len(pending_indices)
@@ -192,10 +196,58 @@ def render_evaluation_tab(course, meta):
     # Use the tracked index
     idx = st.session_state.eval_selected_index
     row = data[idx]
+    
+    # Fetch deadline if not already loaded
+    deadline_str = ""
+    on_time_str = ""
+    dates_info = None
+    is_on_time = None  # Track for AI scoring
+    
+    # Get module_id from the row data (available from submission CSV)
+    module_id = row.get('Module ID') if row else None
+    
+    if module_id:
+        dates_key = f"dates_info_{module_id}"
+        
+        # Check if already cached in session state
+        if dates_key in st.session_state and st.session_state[dates_key]:
+            dates_info = st.session_state[dates_key]
+        else:
+            # Lazy load once
+            try:
+                session = setup_session(st.session_state.session_id)
+                dates_info = get_assignment_dates(session, module_id)
+                if dates_info:
+                    st.session_state[dates_key] = dates_info
+            except Exception as e:
+                logger.debug(f"Could not fetch deadline: {e}")
+        
+        if dates_info and dates_info.get('due_date_enabled') and dates_info.get('due_date'):
+            due_date = dates_info['due_date']
+            deadline_str = f" | **Deadline:** {due_date.strftime('%A, %d %B %Y, %I:%M %p')}"
+            
+            # Check if submitted on time
+            last_modified = row.get('Last Modified', '')
+            if last_modified:
+                from datetime import datetime
+                try:
+                    # Parse the Last Modified timestamp (format: "Monday, 15 December 2025, 3:35 PM")
+                    sub_time = datetime.strptime(last_modified, "%A, %d %B %Y, %I:%M %p")
+                    is_on_time = sub_time <= due_date
+                    if is_on_time:
+                        on_time_str = " | ✅ **On Time**"
+                    else:
+                        on_time_str = " | ❌ **Late**"
+                except ValueError:
+                    # Try alternate format or skip
+                    pass
+        elif dates_info:
+            deadline_str = " | **Deadline:** Not set"
         
     col1, col2 = st.columns([3, 1])
     with col1:
-        st.markdown(f"**Name:** {row.get('Name')} | **Email:** {row.get('Email')}")
+        submitted_time = format_timestamp(row.get('Last Modified', ''))
+        st.markdown(f"**Name:** {row.get('Name')} | **Email:** {row.get('Email')} | **Submitted:** {submitted_time}{deadline_str}{on_time_str}")
     with col2:
         if st.button("🔄 Refresh Analysis", key=f"refresh_{idx}"):
             data[idx] = evaluate_submission(row)
@@ -348,7 +400,7 @@ def _render_file_submission(course, row, idx):
                         file_name=fname,
                         mime="application/octet-stream",
                         key=f"dl_preview_{idx}_{selected_file_idx}",
-                        use_container_width=True
+                        width="stretch"
                     )
             
             # === Preview Pane ===
@@ -433,8 +485,8 @@ def _render_file_submission(course, row, idx):
                 except Exception as e:
                     st.error(f"Error rendering PDF: {e}")
             
-            elif ext in ['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp']:
-                st.image(str(path), caption=fname, width="stretch")
+            elif ext in IMAGE_EXTENSIONS:
+                render_image_content(str(path), caption=fname)
             
             elif ext in ['.docx', '.doc']:
                 # Use shared DOCX viewer from content_viewer
@@ -442,13 +494,11 @@ def _render_file_submission(course, row, idx):
                     docx_bytes = f.read()
                 render_docx_viewer(docx_bytes, fname, unique_key=f"eval_{idx}")
             
-            elif ext in ['.txt', '.md', '.py', '.js', '.html', '.css', '.json', '.xml', '.yaml', '.yml', '.csv', '.log']:
+            elif ext in LANGUAGE_MAP or ext in ['.txt', '.log', '.csv']:
                 try:
                     with open(path, 'r', encoding='utf-8', errors='ignore') as f:
                         content = f.read()
-                    lang_map = {'.py': 'python', '.js': 'javascript', '.html': 'html', '.css': 'css', 
-                               '.json': 'json', '.xml': 'xml', '.yaml': 'yaml', '.yml': 'yaml'}
-                    st.code(content[:50000], language=lang_map.get(ext))
+                    render_code_content(content, fname)
                 except:
                     st.warning("Could not read file content")
             
@@ -511,7 +561,7 @@ def _render_file_submission(course, row, idx):
         else:
             # File not fetched yet
             with col2:
-                if st.button("⬇️ Fetch File", key=f"fetch_preview_{idx}_{selected_file_idx}", use_container_width=True):
+                if st.button("⬇️ Fetch File", key=f"fetch_preview_{idx}_{selected_file_idx}", width="stretch"):
                     with st.spinner("Fetching from server..."):
                         session = setup_session(st.session_state.session_id)
                         saved_path = download_file(session, furl, course['id'], row.get('Name', 'Unknown'), fname)
@@ -632,7 +682,7 @@ def _render_rubric_section(course, data):
         with col1:
             generate_btn = st.button(
                 "✨ Generate Rubric" if not rubric_data else "🔄 Regenerate",
-                use_container_width=True
+                width="stretch"
             )
         
         if generate_btn:
@@ -687,7 +737,7 @@ def _render_rubric_section(course, data):
             # Save, Refine, and Clear buttons
             col_s1, col_s2, col_s3 = st.columns([1, 1, 1])
             with col_s1:
-                if st.button("💾 Save Rubric", use_container_width=True):
+                if st.button("💾 Save Rubric", width="stretch"):
                     # Convert back to list of dicts
                     new_rubric = edited_df.to_dict('records')
                     st.session_state[rubric_key] = new_rubric
@@ -705,10 +755,10 @@ def _render_rubric_section(course, data):
                         st.error("Failed to save rubric")
             
             with col_s2:
-                refine_btn = st.button("✏️ Refine with AI", use_container_width=True)
+                refine_btn = st.button("✏️ Refine with AI", width="stretch")
             
             with col_s3:
-                if st.button("🗑️ Clear", use_container_width=True):
+                if st.button("🗑️ Clear", width="stretch"):
                     st.session_state[rubric_key] = None
                     st.rerun()
             
@@ -747,7 +797,7 @@ def _show_refine_dialog(rubric_key, current_rubric, task_description, module_id)
     
     col1, col2 = st.columns(2)
     with col1:
-        if st.button("🔄 Apply Changes", type="primary", use_container_width=True, disabled=not instructions):
+        if st.button("🔄 Apply Changes", type="primary", width="stretch", disabled=not instructions):
             with st.spinner("AI is refining the rubric..."):
                 result = refine_rubric(current_rubric, instructions, task_description)
                 if result:
@@ -758,7 +808,7 @@ def _show_refine_dialog(rubric_key, current_rubric, task_description, module_id)
                     st.error("Failed to refine rubric. Please try again.")
     
     with col2:
-        if st.button("Cancel", use_container_width=True):
+        if st.button("Cancel", width="stretch"):
             st.rerun()
 
 
@@ -814,18 +864,36 @@ def _render_ai_scoring_section(course, row, idx, data):
                     else:
                         st.markdown(f"**AI:** {msg['content']}")
         
-        # Action buttons: Re-Score and Discuss
-        col1, col2, col3 = st.columns([1, 1, 2])
+        # Action buttons: Re-Score, Discuss, and Submit to Moodle
+        col1, col2, col3 = st.columns([1, 1, 1])
         with col1:
             rescore = st.button("🔄 Re-Score", key=f"rescore_{idx}")
         with col2:
             discuss = st.button("💬 Discuss", key=f"discuss_{idx}")
+        with col3:
+            # Get max grade for this task
+            max_grade = 15  # Default
+            if st.session_state.tasks_data:
+                for task in st.session_state.tasks_data:
+                    if str(task.get('Module ID')) == str(module_id):
+                        max_grade_str = task.get('Max Grade', '15')
+                        try:
+                            max_grade = float(max_grade_str.replace('/100.00', '').strip())
+                        except:
+                            max_grade = 15
+                        break
+            
+            submit_btn = st.button("📤 Submit to Moodle", key=f"submit_moodle_{idx}", type="primary")
         
         if rescore:
             _perform_scoring(course, row, rubric, module_id, selected_group_id, data)
         
         if discuss:
             _show_discuss_dialog(course, row, existing_eval, rubric, module_id, selected_group_id, idx)
+        
+        if submit_btn:
+            with st.spinner("Submitting to Moodle..."):
+                _submit_to_moodle(course, row, existing_eval, max_grade)
     else:
         # Get task description
         task_description = _get_task_description(module_id)
@@ -862,6 +930,24 @@ def _perform_scoring(course, row, rubric, module_id, group_id, data):
     
     if submission_content.get('error'):
         st.warning(f"⚠️ {submission_content['error']}")
+    
+    # Add deadline info to submission content for AI context
+    dates_key = f"dates_info_{module_id}"
+    if dates_key in st.session_state and st.session_state[dates_key]:
+        dates_info = st.session_state[dates_key]
+        if dates_info.get('due_date_enabled') and dates_info.get('due_date'):
+            due_date = dates_info['due_date']
+            submission_content['deadline'] = due_date.strftime('%A, %d %B %Y, %I:%M %p')
+            
+            # Check if on time
+            last_modified = row.get('Last Modified', '')
+            if last_modified:
+                from datetime import datetime
+                try:
+                    sub_time = datetime.strptime(last_modified, "%A, %d %B %Y, %I:%M %p")
+                    submission_content['on_time'] = sub_time <= due_date
+                except ValueError:
+                    pass
     
     with st.spinner("Scoring with AI..."):
         task_description = _get_task_description(module_id)
@@ -949,25 +1035,159 @@ def _display_evaluation_results(evaluation, rubric):
         st.caption(f"Scored: {format_timestamp(scored_at)}")
 
 
+def _format_feedback_html(evaluation):
+    """Format evaluation as HTML for Moodle feedback comments."""
+    html_parts = []
+    
+    # Per-criterion breakdown as HTML table
+    criteria_scores = evaluation.get('criteria_scores', [])
+    if criteria_scores:
+        html_parts.append("<p><strong>Per-Criterion Breakdown:</strong></p>")
+        html_parts.append("<table border='1' cellpadding='5' cellspacing='0' style='border-collapse: collapse;'>")
+        html_parts.append("<tr><th>Criterion</th><th>Score</th><th>Feedback</th></tr>")
+        for cs in criteria_scores:
+            criterion = cs.get('criterion', '')
+            score = cs.get('score', 0)
+            max_score = cs.get('max_score', 0)
+            comment = cs.get('comment', '')
+            html_parts.append(f"<tr><td>{criterion}</td><td>{score}/{max_score}</td><td>{comment}</td></tr>")
+        html_parts.append("</table>")
+        html_parts.append("<br>")
+    
+    # Overall comments
+    comments = evaluation.get('comments', '')
+    if comments:
+        html_parts.append("<p><strong>Overall Feedback:</strong></p>")
+        html_parts.append(f"<p>{comments}</p>")
+    
+    return "".join(html_parts)
+
+
+def _submit_to_moodle(course, row, evaluation, max_grade):
+    """Submit grade and feedback to Moodle."""
+    import html
+    
+    # Check required data
+    module_id = row.get('Module ID')
+    user_id = row.get('User_ID')
+    assignment_id = st.session_state.get(f"assignment_id_{module_id}")
+    
+    # Debug: Log what we're looking for
+    if not assignment_id:
+        # Find all assignment_id keys in session state
+        assign_keys = [k for k in st.session_state.keys() if 'assignment_id' in str(k)]
+        logger.warning(f"Looking for assignment_id_{module_id}, found keys: {assign_keys}")
+    
+    if not user_id:
+        st.error("❌ User ID not available. Please re-fetch submissions.")
+        return False
+    
+    if not assignment_id:
+        st.error(f"❌ Assignment ID not available for module {module_id}. Please re-fetch submissions.")
+        return False
+    
+    # Calculate scaled grade
+    total_score = evaluation.get('total_score', 0)
+    scaled_grade = (total_score / 100) * max_grade
+    scaled_grade = round(scaled_grade, 2)
+    
+    # Format feedback as HTML
+    feedback_html = _format_feedback_html(evaluation)
+    
+    # Get fresh sesskey
+    session = setup_session(st.session_state.session_id)
+    sesskey = get_fresh_sesskey(session, course['id'])
+    
+    if not sesskey:
+        st.error("❌ Could not get session key. Please try again.")
+        return False
+    
+    # Submit grade
+    result = submit_grade(
+        session,
+        assignment_id,
+        user_id,
+        module_id,
+        scaled_grade,
+        feedback_html,
+        sesskey
+    )
+    
+    if result['success']:
+        st.success(f"✅ Submitted to Moodle: **{scaled_grade}/{max_grade}**")
+        return True
+    else:
+        st.error(f"❌ Failed: {result.get('error', 'Unknown error')}")
+        return False
+
+
 @st.dialog("💬 Discuss Evaluation with AI", width="large")
 def _show_discuss_dialog(course, row, current_eval, rubric, module_id, group_id, idx):
     """Show dialog for discussing/refining the evaluation with AI."""
     
     student_name = row.get('Name', 'Unknown')
     
+    # Session state key for this dialog's pending result
+    result_key = f"discuss_result_{module_id}_{student_name}"
+    pending_result = st.session_state.get(result_key)
+    
     # Show current score summary
     st.markdown(f"**Student:** {student_name}")
-    st.markdown(f"**Current Score:** {current_eval.get('total_score', 0)}/100")
     
-    # Show criteria summary
+    # Show score - use pending result if available
+    if pending_result and pending_result.get('total_score') is not None:
+        old_score = current_eval.get('total_score', 0)
+        new_score = pending_result.get('total_score', 0)
+        st.markdown(f"**Current Score:** {old_score}/100 → **{new_score}/100**")
+    else:
+        st.markdown(f"**Current Score:** {current_eval.get('total_score', 0)}/100")
+    
+    # Show criteria summary - from pending result if available
+    display_eval = pending_result if pending_result else current_eval
     with st.expander("📊 Current Breakdown", expanded=False):
-        for cs in current_eval.get('criteria_scores', []):
+        for cs in display_eval.get('criteria_scores', []):
             st.text(f"• {cs.get('criterion')}: {cs.get('score')}/{cs.get('max_score')}")
     
-    st.divider()
+    # If we have a pending result, show AI response and Save button
+    if pending_result:
+        st.divider()
+        st.markdown("### 🤖 AI Response")
+        st.info(pending_result.get('response_to_teacher', 'Score updated successfully.'))
+        
+        # Show score change
+        old_score = current_eval.get('total_score', 0)
+        new_score = pending_result.get('total_score', 0)
+        if old_score != new_score:
+            st.markdown(f"**Score Updated:** {old_score} → **{new_score}**")
+            
+            with st.expander("📊 Updated Breakdown"):
+                for cs in pending_result.get('criteria_scores', []):
+                    st.text(f"• {cs.get('criterion')}: {cs.get('score')}/{cs.get('max_score')}")
+        
+        # Save and Cancel buttons
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("💾 Save & Close", type="primary", width="stretch"):
+                save_evaluation(course['id'], module_id, student_name, pending_result, group_id)
+                # Clear the pending result
+                del st.session_state[result_key]
+                st.success("✓ Saved!")
+                st.rerun()
+        
+        with col2:
+            if st.button("Cancel", width="stretch"):
+                # Clear pending result and close
+                del st.session_state[result_key]
+                st.rerun()
+        
+        # Option to continue refining
+        st.divider()
+        st.markdown("**Continue the conversation:**")
+    else:
+        st.divider()
+        st.markdown("**Ask a question or request changes:**")
     
     # Input for user's message
-    st.markdown("**Ask a question or request changes:**")
     user_message = st.text_area(
         "Your message",
         placeholder="Examples:\n• Why did you give a low score for code quality?\n• The student actually did include error handling, please reconsider\n• Can you be more lenient on documentation for beginners?\n• Increase the score for functionality by 10 points",
@@ -979,11 +1199,12 @@ def _show_discuss_dialog(course, row, current_eval, rubric, module_id, group_id,
     col1, col2 = st.columns(2)
     
     with col1:
-        send_btn = st.button("📤 Send", type="primary", use_container_width=True, disabled=not user_message)
+        send_btn = st.button("📤 Send", type="primary", width="stretch", disabled=not user_message)
     
-    with col2:
-        if st.button("Cancel", use_container_width=True):
-            st.rerun()
+    if not pending_result:
+        with col2:
+            if st.button("Cancel", width="stretch"):
+                st.rerun()
     
     if send_btn and user_message:
         with st.spinner("Fetching submission content..."):
@@ -991,8 +1212,10 @@ def _show_discuss_dialog(course, row, current_eval, rubric, module_id, group_id,
         
         with st.spinner("AI is thinking..."):
             task_description = _get_task_description(module_id)
+            # Use pending result as base if we're continuing a conversation
+            base_eval = pending_result if pending_result else current_eval
             result = refine_evaluation(
-                current_eval,
+                base_eval,
                 user_message,
                 submission_content,
                 rubric,
@@ -1002,27 +1225,9 @@ def _show_discuss_dialog(course, row, current_eval, rubric, module_id, group_id,
         if result and result.get('error'):
             st.error(f"❌ Error: {result['error']}")
         elif result:
-            # Show AI response
-            st.divider()
-            st.markdown("### 🤖 AI Response")
-            st.info(result.get('response_to_teacher', 'No response'))
-            
-            # Check if scores changed
-            old_score = current_eval.get('total_score', 0)
-            new_score = result.get('total_score', 0)
-            
-            if old_score != new_score:
-                st.markdown(f"**Score Updated:** {old_score} → **{new_score}**")
-                
-                # Show what changed
-                with st.expander("📊 Updated Breakdown"):
-                    for cs in result.get('criteria_scores', []):
-                        st.text(f"• {cs.get('criterion')}: {cs.get('score')}/{cs.get('max_score')}")
-            
-            # Save button
-            if st.button("💾 Save & Close", type="primary", use_container_width=True):
-                save_evaluation(course['id'], module_id, student_name, result, group_id)
-                st.success("✓ Saved!")
-                st.rerun()
+            # Store result in session state so it persists
+            st.session_state[result_key] = result
+            st.rerun()
+
 
 

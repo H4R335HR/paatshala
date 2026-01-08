@@ -141,6 +141,14 @@ def parse_grading_table(html):
         name_link = name_cell.find("a")
         name = name_link.get_text(strip=True) if name_link else ""
         
+        # Extract user ID from profile link (e.g., /user/view.php?id=56674)
+        user_id = None
+        if name_link:
+            href = name_link.get("href", "")
+            user_match = re.search(r'/user/view\.php\?id=(\d+)', href)
+            if user_match:
+                user_id = user_match.group(1)
+        
         # Email is typically in cell 3
         email = text_or_none(cells[3])
         
@@ -177,6 +185,7 @@ def parse_grading_table(html):
         rows.append({
             "Name": name,
             "Email": email,
+            "User_ID": user_id,
             "Status": status,
             "Last Modified": last_modified,
             "Submission": submissions,
@@ -188,3 +197,47 @@ def parse_grading_table(html):
         })
     
     return rows
+
+
+def extract_assignment_id(html):
+    """
+    Extract the assignment instance ID from the grading page.
+    This is different from the module ID (cmid) - it's the database ID of the assignment.
+    
+    Returns:
+        str: The assignment ID, or None if not found
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    
+    # Method 1: Look for hidden input with name containing 'assignmentid'
+    for inp in soup.find_all("input", {"type": "hidden"}):
+        name = inp.get("name", "")
+        if "assignmentid" in name.lower() or "assignment" in name.lower():
+            val = inp.get("value", "")
+            if val and val.isdigit():
+                return val
+    
+    # Method 2: Look in JavaScript M.cfg or similar
+    for script in soup.find_all("script"):
+        if script.string:
+            # Look for assignmentid in JSON-like structures
+            match = re.search(r'["\']assignmentid["\']\s*:\s*["\']?(\d+)["\']?', script.string, re.I)
+            if match:
+                return match.group(1)
+            # Also try without quotes around key
+            match = re.search(r'assignmentid\s*[=:]\s*["\']?(\d+)["\']?', script.string, re.I)
+            if match:
+                return match.group(1)
+    
+    # Method 3: Look in form action URLs
+    for form in soup.find_all("form"):
+        action = form.get("action", "")
+        match = re.search(r'assignmentid=(\d+)', action)
+        if match:
+            return match.group(1)
+    
+    # Method 4: Look for data attributes
+    for elem in soup.find_all(attrs={"data-assignmentid": True}):
+        return elem.get("data-assignmentid")
+    
+    return None

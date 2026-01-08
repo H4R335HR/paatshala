@@ -249,12 +249,12 @@ def render_video_importer_tab(course, meta):
             )
         
         with col2:
-            fetch_btn = st.button("🔍 Fetch Videos", type="primary", use_container_width=True, key="fetch_videos_btn")
+            fetch_btn = st.button("🔍 Fetch Videos", type="primary", width="stretch", key="fetch_videos_btn")
         
         with col3:
             # Always show refresh/clear button if we have videos
             if st.session_state.get('video_import_videos'):
-                if st.button("🗑️ Clear", use_container_width=True, key="clear_videos_btn"):
+                if st.button("🗑️ Clear", width="stretch", key="clear_videos_btn"):
                     st.session_state.video_import_videos = None
                     st.session_state.video_import_topics = None
                     st.session_state.video_import_mapping = {}
@@ -469,7 +469,7 @@ def render_video_importer_tab(course, meta):
                     btn_label, 
                     key=f"import_btn_{session_num}", 
                     type="primary", 
-                    use_container_width=True,
+                    width="stretch",
                     disabled=import_disabled
                 ):
                     # Get selected videos with custom titles
@@ -600,7 +600,7 @@ def render_video_importer_tab(course, meta):
                     btn_label, 
                     key=f"import_btn_ungrouped", 
                     type="primary", 
-                    use_container_width=True,
+                    width="stretch",
                     disabled=import_disabled
                 ):
                     # Get selected videos with custom titles
@@ -759,7 +759,7 @@ def render_video_importer_tab(course, meta):
                         st.warning(f"⚠️ **Import Complete:** {success_count} succeeded, {fail_count} failed")
             
             # Close button
-            if st.button("✅ Done", type="primary", use_container_width=True, key="import_done_btn"):
+            if st.button("✅ Done", type="primary", width="stretch", key="import_done_btn"):
                 # Clear pending import and refresh
                 st.session_state.pending_import = None
                 st.session_state.video_import_topics = None  # Refresh topics
@@ -786,7 +786,7 @@ def render_video_importer_tab(course, meta):
         with col1:
             st.markdown(f"**⚡ Bulk Import:** {total_mapped_videos} videos from {len(mapped_sessions)} sessions")
         with col2:
-            if st.button("⚡ Import All Mapped", type="secondary", use_container_width=True, key="bulk_import_btn"):
+            if st.button("⚡ Import All Mapped", type="secondary", width="stretch", key="bulk_import_btn"):
                 st.session_state.pending_bulk_import = {
                     'sessions': mapped_sessions,
                     'dry_run': dry_run
@@ -861,7 +861,7 @@ def render_video_importer_tab(course, meta):
                 else:
                     st.success(f"✅ **Bulk Import Complete:** {total_success} succeeded, {total_fail} failed")
             
-            if st.button("✅ Done", type="primary", use_container_width=True, key="bulk_import_done_btn"):
+            if st.button("✅ Done", type="primary", width="stretch", key="bulk_import_done_btn"):
                 st.session_state.pending_bulk_import = None
                 st.session_state.video_import_topics = None
                 st.rerun()

@@ -42,12 +42,12 @@ def get_gemini_client():
         return None
 
 
-def extract_pdf_text(pdf_path: str, max_chars: int = 100000) -> str:
+def extract_pdf_text(pdf_source, max_chars: int = 100000) -> str:
     """
     Extract text content from a PDF file using PyMuPDF.
     
     Args:
-        pdf_path: Path to the PDF file
+        pdf_source: Path to the PDF file (str) OR raw PDF bytes
         max_chars: Maximum characters to extract (default 100KB)
     
     Returns:
@@ -56,7 +56,11 @@ def extract_pdf_text(pdf_path: str, max_chars: int = 100000) -> str:
     try:
         import fitz  # PyMuPDF
         
-        doc = fitz.open(pdf_path)
+        # Handle both path and bytes
+        if isinstance(pdf_source, bytes):
+            doc = fitz.open(stream=pdf_source, filetype="pdf")
+        else:
+            doc = fitz.open(pdf_source)
         text_parts = []
         total_chars = 0
         
@@ -89,6 +93,49 @@ def extract_pdf_text(pdf_path: str, max_chars: int = 100000) -> str:
     except Exception as e:
         logger.error(f"Failed to extract PDF text: {e}")
         return f"(Error extracting PDF text: {e})"
+
+
+def extract_pdf_images(pdf_source, max_pages: int = 5, dpi: int = 150) -> List[bytes]:
+    """
+    Convert PDF pages to images for multimodal AI input.
+    
+    Args:
+        pdf_source: Path to the PDF file (str) OR raw PDF bytes
+        max_pages: Maximum number of pages to convert (default 5)
+        dpi: Resolution for rendering (default 150 for balance of quality/size)
+    
+    Returns:
+        List of PNG image bytes, one per page
+    """
+    try:
+        import fitz  # PyMuPDF
+        
+        # Handle both path and bytes
+        if isinstance(pdf_source, bytes):
+            doc = fitz.open(stream=pdf_source, filetype="pdf")
+        else:
+            doc = fitz.open(pdf_source)
+        
+        images = []
+        num_pages = min(len(doc), max_pages)
+        
+        for page_num in range(num_pages):
+            page = doc[page_num]
+            # Render page to image at specified DPI
+            mat = fitz.Matrix(dpi / 72, dpi / 72)  # 72 is default DPI
+            pix = page.get_pixmap(matrix=mat)
+            img_bytes = pix.tobytes("png")
+            images.append(img_bytes)
+        
+        doc.close()
+        return images
+        
+    except ImportError:
+        logger.error("PyMuPDF not installed - cannot extract PDF images")
+        return []
+    except Exception as e:
+        logger.error(f"Failed to extract PDF images: {e}")
+        return []
 
 
 def extract_docx_text(docx_path: str, max_chars: int = 100000) -> str:
@@ -132,6 +179,69 @@ def extract_docx_text(docx_path: str, max_chars: int = 100000) -> str:
     except Exception as e:
         logger.error(f"Failed to extract DOCX content: {e}")
         return f"(Error extracting DOCX content: {e})"
+
+
+def extract_zip_images(zip_path: str, password: str = "ictkerala.org", max_images: int = 10) -> List[bytes]:
+    """
+    Extract images from a ZIP archive for multimodal AI input.
+    
+    Extracts both direct image files and renders PDF pages as images.
+    For encrypted ZIPs, uses the known password.
+    
+    Args:
+        zip_path: Path to the ZIP file
+        password: Password to try for encrypted ZIPs
+        max_images: Maximum number of images to extract
+    
+    Returns:
+        List of image bytes
+    """
+    import zipfile
+    
+    images = []
+    
+    try:
+        with zipfile.ZipFile(zip_path, 'r') as zf:
+            # Check if encrypted
+            is_encrypted = any(info.flag_bits & 0x1 for info in zf.infolist())
+            pwd = password.encode() if is_encrypted else None
+            
+            if is_encrypted:
+                try:
+                    zf.setpassword(pwd)
+                except:
+                    pass
+            
+            for info in zf.infolist():
+                if len(images) >= max_images:
+                    break
+                    
+                if info.is_dir():
+                    continue
+                    
+                ext = Path(info.filename).suffix.lower()
+                
+                try:
+                    file_bytes = zf.read(info.filename, pwd=pwd)
+                    
+                    # Direct image files
+                    if ext in ['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp']:
+                        images.append(file_bytes)
+                    
+                    # PDF files - render pages as images
+                    elif ext == '.pdf':
+                        pdf_images = extract_pdf_images(file_bytes, max_pages=3)
+                        for img in pdf_images:
+                            if len(images) < max_images:
+                                images.append(img)
+                                
+                except Exception as e:
+                    logger.debug(f"Could not extract image from {info.filename}: {e}")
+    
+    except Exception as e:
+        logger.error(f"Failed to extract images from ZIP: {e}")
+    
+    return images
 
 
 def extract_zip_listing(zip_path: str, password: str = "ictkerala.org") -> str:
@@ -201,6 +311,21 @@ def extract_zip_listing(zip_path: str, password: str = "ictkerala.org") -> str:
                                     content_sections.append(f"\n--- Content of {info.filename} ---\n{text_content[:10000]}")
                             except:
                                 pass
+                        
+                        # PDF files - extract text for AI context
+                        elif ext == '.pdf':
+                            pdf_text = extract_pdf_text(file_bytes, max_chars=15000)
+                            if pdf_text.startswith("("):
+                                # Error or no content message
+                                content_sections.append(f"\n--- {info.filename} ---\n{pdf_text}")
+                            else:
+                                content_sections.append(f"\n--- Content of {info.filename} (PDF) ---\n{pdf_text}")
+                        
+                        # Image files - note their presence for AI context
+                        elif ext in ['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.svg']:
+                            size_kb = len(file_bytes) / 1024
+                            content_sections.append(f"\n--- {info.filename} ---\n(Screenshot/Image file, {size_kb:.1f} KB. This is visual evidence of completed work.)")
+                        
                     except Exception as e:
                         logger.debug(f"Could not extract {info.filename}: {e}")
             
@@ -516,14 +641,16 @@ EVALUATIONS_DIR = "evaluations"
 
 def fetch_github_content(repo_url: str, pat: Optional[str] = None) -> Dict[str, Any]:
     """
-    Fetch README and file listing from a GitHub repository.
+    Fetch README, file listing, and key file contents from a GitHub repository.
+    
+    For ZIPs and PDFs in the repo, downloads and extracts their content.
     
     Args:
         repo_url: GitHub repository URL
         pat: Optional Personal Access Token for higher rate limits
     
     Returns:
-        Dict with 'readme', 'files', 'error' keys
+        Dict with 'readme', 'files', 'file_contents', 'images', 'error' keys
     """
     import requests
     import re
@@ -532,6 +659,8 @@ def fetch_github_content(repo_url: str, pat: Optional[str] = None) -> Dict[str, 
     result = {
         "readme": "",
         "files": [],
+        "file_contents": [],  # Extracted text from files
+        "images": [],  # Images for multimodal scoring
         "error": None
     }
     
@@ -575,9 +704,68 @@ def fetch_github_content(repo_url: str, pat: Optional[str] = None) -> Dict[str, 
         if contents_resp.status_code == 200:
             files = contents_resp.json()
             result["files"] = [
-                {"name": f.get("name"), "type": f.get("type"), "size": f.get("size", 0)}
+                {"name": f.get("name"), "type": f.get("type"), "size": f.get("size", 0), "download_url": f.get("download_url")}
                 for f in files if isinstance(f, dict)
             ]
+            
+            # Download and extract important files for AI scoring
+            for file_info in result["files"]:
+                fname = file_info.get("name", "")
+                download_url = file_info.get("download_url")
+                file_size = file_info.get("size", 0)
+                
+                if not download_url or file_size > 10 * 1024 * 1024:  # Skip files > 10MB
+                    continue
+                
+                ext = Path(fname).suffix.lower()
+                
+                # Download ZIP files and extract contents
+                if ext == '.zip':
+                    try:
+                        zip_resp = requests.get(download_url, timeout=30)
+                        if zip_resp.status_code == 200:
+                            import io
+                            import zipfile
+                            
+                            zip_bytes = zip_resp.content
+                            
+                            # Extract listing and text content
+                            zip_listing = extract_zip_listing_from_bytes(zip_bytes)
+                            result["file_contents"].append(f"--- {fname} (ZIP Archive) ---\n{zip_listing}")
+                            
+                            # Extract images for multimodal
+                            zip_images = extract_zip_images_from_bytes(zip_bytes)
+                            result["images"].extend(zip_images[:5])
+                    except Exception as e:
+                        logger.debug(f"Failed to download ZIP {fname}: {e}")
+                
+                # Download PDF files and extract text/images
+                elif ext == '.pdf':
+                    try:
+                        pdf_resp = requests.get(download_url, timeout=30)
+                        if pdf_resp.status_code == 200:
+                            pdf_bytes = pdf_resp.content
+                            
+                            # Extract text
+                            pdf_text = extract_pdf_text(pdf_bytes, max_chars=15000)
+                            result["file_contents"].append(f"--- {fname} (PDF) ---\n{pdf_text}")
+                            
+                            # Extract images for multimodal
+                            pdf_images = extract_pdf_images(pdf_bytes, max_pages=3)
+                            result["images"].extend(pdf_images)
+                    except Exception as e:
+                        logger.debug(f"Failed to download PDF {fname}: {e}")
+                
+                # Download text/code files
+                elif ext in ['.txt', '.md', '.py', '.js', '.html', '.css', '.json', '.csv'] and file_size < 50000:
+                    try:
+                        txt_resp = requests.get(download_url, timeout=10)
+                        if txt_resp.status_code == 200:
+                            text_content = txt_resp.text[:10000]
+                            result["file_contents"].append(f"--- {fname} ---\n{text_content}")
+                    except Exception as e:
+                        logger.debug(f"Failed to download text file {fname}: {e}")
+                        
         elif contents_resp.status_code == 403:
             result["error"] = "GitHub API rate limit reached"
             
@@ -587,6 +775,115 @@ def fetch_github_content(repo_url: str, pat: Optional[str] = None) -> Dict[str, 
         result["error"] = f"Error fetching GitHub content: {str(e)}"
     
     return result
+
+
+def extract_zip_listing_from_bytes(zip_bytes: bytes, password: str = "ictkerala.org") -> str:
+    """Extract file listing and content from ZIP bytes (for GitHub downloads)."""
+    import zipfile
+    import io
+    
+    try:
+        with zipfile.ZipFile(io.BytesIO(zip_bytes), 'r') as zf:
+            # Check if encrypted
+            is_encrypted = any(info.flag_bits & 0x1 for info in zf.infolist())
+            pwd = password.encode() if is_encrypted else None
+            
+            if is_encrypted:
+                try:
+                    zf.setpassword(pwd)
+                except:
+                    pass
+            
+            file_list = []
+            content_sections = []
+            total_size = 0
+            
+            for info in zf.infolist():
+                if not info.is_dir():
+                    total_size += info.file_size
+                    size_str = f"{info.file_size / 1024:.1f} KB" if info.file_size > 0 else "—"
+                    file_list.append(f"- {info.filename} ({size_str})")
+                    
+                    ext = Path(info.filename).suffix.lower()
+                    try:
+                        file_bytes = zf.read(info.filename, pwd=pwd)
+                        
+                        # Text files
+                        if ext in ['.txt', '.md', '.csv', '.log', '.py', '.js', '.html', '.css', '.json']:
+                            text_content = file_bytes.decode('utf-8', errors='ignore')
+                            if text_content.strip():
+                                content_sections.append(f"\n--- Content of {info.filename} ---\n{text_content[:10000]}")
+                        
+                        # PDF files
+                        elif ext == '.pdf':
+                            pdf_text = extract_pdf_text(file_bytes, max_chars=15000)
+                            content_sections.append(f"\n--- Content of {info.filename} (PDF) ---\n{pdf_text}")
+                            
+                    except Exception as e:
+                        logger.debug(f"Could not extract {info.filename}: {e}")
+            
+            if file_list:
+                listing = f"ZIP Archive Contents ({len(file_list)} files, {total_size / 1024:.1f} KB total):\n"
+                listing += "\n".join(file_list[:50])
+                if content_sections:
+                    listing += "\n\n" + "\n".join(content_sections)
+                return listing
+            else:
+                return "(Empty ZIP archive)"
+                
+    except Exception as e:
+        return f"(Error reading ZIP: {e})"
+
+
+def extract_zip_images_from_bytes(zip_bytes: bytes, password: str = "ictkerala.org", max_images: int = 5) -> List[bytes]:
+    """Extract images from ZIP bytes (for GitHub downloads)."""
+    import zipfile
+    import io
+    
+    images = []
+    
+    try:
+        with zipfile.ZipFile(io.BytesIO(zip_bytes), 'r') as zf:
+            # Check if encrypted
+            is_encrypted = any(info.flag_bits & 0x1 for info in zf.infolist())
+            pwd = password.encode() if is_encrypted else None
+            
+            if is_encrypted:
+                try:
+                    zf.setpassword(pwd)
+                except:
+                    pass
+            
+            for info in zf.infolist():
+                if len(images) >= max_images:
+                    break
+                    
+                if info.is_dir():
+                    continue
+                    
+                ext = Path(info.filename).suffix.lower()
+                
+                try:
+                    file_bytes = zf.read(info.filename, pwd=pwd)
+                    
+                    # Direct image files
+                    if ext in ['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp']:
+                        images.append(file_bytes)
+                    
+                    # PDF files - render pages as images
+                    elif ext == '.pdf':
+                        pdf_images = extract_pdf_images(file_bytes, max_pages=3)
+                        for img in pdf_images:
+                            if len(images) < max_images:
+                                images.append(img)
+                                
+                except Exception as e:
+                    logger.debug(f"Could not extract image from {info.filename}: {e}")
+    
+    except Exception as e:
+        logger.debug(f"Failed to extract images from ZIP: {e}")
+    
+    return images
 
 
 def fetch_submission_content(row: Dict, course_id: int = None) -> Dict[str, Any]:
@@ -607,6 +904,7 @@ def fetch_submission_content(row: Dict, course_id: int = None) -> Dict[str, Any]
         "type": "unknown",
         "content": "",
         "summary": "",
+        "images": [],  # List of image bytes for multimodal AI
         "error": None
     }
     
@@ -656,6 +954,10 @@ def fetch_submission_content(row: Dict, course_id: int = None) -> Dict[str, Any]
                     result["content"] = f"GitHub URL: {url}\n\n(Could not fetch content: {github_content['error']})"
                 else:
                     files_list = "\n".join([f"- {f['name']} ({f['type']})" for f in github_content.get("files", [])])
+                    
+                    # Include extracted file contents
+                    file_contents_text = "\n\n".join(github_content.get("file_contents", []))
+                    
                     result["content"] = f"""GitHub Repository: {url}
 
 ## Files in Repository:
@@ -663,7 +965,12 @@ def fetch_submission_content(row: Dict, course_id: int = None) -> Dict[str, Any]
 
 ## README:
 {github_content.get('readme', '(No README)')}
+
+## Extracted File Contents:
+{file_contents_text or "(No downloadable content extracted)"}
 """
+                    # Transfer images for multimodal scoring
+                    result["images"].extend(github_content.get("images", []))
             else:
                 # Non-GitHub link - can't fetch content
                 result["content"] = f"Submitted URL: {url}\n\n(Cannot fetch content from non-GitHub URLs)"
@@ -693,18 +1000,24 @@ def fetch_submission_content(row: Dict, course_id: int = None) -> Dict[str, Any]
                         try:
                             file_size = local_path.stat().st_size
                             
-                            # Handle PDFs specially
+                            # Handle PDFs specially - extract text AND images
                             if local_path.suffix.lower() == '.pdf':
                                 pdf_text = extract_pdf_text(str(local_path))
                                 file_contents.append(f"--- Content of {fname} (PDF) ---\n{pdf_text}")
+                                # Also extract images for multimodal scoring
+                                pdf_images = extract_pdf_images(str(local_path), max_pages=5)
+                                result["images"].extend(pdf_images)
                             # Handle DOCX files
                             elif local_path.suffix.lower() in ['.docx', '.doc']:
                                 docx_text = extract_docx_text(str(local_path))
                                 file_contents.append(f"--- Content of {fname} (Word Document) ---\n{docx_text}")
-                            # Handle ZIP archives
+                            # Handle ZIP archives - extract listing AND images
                             elif local_path.suffix.lower() == '.zip':
                                 zip_listing = extract_zip_listing(str(local_path))
                                 file_contents.append(f"--- {fname} ---\n{zip_listing}")
+                                # Also extract images for multimodal scoring
+                                zip_images = extract_zip_images(str(local_path), max_images=5)
+                                result["images"].extend(zip_images)
                             # Read text files up to 100KB
                             elif local_path.suffix.lower() in ['.txt', '.py', '.js', '.html', '.css', '.md', '.json', '.xml', '.csv', '.java', '.c', '.cpp', '.h', '.sh', '.bat', '.ps1', '.yaml', '.yml', '.ini', '.cfg', '.conf', '.log', '.sql']:
                                 if file_size > 100000:
@@ -713,9 +1026,12 @@ def fetch_submission_content(row: Dict, course_id: int = None) -> Dict[str, Any]
                                     with open(local_path, 'r', encoding='utf-8', errors='ignore') as fp:
                                         content = fp.read()
                                         file_contents.append(f"--- Content of {fname} ---\n{content}")
-                            # Handle images - just note they exist
-                            elif local_path.suffix.lower() in ['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.svg']:
+                            # Handle images - extract for multimodal scoring
+                            elif local_path.suffix.lower() in ['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp']:
                                 file_contents.append(f"(Image file: {fname} - {file_size / 1024:.1f}KB)")
+                                # Read image bytes for multimodal scoring
+                                with open(local_path, 'rb') as img_f:
+                                    result["images"].append(img_f.read())
                             else:
                                 file_contents.append(f"(Binary file - cannot read content)")
                         except Exception as e:
@@ -786,6 +1102,8 @@ def score_submission(
 ## Student Submission:
 Type: {submission_content.get('type', 'unknown')}
 Summary: {submission_content.get('summary', '')}
+Deadline: {submission_content.get('deadline', 'Not specified')}
+Submitted on Time: {'Yes' if submission_content.get('on_time') else 'No' if submission_content.get('on_time') is False else 'Unknown'}
 
 Content:
 {submission_content.get('content', '(No content available)')[:8000]}
@@ -804,15 +1122,47 @@ Return ONLY a valid JSON object with this structure (no markdown):
   "overall_comments": "2-3 sentences of overall feedback for the student"
 }}
 
-Be fair but thorough. If content couldn't be fetched, base your evaluation on what's available."""
+Be fair but thorough. If content couldn't be fetched, base your evaluation on what's available.
+
+If images are provided below, examine them carefully as they may contain screenshots demonstrating completed work."""
 
     try:
         model = get_config("gemini_model") or "gemini-2.5-flash"
         
-        response = client.models.generate_content(
-            model=model,
-            contents=prompt
-        )
+        # Build multimodal content if images are available
+        images = submission_content.get("images", [])
+        
+        if images:
+            # Build multimodal content: [image1, image2, ..., text_prompt]
+            from google.genai import types
+            
+            contents = []
+            
+            # Add images (limit to 5 to avoid token limits)
+            for i, img_bytes in enumerate(images[:5]):
+                try:
+                    # Create image part
+                    image_part = types.Part.from_bytes(
+                        data=img_bytes,
+                        mime_type="image/png"
+                    )
+                    contents.append(image_part)
+                except Exception as e:
+                    logger.debug(f"Failed to add image {i+1}: {e}")
+            
+            # Add text prompt
+            contents.append(prompt + f"\n\n(Note: {len(images[:5])} screenshot(s) are provided above - examine them for evidence of completed work)")
+            
+            response = client.models.generate_content(
+                model=model,
+                contents=contents
+            )
+        else:
+            # Text-only content
+            response = client.models.generate_content(
+                model=model,
+                contents=prompt
+            )
         
         response_text = response.text.strip()
         

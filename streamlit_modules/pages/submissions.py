@@ -166,7 +166,7 @@ def render_submissions_tab(course, meta):
                     st.markdown("**Quick Actions**")
                     qcol1, qcol2, qcol3 = st.columns(3)
                     with qcol1:
-                        if st.button("➕ Extend 1 Day", key=f"extend_1d_{module_id}", use_container_width=True):
+                        if st.button("➕ Extend 1 Day", key=f"extend_1d_{module_id}", width="stretch"):
                             if dates_info['due_date']:
                                 session = setup_session(st.session_state.session_id)
                                 new_due = dates_info['due_date'] + timedelta(days=1)
@@ -183,7 +183,7 @@ def render_submissions_tab(course, meta):
                                 else:
                                     st.error("Failed to update")
                     with qcol2:
-                        if st.button("➕ Extend 1 Week", key=f"extend_1w_{module_id}", use_container_width=True):
+                        if st.button("➕ Extend 1 Week", key=f"extend_1w_{module_id}", width="stretch"):
                             if dates_info['due_date']:
                                 session = setup_session(st.session_state.session_id)
                                 new_due = dates_info['due_date'] + timedelta(weeks=1)
@@ -200,7 +200,7 @@ def render_submissions_tab(course, meta):
                                 else:
                                     st.error("Failed to update")
                     with qcol3:
-                        if st.button("🚫 Disable Cut-off", key=f"disable_cutoff_{module_id}", use_container_width=True):
+                        if st.button("🚫 Disable Cut-off", key=f"disable_cutoff_{module_id}", width="stretch"):
                             session = setup_session(st.session_state.session_id)
                             if update_assignment_dates(session, module_id, cutoff_date_enabled=False):
                                 st.session_state[dates_key] = None  # Clear cache to reload
@@ -270,16 +270,19 @@ def render_submissions_tab(course, meta):
                 fetch_btn = st.button(
                     "🔄 Refresh" if existing_data else "📥 Fetch",
                     key=f"fetch_submissions_{module_id}_{selected_group_id}",
-                    use_container_width=True
+                    width="stretch"
                 )
             
             if fetch_btn:
                 with st.spinner("Fetching submissions..."):
-                    rows = fetch_submissions(
+                    result = fetch_submissions(
                         st.session_state.session_id,
                         selected_task['Module ID'],
                         selected_group_id
                     )
+                    
+                    # Unpack tuple result (submissions_list, assignment_id)
+                    rows, assignment_id = result
                     
                     if rows:
                         # Add task info to rows
@@ -291,6 +294,10 @@ def render_submissions_tab(course, meta):
                         st.session_state.submissions_loaded_from_disk = False
                         st.session_state.submissions_module_id = module_id
                         st.session_state.submissions_group_id = selected_group_id
+                        
+                        # Store assignment_id for grade submission API
+                        if assignment_id:
+                            st.session_state[f"assignment_id_{module_id}"] = assignment_id
                         
                         # Save to disk
                         save_csv_to_disk(course['id'], submissions_filename, rows)
@@ -321,6 +328,31 @@ def render_submissions_tab(course, meta):
                 st.session_state.submissions_data = existing_data
                 st.session_state.submissions_module_id = module_id
                 st.session_state.submissions_group_id = selected_group_id
+                
+                # Also fetch assignment_id if not already set (needed for grade submission)
+                if f"assignment_id_{module_id}" not in st.session_state:
+                    # Get assignment_id by fetching grader page for first student
+                    first_user_id = None
+                    for row in existing_data:
+                        if row.get('User_ID'):
+                            first_user_id = row['User_ID']
+                            break
+                    
+                    if first_user_id:
+                        from core.api import setup_session
+                        from core.auth import BASE
+                        from core.parser import extract_assignment_id
+                        
+                        try:
+                            session = setup_session(st.session_state.session_id)
+                            grader_url = f"{BASE}/mod/assign/view.php?id={module_id}&action=grader&userid={first_user_id}"
+                            grader_resp = session.get(grader_url, timeout=15)
+                            if grader_resp.ok:
+                                assignment_id = extract_assignment_id(grader_resp.text)
+                                if assignment_id:
+                                    st.session_state[f"assignment_id_{module_id}"] = assignment_id
+                        except:
+                            pass  # Failed to get assignment_id, will show error on submit
             
             if display_data:
                 import pandas as pd

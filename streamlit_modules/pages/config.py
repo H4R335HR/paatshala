@@ -252,7 +252,7 @@ def render_config_page():
         with col1:
             # Save button (only enabled if order changed)
             order_changed = st.session_state.temp_tab_order != current_enabled
-            if st.button("💾 Save Tab Order", type="primary", disabled=not order_changed, use_container_width=True):
+            if st.button("💾 Save Tab Order", type="primary", disabled=not order_changed, width="stretch"):
                 if set_enabled_tabs(st.session_state.temp_tab_order):
                     # Clear the temp state so it reloads from config
                     del st.session_state.temp_tab_order
@@ -263,7 +263,7 @@ def render_config_page():
         
         with col2:
             # Reset button
-            if st.button("🔄 Reset Order", disabled=not order_changed, use_container_width=True):
+            if st.button("🔄 Reset Order", disabled=not order_changed, width="stretch"):
                 st.session_state.temp_tab_order = current_enabled.copy()
                 st.rerun()
     

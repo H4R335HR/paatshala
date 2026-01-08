@@ -84,7 +84,7 @@ def render_quiz_tab(course, meta):
         fetch_quiz = st.button(
             "🔄 Refresh" if st.session_state.quiz_data else "📥 Fetch",
             key="fetch_quiz",
-            use_container_width=True
+            width="stretch"
         )
     
     if fetch_quiz:
