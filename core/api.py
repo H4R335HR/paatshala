@@ -13,6 +13,7 @@ logger = logging.getLogger(__name__)
 
 from .auth import setup_session, PAATSHALA_HOST, BASE
 from .parser import parse_assign_view, parse_grading_table, extract_assignment_id
+from .persistence import get_config
 
 DEFAULT_THREADS = 4
 
@@ -2018,7 +2019,7 @@ def evaluate_submission(row):
     except:
         row['Eval_Link_Valid'] = "❌ (Unreachable)"
     
-    # 2. GitHub Checks
+    # 2. GitHub Checks (using PAT for better rate limits and reliability)
     if "github.com" in url:
         parts = url.rstrip('/').split('/')
         if len(parts) >= 5:
@@ -2026,8 +2027,14 @@ def evaluate_submission(row):
             repo = parts[-1].removesuffix('.git')  # Strip .git suffix for API compatibility
             api_url = f"https://api.github.com/repos/{owner}/{repo}"
             
+            # Set up headers with PAT if available
+            headers = {"Accept": "application/vnd.github.v3+json"}
+            pat = get_config("github_pat")
+            if pat:
+                headers["Authorization"] = f"token {pat}"
+            
             try:
-                api_resp = requests.get(api_url, timeout=5)
+                api_resp = requests.get(api_url, headers=headers, timeout=10)
                 
                 if api_resp.status_code == 200:
                     repo_data = api_resp.json()
@@ -2043,10 +2050,15 @@ def evaluate_submission(row):
                     row['Eval_Repo_Status'] = "Not Found/Private"
                 elif api_resp.status_code == 403:
                     row['Eval_Repo_Status'] = "Rate Limit"
+                elif api_resp.status_code == 401:
+                    row['Eval_Repo_Status'] = "Auth Error"
                 else:
                     row['Eval_Repo_Status'] = f"Error {api_resp.status_code}"
                     
-            except:
+            except requests.exceptions.Timeout:
+                row['Eval_Repo_Status'] = "Timeout"
+            except requests.exceptions.RequestException as e:
+                logger.debug(f"GitHub API error for {api_url}: {e}")
                 row['Eval_Repo_Status'] = "API Error"
     
     return row

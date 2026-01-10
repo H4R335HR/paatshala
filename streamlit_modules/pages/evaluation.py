@@ -850,9 +850,69 @@ def _render_ai_scoring_section(course, row, idx, data):
     student_name = row.get('Name', 'Unknown')
     existing_eval = load_evaluation(course['id'], module_id, student_name, selected_group_id)
     
+    # Get max grade for this task (needed for display and restore)
+    max_grade = 15  # Default
+    if st.session_state.tasks_data:
+        for task in st.session_state.tasks_data:
+            if str(task.get('Module ID')) == str(module_id):
+                max_grade_str = task.get('Max Grade', '15')
+                try:
+                    max_grade = float(max_grade_str.replace('/100.00', '').strip())
+                except:
+                    max_grade = 15
+                break
+    
+    # Get Moodle grade from row data (already fetched by parse_grading_table)
+    moodle_grade = row.get('Final Grade', '')
+    moodle_feedback = row.get('Feedback Comments', '')
+    
+    # Check for pending rescore result
+    pending_key = f"pending_rescore_{module_id}_{student_name}"
+    pending_rescore = st.session_state.get(pending_key)
+    
     # Display existing evaluation if present
     if existing_eval and existing_eval.get('total_score') is not None:
-        _display_evaluation_results(existing_eval, rubric)
+        # If there's a pending rescore, show comparison
+        if pending_rescore:
+            old_score = existing_eval.get('total_score', 0)
+            new_score = pending_rescore.get('total_score', 0)
+            
+            st.warning(f"### 🔄 New Score: **{new_score}/100** (was {old_score}/100)")
+            
+            # Show new breakdown
+            with st.expander("📊 New Score Breakdown", expanded=True):
+                new_criteria = pending_rescore.get('criteria_scores', [])
+                if new_criteria:
+                    breakdown_data = []
+                    for cs in new_criteria:
+                        breakdown_data.append({
+                            "Criterion": cs.get('criterion', ''),
+                            "Score": f"{cs.get('score', 0)}/{cs.get('max_score', 0)}",
+                            "Feedback": cs.get('comment', '')
+                        })
+                    st.dataframe(breakdown_data, width="stretch", hide_index=True)
+                
+                new_comments = pending_rescore.get('comments', '')
+                if new_comments:
+                    st.markdown("**Overall Feedback:**")
+                    st.info(new_comments)
+            
+            # Accept/Reject buttons
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("✅ Accept New Score", key=f"accept_rescore_{idx}", type="primary"):
+                    save_evaluation(course['id'], module_id, student_name, pending_rescore, selected_group_id)
+                    del st.session_state[pending_key]
+                    st.success("✓ New score saved!")
+                    st.rerun()
+            with col2:
+                if st.button("❌ Reject", key=f"reject_rescore_{idx}"):
+                    del st.session_state[pending_key]
+                    st.info("Score unchanged")
+                    st.rerun()
+            return  # Don't show rest of UI while pending
+        
+        _display_evaluation_results(existing_eval, rubric, moodle_grade, max_grade)
         
         # Show conversation history if exists
         conversation = existing_eval.get('conversation', [])
@@ -864,29 +924,46 @@ def _render_ai_scoring_section(course, row, idx, data):
                     else:
                         st.markdown(f"**AI:** {msg['content']}")
         
-        # Action buttons: Re-Score, Discuss, and Submit to Moodle
-        col1, col2, col3 = st.columns([1, 1, 1])
+        # Action buttons: Restore, Re-Score, Discuss, and Submit to Moodle
+        col1, col2, col3, col4 = st.columns([1, 1, 1, 1])
+        moodle_score, moodle_max = _parse_moodle_grade(moodle_grade)
+        
         with col1:
-            rescore = st.button("🔄 Re-Score", key=f"rescore_{idx}")
+            restore_btn = st.button(
+                "📥 Restore from Moodle", 
+                key=f"restore_{idx}",
+                disabled=(moodle_score is None),
+                help="Load the existing grade and feedback from Moodle"
+            )
         with col2:
-            discuss = st.button("💬 Discuss", key=f"discuss_{idx}")
+            rescore = st.button("🔄 Re-Score", key=f"rescore_{idx}")
         with col3:
-            # Get max grade for this task
-            max_grade = 15  # Default
-            if st.session_state.tasks_data:
-                for task in st.session_state.tasks_data:
-                    if str(task.get('Module ID')) == str(module_id):
-                        max_grade_str = task.get('Max Grade', '15')
-                        try:
-                            max_grade = float(max_grade_str.replace('/100.00', '').strip())
-                        except:
-                            max_grade = 15
-                        break
-            
+            discuss = st.button("💬 Discuss", key=f"discuss_{idx}")
+        with col4:
             submit_btn = st.button("📤 Submit to Moodle", key=f"submit_moodle_{idx}", type="primary")
         
         if rescore:
-            _perform_scoring(course, row, rubric, module_id, selected_group_id, data)
+            _perform_scoring(course, row, rubric, module_id, selected_group_id, data, is_rescore=True)
+        
+        if restore_btn and moodle_score is not None:
+            # Convert Moodle grade to percentage
+            effective_max = moodle_max if moodle_max else max_grade
+            percentage_score = (moodle_score / effective_max) * 100
+            
+            # Create evaluation dict from Moodle data
+            from datetime import datetime
+            restored_eval = {
+                'total_score': round(percentage_score, 1),
+                'criteria_scores': [],  # No per-criterion breakdown from Moodle
+                'comments': moodle_feedback if moodle_feedback else "Restored from Moodle - no detailed feedback available.",
+                'evaluated_at': datetime.now().isoformat(),
+                'source': 'moodle_restore'
+            }
+            
+            # Save to local cache
+            save_evaluation(course['id'], module_id, student_name, restored_eval, selected_group_id)
+            st.success(f"✓ Restored from Moodle: {moodle_score}/{effective_max:.0f} → {percentage_score:.1f}/100")
+            st.rerun()
         
         if discuss:
             _show_discuss_dialog(course, row, existing_eval, rubric, module_id, selected_group_id, idx)
@@ -895,20 +972,56 @@ def _render_ai_scoring_section(course, row, idx, data):
             with st.spinner("Submitting to Moodle..."):
                 _submit_to_moodle(course, row, existing_eval, max_grade)
     else:
+        # No AI evaluation yet - show Moodle status if available
+        moodle_score, moodle_max = _parse_moodle_grade(moodle_grade)
+        
+        if moodle_score is not None:
+            moodle_display = f"{moodle_score:.2f}"
+            if moodle_max:
+                moodle_display += f" / {moodle_max:.0f}"
+            st.info(f"📋 **Moodle Grade:** {moodle_display} (No AI score yet)")
+        else:
+            st.caption("No AI score or Moodle grade yet")
+        
         # Get task description
         task_description = _get_task_description(module_id)
         
         if not task_description:
             st.warning("⚠️ Task description not available. Fetch tasks in Submissions tab first.")
         
-        # Score button
-        col1, col2, col3 = st.columns([1, 1, 2])
+        # Score buttons
+        col1, col2, col3 = st.columns([1, 1, 1])
         with col1:
             if st.button("🎯 Score with AI", key=f"score_{idx}", type="primary"):
                 _perform_scoring(course, row, rubric, module_id, selected_group_id, data)
         
         with col2:
-            st.caption(f"Using {len(rubric)} criteria")
+            if moodle_score is not None:
+                restore_btn = st.button(
+                    "📥 Restore from Moodle", 
+                    key=f"restore_new_{idx}",
+                    help="Load the existing grade and feedback from Moodle"
+                )
+                if restore_btn:
+                    # Convert Moodle grade to percentage
+                    effective_max = moodle_max if moodle_max else max_grade
+                    percentage_score = (moodle_score / effective_max) * 100
+                    
+                    # Create evaluation dict from Moodle data
+                    from datetime import datetime
+                    restored_eval = {
+                        'total_score': round(percentage_score, 1),
+                        'criteria_scores': [],
+                        'comments': moodle_feedback if moodle_feedback else "Restored from Moodle - no detailed feedback available.",
+                        'evaluated_at': datetime.now().isoformat(),
+                        'source': 'moodle_restore'
+                    }
+                    
+                    save_evaluation(course['id'], module_id, student_name, restored_eval, selected_group_id)
+                    st.success(f"✓ Restored from Moodle: {moodle_score}/{effective_max:.0f} → {percentage_score:.1f}/100")
+                    st.rerun()
+            else:
+                st.caption(f"Using {len(rubric)} criteria")
 
 
 def _get_task_description(module_id):
@@ -923,8 +1036,12 @@ def _get_task_description(module_id):
     return ""
 
 
-def _perform_scoring(course, row, rubric, module_id, group_id, data):
-    """Perform AI scoring on a submission."""
+def _perform_scoring(course, row, rubric, module_id, group_id, data, is_rescore=False):
+    """Perform AI scoring on a submission.
+    
+    Args:
+        is_rescore: If True, stores result as pending for Accept/Reject. If False, saves immediately.
+    """
     with st.spinner("Fetching submission content..."):
         submission_content = fetch_submission_content(row, course['id'])
     
@@ -963,35 +1080,81 @@ def _perform_scoring(course, row, rubric, module_id, group_id, data):
         return
     
     if result:
-        # Save evaluation
         student_name = row.get('Name', 'Unknown')
-        save_evaluation(course['id'], module_id, student_name, result, group_id)
         
-        st.success(f"✓ Scored: **{result['total_score']}/100**")
-        st.rerun()
+        if is_rescore:
+            # Store as pending - don't save yet, let user Accept/Reject
+            pending_key = f"pending_rescore_{module_id}_{student_name}"
+            st.session_state[pending_key] = result
+            st.rerun()
+        else:
+            # First-time scoring - save immediately
+            save_evaluation(course['id'], module_id, student_name, result, group_id)
+            st.success(f"✓ Scored: **{result['total_score']}/100**")
+            st.rerun()
 
 
-def _display_evaluation_results(evaluation, rubric):
-    """Display evaluation results with score breakdown and comments."""
+def _parse_moodle_grade(grade_str):
+    """Parse Moodle grade string like '12.75 / 15.00' into (score, max) tuple."""
+    if not grade_str or grade_str == '-':
+        return None, None
+    
+    import re
+    match = re.search(r'(\d+(?:\.\d+)?)\s*/\s*(\d+(?:\.\d+)?)', str(grade_str))
+    if match:
+        return float(match.group(1)), float(match.group(2))
+    
+    # Try simple number
+    try:
+        return float(grade_str), None
+    except:
+        return None, None
+
+
+def _display_evaluation_results(evaluation, rubric, moodle_grade=None, max_grade=15):
+    """Display evaluation results with score breakdown and comments.
+    
+    Args:
+        evaluation: AI evaluation dict with total_score, criteria_scores, comments
+        rubric: The rubric used for evaluation
+        moodle_grade: Moodle grade string from row.get('Final Grade'), e.g. '12.75 / 15.00'
+        max_grade: Maximum grade for this assignment (for scaling comparison)
+    """
     
     # Total score with visual indicator
     total_score = evaluation.get('total_score', 0)
     
     # Color based on score
     if total_score >= 80:
-        score_color = "green"
         score_emoji = "🎉"
     elif total_score >= 60:
-        score_color = "orange"
         score_emoji = "👍"
     elif total_score >= 40:
-        score_color = "yellow"
         score_emoji = "⚠️"
     else:
-        score_color = "red"
         score_emoji = "❌"
     
-    st.markdown(f"## {score_emoji} Score: **{total_score}/100**")
+    # Parse Moodle grade for comparison
+    moodle_score, moodle_max = _parse_moodle_grade(moodle_grade)
+    
+    # Build header with Moodle comparison
+    if moodle_score is not None:
+        # Convert AI score to same scale as Moodle for comparison
+        ai_scaled = (total_score / 100) * max_grade
+        
+        # Determine sync status
+        if abs(ai_scaled - moodle_score) < 0.5:
+            sync_indicator = "✅ Synced"
+        else:
+            sync_indicator = "⚠️ Different"
+        
+        moodle_display = f"{moodle_score:.2f}" if moodle_max else str(moodle_score)
+        if moodle_max:
+            moodle_display += f" / {moodle_max:.0f}"
+        
+        st.markdown(f"## {score_emoji} AI Score: **{total_score}/100** &nbsp;|&nbsp; Moodle: **{moodle_display}** {sync_indicator}")
+    else:
+        st.markdown(f"## {score_emoji} AI Score: **{total_score}/100** &nbsp;|&nbsp; ❌ Not in Moodle")
     
     # Criteria breakdown
     criteria_scores = evaluation.get('criteria_scores', [])

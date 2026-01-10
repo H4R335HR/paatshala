@@ -339,7 +339,6 @@ def render_submissions_tab(course, meta):
                             break
                     
                     if first_user_id:
-                        from core.api import setup_session
                         from core.auth import BASE
                         from core.parser import extract_assignment_id
                         

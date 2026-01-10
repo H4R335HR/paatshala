@@ -138,7 +138,7 @@ def extract_pdf_images(pdf_source, max_pages: int = 5, dpi: int = 150) -> List[b
         return []
 
 
-def extract_docx_text(docx_path: str, max_chars: int = 100000) -> str:
+def extract_docx_text(docx_source, max_chars: int = 100000) -> str:
     """
     Extract content from a DOCX file as semantic HTML using mammoth.
     
@@ -146,7 +146,7 @@ def extract_docx_text(docx_path: str, max_chars: int = 100000) -> str:
     which gives the AI better context for evaluation compared to plain text.
     
     Args:
-        docx_path: Path to the DOCX file
+        docx_source: Path to the DOCX file (str) OR raw DOCX bytes
         max_chars: Maximum characters to extract (default 100KB)
     
     Returns:
@@ -154,24 +154,31 @@ def extract_docx_text(docx_path: str, max_chars: int = 100000) -> str:
     """
     try:
         import mammoth
+        import io
         
-        with open(docx_path, "rb") as docx_file:
+        # Handle both path and bytes
+        if isinstance(docx_source, bytes):
+            docx_file = io.BytesIO(docx_source)
             result = mammoth.convert_to_html(docx_file)
-            html_content = result.value
-            
-            # Log any conversion warnings
-            if result.messages:
-                for msg in result.messages[:5]:  # Limit logged warnings
-                    logger.debug(f"Mammoth conversion warning: {msg}")
-            
-            if not html_content.strip():
-                return "(DOCX contains no extractable content)"
-            
-            # Truncate if too long
-            if len(html_content) > max_chars:
-                html_content = html_content[:max_chars] + f"\n\n[Truncated at {max_chars} characters]"
-            
-            return html_content
+        else:
+            with open(docx_source, "rb") as f:
+                result = mammoth.convert_to_html(f)
+        
+        html_content = result.value
+        
+        # Log any conversion warnings
+        if result.messages:
+            for msg in result.messages[:5]:  # Limit logged warnings
+                logger.debug(f"Mammoth conversion warning: {msg}")
+        
+        if not html_content.strip():
+            return "(DOCX contains no extractable content)"
+        
+        # Truncate if too long
+        if len(html_content) > max_chars:
+            html_content = html_content[:max_chars] + f"\n\n[Truncated at {max_chars} characters]"
+        
+        return html_content
         
     except ImportError:
         logger.error("mammoth not installed - cannot extract DOCX content")
@@ -181,11 +188,94 @@ def extract_docx_text(docx_path: str, max_chars: int = 100000) -> str:
         return f"(Error extracting DOCX content: {e})"
 
 
+def convert_docx_to_pdf_images(docx_bytes: bytes, max_pages: int = 10, dpi: int = 150) -> tuple[str, List[bytes]]:
+    """
+    Convert DOCX to PDF, then render pages as images for multimodal AI.
+    
+    This approach preserves the full document layout including embedded images,
+    which allows Gemini to see all screenshots and content in context.
+    
+    Args:
+        docx_bytes: Raw bytes of the DOCX file
+        max_pages: Maximum number of pages to render as images
+        dpi: Resolution for rendered images
+    
+    Returns:
+        Tuple of (text_content, list_of_page_images)
+        - text_content: Extracted text for fallback/context
+        - list_of_page_images: PNG bytes for each page
+    """
+    import io
+    
+    text_content = ""
+    images = []
+    
+    try:
+        import mammoth
+        
+        # Step 1: DOCX → HTML with embedded base64 images
+        result = mammoth.convert_to_html(io.BytesIO(docx_bytes))
+        html_content = result.value
+        
+        if not html_content.strip():
+            return "(DOCX contains no content)", []
+        
+        # Also extract plain text for AI context
+        import re
+        text_content = re.sub(r'<[^>]+>', ' ', html_content)
+        text_content = re.sub(r'\s+', ' ', text_content).strip()[:10000]
+        
+        # Step 2: HTML → PDF using xhtml2pdf
+        styled_html = f"""<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<style>body{{font-family:Arial,sans-serif;margin:20px}}img{{max-width:100%;height:auto}}</style>
+</head><body>{html_content}</body></html>"""
+        
+        try:
+            from xhtml2pdf import pisa
+            pdf_buffer = io.BytesIO()
+            pisa_status = pisa.CreatePDF(styled_html, dest=pdf_buffer)
+            if pisa_status.err:
+                logger.warning("xhtml2pdf conversion had errors")
+            pdf_bytes = pdf_buffer.getvalue()
+        except ImportError:
+            logger.error("xhtml2pdf not installed - cannot convert DOCX to PDF images")
+            return text_content, []
+        
+        # Step 3: PDF → Images using PyMuPDF
+        try:
+            import fitz  # PyMuPDF
+            doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+            
+            for page_num in range(min(len(doc), max_pages)):
+                page = doc[page_num]
+                mat = fitz.Matrix(dpi/72, dpi/72)
+                pix = page.get_pixmap(matrix=mat)
+                img_bytes = pix.tobytes("png")
+                images.append(img_bytes)
+            
+            doc.close()
+            logger.debug(f"Converted DOCX to {len(images)} page images")
+            
+        except ImportError:
+            logger.error("PyMuPDF not installed - cannot render PDF pages")
+            return text_content, []
+        
+        return text_content, images
+        
+    except ImportError:
+        logger.error("mammoth not installed - cannot process DOCX")
+        return "(mammoth not installed)", []
+    except Exception as e:
+        logger.error(f"Failed to convert DOCX to PDF images: {e}")
+        return f"(Error converting DOCX: {e})", []
+
+
 def extract_zip_images(zip_path: str, password: str = "ictkerala.org", max_images: int = 10) -> List[bytes]:
     """
     Extract images from a ZIP archive for multimodal AI input.
     
-    Extracts both direct image files and renders PDF pages as images.
+    Extracts direct images, renders PDF pages, and converts DOCX to page images.
     For encrypted ZIPs, uses the known password.
     
     Args:
@@ -196,52 +286,16 @@ def extract_zip_images(zip_path: str, password: str = "ictkerala.org", max_image
     Returns:
         List of image bytes
     """
-    import zipfile
-    
-    images = []
-    
     try:
-        with zipfile.ZipFile(zip_path, 'r') as zf:
-            # Check if encrypted
-            is_encrypted = any(info.flag_bits & 0x1 for info in zf.infolist())
-            pwd = password.encode() if is_encrypted else None
-            
-            if is_encrypted:
-                try:
-                    zf.setpassword(pwd)
-                except:
-                    pass
-            
-            for info in zf.infolist():
-                if len(images) >= max_images:
-                    break
-                    
-                if info.is_dir():
-                    continue
-                    
-                ext = Path(info.filename).suffix.lower()
-                
-                try:
-                    file_bytes = zf.read(info.filename, pwd=pwd)
-                    
-                    # Direct image files
-                    if ext in ['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp']:
-                        images.append(file_bytes)
-                    
-                    # PDF files - render pages as images
-                    elif ext == '.pdf':
-                        pdf_images = extract_pdf_images(file_bytes, max_pages=3)
-                        for img in pdf_images:
-                            if len(images) < max_images:
-                                images.append(img)
-                                
-                except Exception as e:
-                    logger.debug(f"Could not extract image from {info.filename}: {e}")
-    
+        with open(zip_path, 'rb') as f:
+            zip_bytes = f.read()
+        return extract_zip_images_from_bytes(zip_bytes, password, max_images)
+    except FileNotFoundError:
+        logger.error(f"ZIP file not found: {zip_path}")
+        return []
     except Exception as e:
-        logger.error(f"Failed to extract images from ZIP: {e}")
-    
-    return images
+        logger.error(f"Failed to read ZIP file: {e}")
+        return []
 
 
 def extract_zip_listing(zip_path: str, password: str = "ictkerala.org") -> str:
@@ -249,7 +303,7 @@ def extract_zip_listing(zip_path: str, password: str = "ictkerala.org") -> str:
     Extract file listing and content from a ZIP archive for AI context.
     
     For encrypted ZIPs, uses the known password.
-    For DOCX files inside the ZIP, extracts and converts to HTML for AI evaluation.
+    For DOCX files inside the ZIP, converts to PDF for full visual content.
     
     Args:
         zip_path: Path to the ZIP file
@@ -259,94 +313,13 @@ def extract_zip_listing(zip_path: str, password: str = "ictkerala.org") -> str:
         File listing string with content, or error message if extraction fails
     """
     try:
-        import zipfile
-        import io
-        
-        with zipfile.ZipFile(zip_path, 'r') as zf:
-            # Check if encrypted
-            is_encrypted = any(info.flag_bits & 0x1 for info in zf.infolist())
-            pwd = password.encode() if is_encrypted else None
-            
-            if is_encrypted:
-                try:
-                    zf.setpassword(pwd)
-                except:
-                    pass
-            
-            file_list = []
-            content_sections = []
-            total_size = 0
-            
-            for info in zf.infolist():
-                if not info.is_dir():
-                    total_size += info.file_size
-                    size_str = f"{info.file_size / 1024:.1f} KB" if info.file_size > 0 else "—"
-                    file_list.append(f"- {info.filename} ({size_str})")
-                    
-                    # Try to extract content from known file types
-                    ext = Path(info.filename).suffix.lower()
-                    try:
-                        file_bytes = zf.read(info.filename, pwd=pwd)
-                        
-                        # DOCX files - convert to HTML with mammoth
-                        if ext in ['.docx']:
-                            try:
-                                import mammoth
-                                result = mammoth.convert_to_html(io.BytesIO(file_bytes))
-                                # Strip HTML tags for cleaner AI input
-                                import re
-                                clean_text = re.sub(r'<[^>]+>', ' ', result.value)
-                                clean_text = re.sub(r'\s+', ' ', clean_text).strip()
-                                if clean_text:
-                                    content_sections.append(f"\n--- Content of {info.filename} ---\n{clean_text[:20000]}")
-                            except Exception as e:
-                                # DOCX might be password-protected itself
-                                content_sections.append(f"\n--- {info.filename} ---\n(Could not read DOCX: {e})")
-                        
-                        # Plain text files
-                        elif ext in ['.txt', '.md', '.csv', '.log', '.py', '.js', '.html', '.css', '.json']:
-                            try:
-                                text_content = file_bytes.decode('utf-8', errors='ignore')
-                                if text_content.strip():
-                                    content_sections.append(f"\n--- Content of {info.filename} ---\n{text_content[:10000]}")
-                            except:
-                                pass
-                        
-                        # PDF files - extract text for AI context
-                        elif ext == '.pdf':
-                            pdf_text = extract_pdf_text(file_bytes, max_chars=15000)
-                            if pdf_text.startswith("("):
-                                # Error or no content message
-                                content_sections.append(f"\n--- {info.filename} ---\n{pdf_text}")
-                            else:
-                                content_sections.append(f"\n--- Content of {info.filename} (PDF) ---\n{pdf_text}")
-                        
-                        # Image files - note their presence for AI context
-                        elif ext in ['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.svg']:
-                            size_kb = len(file_bytes) / 1024
-                            content_sections.append(f"\n--- {info.filename} ---\n(Screenshot/Image file, {size_kb:.1f} KB. This is visual evidence of completed work.)")
-                        
-                    except Exception as e:
-                        logger.debug(f"Could not extract {info.filename}: {e}")
-            
-            if file_list:
-                listing = f"ZIP Archive Contents ({len(file_list)} files, {total_size / 1024:.1f} KB total):\n"
-                listing += "\n".join(file_list[:50])  # Limit to 50 files
-                if len(file_list) > 50:
-                    listing += f"\n... and {len(file_list) - 50} more files"
-                
-                # Add extracted content
-                if content_sections:
-                    listing += "\n\n" + "\n".join(content_sections)
-                
-                return listing
-            else:
-                return "(Empty ZIP archive)"
-                
-    except zipfile.BadZipFile:
-        return "(Invalid or corrupted ZIP file)"
+        with open(zip_path, 'rb') as f:
+            zip_bytes = f.read()
+        return extract_zip_listing_from_bytes(zip_bytes, password)
+    except FileNotFoundError:
+        return "(ZIP file not found)"
     except Exception as e:
-        logger.error(f"Failed to list ZIP contents: {e}")
+        logger.error(f"Failed to read ZIP file: {e}")
         return f"(Error reading ZIP: {e})"
 
 
@@ -814,10 +787,21 @@ def extract_zip_listing_from_bytes(zip_bytes: bytes, password: str = "ictkerala.
                             if text_content.strip():
                                 content_sections.append(f"\n--- Content of {info.filename} ---\n{text_content[:10000]}")
                         
+                        # DOCX files - convert to PDF pages for full visual content
+                        elif ext in ['.docx']:
+                            text_content, docx_images = convert_docx_to_pdf_images(file_bytes)
+                            if text_content:
+                                content_sections.append(f"\n--- Content of {info.filename} (Word Document, {len(docx_images)} pages rendered as images for AI) ---\n{text_content[:15000]}")
+                        
                         # PDF files
                         elif ext == '.pdf':
                             pdf_text = extract_pdf_text(file_bytes, max_chars=15000)
                             content_sections.append(f"\n--- Content of {info.filename} (PDF) ---\n{pdf_text}")
+                        
+                        # Image files - note their presence for AI context
+                        elif ext in ['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.svg']:
+                            size_kb = len(file_bytes) / 1024
+                            content_sections.append(f"\n--- {info.filename} ---\n(Screenshot/Image file, {size_kb:.1f} KB. Visual evidence of completed work.)")
                             
                     except Exception as e:
                         logger.debug(f"Could not extract {info.filename}: {e}")
@@ -874,6 +858,13 @@ def extract_zip_images_from_bytes(zip_bytes: bytes, password: str = "ictkerala.o
                     elif ext == '.pdf':
                         pdf_images = extract_pdf_images(file_bytes, max_pages=3)
                         for img in pdf_images:
+                            if len(images) < max_images:
+                                images.append(img)
+                    
+                    # DOCX files - convert to PDF and render pages as images
+                    elif ext == '.docx':
+                        _, docx_images = convert_docx_to_pdf_images(file_bytes, max_pages=5)
+                        for img in docx_images:
                             if len(images) < max_images:
                                 images.append(img)
                                 
@@ -1138,8 +1129,15 @@ If images are provided below, examine them carefully as they may contain screens
             
             contents = []
             
-            # Add images (limit to 5 to avoid token limits)
-            for i, img_bytes in enumerate(images[:5]):
+            # Get max images from config (default 10)
+            try:
+                max_images = int(get_config("max_images_for_scoring") or "10")
+            except (ValueError, TypeError):
+                max_images = 10
+            
+            # Add images up to the configured limit
+            images_to_use = images[:max_images]
+            for i, img_bytes in enumerate(images_to_use):
                 try:
                     # Create image part
                     image_part = types.Part.from_bytes(
@@ -1151,7 +1149,7 @@ If images are provided below, examine them carefully as they may contain screens
                     logger.debug(f"Failed to add image {i+1}: {e}")
             
             # Add text prompt
-            contents.append(prompt + f"\n\n(Note: {len(images[:5])} screenshot(s) are provided above - examine them for evidence of completed work)")
+            contents.append(prompt + f"\n\n(Note: {len(images_to_use)} screenshot(s) are provided above - examine them for evidence of completed work)")
             
             response = client.models.generate_content(
                 model=model,

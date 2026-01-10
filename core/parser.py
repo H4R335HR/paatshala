@@ -4,6 +4,49 @@ from bs4 import BeautifulSoup
 def text_or_none(node):
     return node.get_text(" ", strip=True) if node else ""
 
+def clean_grade_value(text):
+    """
+    Extract the grade value from a cell text.
+    Handles formats like:
+    - "12.30 / 15.00" (graded)
+    - "30.00 / 50.00" (graded, file submission)
+    - "-" (not graded)
+    - Empty string
+    
+    Returns grade value or original text. Only returns empty for actually empty input,
+    "-" (ungraded marker), or exact match on header keywords.
+    """
+    if not text:
+        return ""
+    
+    stripped = text.strip()
+    
+    # Handle not-graded marker
+    if stripped == "-":
+        return "-"
+    
+    # Filter out exact matches on table header keywords (case-insensitive)
+    if stripped.lower() in ['score', 'criterion', 'feedback', 'grade']:
+        return ""
+    
+    # Look for the grade pattern: number / number (with possible decimals)
+    # Using regex to find patterns like "12.30 / 15.00" or "30 / 50"
+    grade_pattern = re.compile(r'(\d+(?:\.\d+)?)\s*/\s*(\d+(?:\.\d+)?)')
+    match = grade_pattern.search(stripped)
+    if match:
+        # Return the full matched grade string, preserving format
+        return f"{match.group(1)} / {match.group(2)}"
+    
+    # If no grade pattern found, check if it's just a simple number
+    simple_number = re.compile(r'^(\d+(?:\.\d+)?)$')
+    simple_match = simple_number.match(stripped)
+    if simple_match:
+        return simple_match.group(1)
+    
+    # Return the original stripped text if we can't parse it
+    # This is safer than returning empty - preserves unknown formats
+    return stripped
+
 def find_table_label_value(soup, wanted_labels):
     """Scan tables for label-value pairs"""
     out = {}
@@ -115,15 +158,28 @@ def parse_grading_table(html):
         return []
     
     rows = []
-    # Detect assignment type from headers
-    assignment_type = "link" # Default
+    # Detect assignment type and column indices from headers
+    assignment_type = "link"  # Default
+    grade_col_idx = 5  # Default grade column (fallback)
+    
     thead = table.find("thead")
     if thead:
-        headers = [text_or_none(th).lower() for th in thead.find_all("th")]
+        header_ths = thead.find_all("th")
+        headers = [text_or_none(th).lower() for th in header_ths]
+        
+        # Detect assignment type
         if any("file submissions" in h for h in headers):
             assignment_type = "file"
         elif any("online text" in h for h in headers):
             assignment_type = "link"
+        
+        # Find the grade column index dynamically
+        # Look for "grade" header (but not "final grade" which is calculated differently)
+        for i, h in enumerate(headers):
+            # Match "grade" but not "final grade" - the "grade" column has the editable score
+            if h.strip().startswith("grade") and "final" not in h:
+                grade_col_idx = i
+                break
     
     tbody = table.find("tbody")
     if not tbody:
@@ -180,7 +236,7 @@ def parse_grading_table(html):
                 submissions = text_or_none(submission_cell)
         
         feedback = text_or_none(cells[11])
-        final_grade = text_or_none(cells[13])
+        final_grade = clean_grade_value(text_or_none(cells[grade_col_idx]))
         
         rows.append({
             "Name": name,

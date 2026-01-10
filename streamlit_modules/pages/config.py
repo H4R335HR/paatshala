@@ -108,6 +108,12 @@ CONFIG_SCHEMA = {
             "help": "Personal Access Token for GitHub API. Optional - increases rate limit from 60/hr to 5000/hr. Create at github.com/settings/tokens (no scopes needed for public repos)",
             "default": "",
             "type": "password"
+        },
+        "max_images_for_scoring": {
+            "label": "Max Images for AI Scoring",
+            "help": "Maximum number of images to extract from documents (DOCX, PDF, ZIP) for AI scoring. Higher = more accurate but uses more tokens. Default: 10",
+            "default": "10",
+            "type": "text"
         }
     },
     "Google Drive": {

@@ -761,8 +761,12 @@ def render_github_viewer(repo_url: str, pat: Optional[str] = None):
             width="stretch"
         )
         
-        # Handle selection
-        if event and event.selection and len(event.selection.rows) > 0:
+        # Handle selection from table (but skip if navigation happened this cycle)
+        nav_flag_key = f"gh_nav_pending_{repo_id}"
+        if st.session_state.get(nav_flag_key):
+            # Clear the flag and skip table processing
+            del st.session_state[nav_flag_key]
+        elif event and event.selection and len(event.selection.rows) > 0:
             selected_idx = event.selection.rows[0]
             selected_file = file_map.get(selected_idx)
             
@@ -787,7 +791,39 @@ def render_github_viewer(repo_url: str, pat: Optional[str] = None):
     
     selected = st.session_state.get(selected_key)
     if selected:
-        st.markdown("#### 👁️ Preview")
+        # Build list of previewable files (excluding directories) for navigation
+        file_paths = [f.get("path", f.get("name")) for f in files if f.get("type") != "dir"]
+        current_idx = file_paths.index(selected) if selected in file_paths else -1
+        total_files = len(file_paths)
+        
+        # Navigation row: Previous | Title | Next
+        nav_col1, nav_col2, nav_col3 = st.columns([1, 4, 1])
+        nav_flag_key = f"gh_nav_pending_{repo_id}"
+        
+        with nav_col1:
+            if current_idx > 0:
+                if st.button("⬅️ Previous", key=f"gh_prev_{repo_id}"):
+                    st.session_state[nav_flag_key] = True
+                    st.session_state[selected_key] = file_paths[current_idx - 1]
+                    st.rerun()
+            else:
+                st.button("⬅️ Previous", key=f"gh_prev_{repo_id}", disabled=True)
+        
+        with nav_col2:
+            if current_idx >= 0:
+                st.markdown(f"#### 👁️ Preview ({current_idx + 1}/{total_files})")
+            else:
+                st.markdown("#### 👁️ Preview")
+        
+        with nav_col3:
+            if current_idx < total_files - 1 and current_idx >= 0:
+                if st.button("Next ➡️", key=f"gh_next_{repo_id}"):
+                    st.session_state[nav_flag_key] = True
+                    st.session_state[selected_key] = file_paths[current_idx + 1]
+                    st.rerun()
+            else:
+                st.button("Next ➡️", key=f"gh_next_{repo_id}", disabled=True)
+        
         _render_file_preview(
             selected_path=selected,
             owner=owner,
