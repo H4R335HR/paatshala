@@ -15,7 +15,7 @@ from core.persistence import save_csv_to_disk, get_config
 from core.ai import generate_rubric, save_rubric, load_rubric, refine_rubric, fetch_submission_content, score_submission, save_evaluation, load_evaluation, refine_evaluation
 from streamlit_modules.ui.components import format_timestamp
 from streamlit_modules.ui.content_viewer import (
-    render_docx_viewer, render_pdf_viewer, 
+    render_docx_viewer, render_pdf_viewer, render_pdf_content,
     IMAGE_EXTENSIONS, LANGUAGE_MAP, render_code_content, render_image_content
 )
 
@@ -349,10 +349,77 @@ def _render_file_submission(course, row, idx):
         width="stretch"
     )
     
-    # Get selected file index
+    # Track selected file in session state for navigation
+    selected_key = f"file_sel_{idx}"
+    nav_flag_key = f"file_nav_pending_{idx}"
+    
+    # Get selected file index from dataframe or session state
     selected_file_idx = None
-    if event and event.selection and len(event.selection.rows) > 0:
+    
+    # Check if a navigation just happened (skip table selection in that case)
+    if st.session_state.get(nav_flag_key):
+        del st.session_state[nav_flag_key]
+        selected_file_idx = st.session_state.get(selected_key)
+    elif event and event.selection and len(event.selection.rows) > 0:
+        # User clicked on table - update session state
         selected_file_idx = event.selection.rows[0]
+        st.session_state[selected_key] = selected_file_idx
+    elif selected_key in st.session_state:
+        # Use existing session state
+        selected_file_idx = st.session_state[selected_key]
+    
+    # Ensure index is valid
+    num_files = len(submission_files)
+    if selected_file_idx is not None and selected_file_idx >= num_files:
+        selected_file_idx = num_files - 1
+        st.session_state[selected_key] = selected_file_idx
+    
+    # === Navigation buttons ===
+    if num_files > 1 and selected_file_idx is not None:
+        nav_col1, nav_col2, nav_col3 = st.columns([1, 2, 1])
+        
+        with nav_col1:
+            prev_disabled = selected_file_idx == 0
+            if st.button("◀ Previous", key=f"prev_file_{idx}", disabled=prev_disabled, use_container_width=True):
+                new_idx = selected_file_idx - 1
+                st.session_state[selected_key] = new_idx
+                st.session_state[nav_flag_key] = True
+                
+                # Check if file needs fetching
+                prev_fname, prev_furl = submission_files[new_idx]
+                prev_path = file_paths.get(new_idx)
+                if not prev_path or not Path(prev_path).exists():
+                    # Auto-fetch the file
+                    with st.spinner(f"Fetching {prev_fname}..."):
+                        session = setup_session(st.session_state.session_id)
+                        saved_path = download_file(session, prev_furl, course['id'], row.get('Name', 'Unknown'), prev_fname)
+                        if saved_path:
+                            file_paths[new_idx] = saved_path
+                
+                st.rerun()
+        
+        with nav_col2:
+            st.markdown(f"<p style='text-align:center; margin:0.5rem 0;'>📄 <b>Preview ({selected_file_idx + 1}/{num_files})</b></p>", unsafe_allow_html=True)
+        
+        with nav_col3:
+            next_disabled = selected_file_idx == num_files - 1
+            if st.button("Next ▶", key=f"next_file_{idx}", disabled=next_disabled, use_container_width=True):
+                new_idx = selected_file_idx + 1
+                st.session_state[selected_key] = new_idx
+                st.session_state[nav_flag_key] = True
+                
+                # Check if file needs fetching
+                next_fname, next_furl = submission_files[new_idx]
+                next_path = file_paths.get(new_idx)
+                if not next_path or not Path(next_path).exists():
+                    # Auto-fetch the file
+                    with st.spinner(f"Fetching {next_fname}..."):
+                        session = setup_session(st.session_state.session_id)
+                        saved_path = download_file(session, next_furl, course['id'], row.get('Name', 'Unknown'), next_fname)
+                        if saved_path:
+                            file_paths[new_idx] = saved_path
+                
+                st.rerun()
     
     # === SECTION 2: Actions & Preview ===
     if selected_file_idx is not None:
@@ -408,82 +475,8 @@ def _render_file_submission(course, row, idx):
             ext = path.suffix.lower()
             
             if ext == '.pdf':
-                # PDF viewing options
-                try:
-                    import fitz  # PyMuPDF
-                    
-                    doc = fitz.open(str(path))
-                    num_pages = len(doc)
-                    
-                    # View mode toggle - PDF.js is default
-                    view_mode = st.radio(
-                        "View mode",
-                        ["🔍 PDF.js Viewer", "📄 Rendered Pages", "📝 Text Only"],
-                        horizontal=True,
-                        key=f"pdf_view_mode_{idx}_{selected_file_idx}",
-                        label_visibility="collapsed"
-                    )
-                    
-                    if view_mode == "📄 Rendered Pages":
-                        # Render pages as images
-                        st.caption(f"📑 {num_pages} page(s)")
-                        
-                        if num_pages <= 5:
-                            for page_num in range(num_pages):
-                                page = doc[page_num]
-                                mat = fitz.Matrix(1.5, 1.5)
-                                pix = page.get_pixmap(matrix=mat)
-                                img_bytes = pix.tobytes("png")
-                                st.image(img_bytes, caption=f"Page {page_num + 1}", width="stretch")
-                        else:
-                            page_num = st.slider(
-                                "Page", 1, num_pages, 1, 
-                                key=f"pdf_page_{idx}_{selected_file_idx}"
-                            ) - 1
-                            
-                            page = doc[page_num]
-                            mat = fitz.Matrix(1.5, 1.5)
-                            pix = page.get_pixmap(matrix=mat)
-                            img_bytes = pix.tobytes("png")
-                            st.image(img_bytes, caption=f"Page {page_num + 1} of {num_pages}", width="stretch")
-                    
-                    elif view_mode == "🔍 PDF.js Viewer":
-                        # Use shared PDF viewer function
-                        doc.close()  # Close fitz doc before reading raw bytes
-                        
-                        with open(path, "rb") as f:
-                            pdf_bytes = f.read()
-                        
-                        render_pdf_viewer(pdf_bytes, fname, unique_key=f"eval_{idx}_{selected_file_idx}")
-                        
-                        # Re-open doc for page count if needed later
-                        doc = fitz.open(str(path))
-                    
-                    else:
-                        # Text-only mode
-                        from core.ai import extract_pdf_text
-                        text_content = extract_pdf_text(str(path))
-                        if text_content.startswith("(") and text_content.endswith(")"):
-                            st.warning(text_content)
-                        else:
-                            st.text_area(
-                                "Extracted Text",
-                                value=text_content,
-                                height=400,
-                                key=f"preview_text_{idx}_{selected_file_idx}",
-                                disabled=True,
-                                label_visibility="collapsed"
-                            )
-                    
-                    doc.close()
-                    
-                except ImportError:
-                    st.warning("PyMuPDF not installed - showing text only")
-                    from core.ai import extract_pdf_text
-                    text_content = extract_pdf_text(str(path))
-                    st.text_area("Extracted Text", value=text_content, height=400, disabled=True)
-                except Exception as e:
-                    st.error(f"Error rendering PDF: {e}")
+                # Use the unified PDF content viewer with all view modes
+                render_pdf_content(path, fname, unique_key=f"eval_{idx}_{selected_file_idx}")
             
             elif ext in IMAGE_EXTENSIONS:
                 render_image_content(str(path), caption=fname)

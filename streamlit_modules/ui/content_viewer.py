@@ -389,6 +389,185 @@ def render_pdf_viewer(pdf_bytes: bytes, filename: str = "document.pdf", unique_k
         st.error(f"Could not display PDF: {e}")
 
 
+def render_pdf_content(
+    pdf_source,
+    filename: str = "document.pdf",
+    unique_key: str = "",
+    show_view_modes: bool = True
+):
+    """
+    Unified PDF content viewer with multiple view modes.
+    
+    Consolidates PDF viewing across all sources (Moodle, GitHub, ZIP) with
+    consistent UI including view mode toggle.
+    
+    Args:
+        pdf_source: bytes, Path object, or file path string
+        filename: Display name for the document
+        unique_key: Unique key suffix to prevent duplicate widget errors
+        show_view_modes: Whether to show the view mode toggle (default True)
+    
+    View Modes:
+        - PDF.js Viewer: Interactive viewer with zoom, fullscreen, scrolling
+        - Rendered Pages: High-quality page images using PyMuPDF
+        - Text Only: Extracted text content
+    """
+    import tempfile
+    from pathlib import Path as PathLib
+    
+    # Normalize source to bytes and optional path
+    pdf_bytes = None
+    pdf_path = None
+    
+    if isinstance(pdf_source, bytes):
+        pdf_bytes = pdf_source
+    elif isinstance(pdf_source, (str, PathLib)):
+        pdf_path = PathLib(pdf_source)
+        if pdf_path.exists():
+            with open(pdf_path, "rb") as f:
+                pdf_bytes = f.read()
+        else:
+            st.error(f"PDF file not found: {pdf_path}")
+            return
+    else:
+        st.error("Invalid PDF source type")
+        return
+    
+    if not pdf_bytes or len(pdf_bytes) < 100:
+        st.warning("⚠️ PDF appears empty or corrupted")
+        return
+    
+    # Generate unique key for widgets
+    key_suffix = unique_key or abs(hash(pdf_bytes[:100]))
+    
+    # Check if PyMuPDF is available for advanced modes
+    try:
+        import fitz
+        has_pymupdf = True
+    except ImportError:
+        has_pymupdf = False
+    
+    # View mode selection
+    if show_view_modes and has_pymupdf:
+        view_mode = st.radio(
+            "View mode",
+            ["🔍 PDF.js Viewer", "📄 Rendered Pages", "📝 Text Only"],
+            horizontal=True,
+            key=f"pdf_view_mode_{key_suffix}",
+            label_visibility="collapsed"
+        )
+    elif show_view_modes and not has_pymupdf:
+        view_mode = st.radio(
+            "View mode",
+            ["🔍 PDF.js Viewer", "📝 Text Only"],
+            horizontal=True,
+            key=f"pdf_view_mode_{key_suffix}",
+            label_visibility="collapsed"
+        )
+    else:
+        view_mode = "🔍 PDF.js Viewer"
+    
+    # Render based on selected mode
+    if view_mode == "🔍 PDF.js Viewer":
+        render_pdf_viewer(pdf_bytes, filename, unique_key=str(key_suffix))
+    
+    elif view_mode == "📄 Rendered Pages":
+        # Use PyMuPDF to render pages as images
+        try:
+            import fitz
+            
+            # We need a file path for fitz - use temp file if we only have bytes
+            if pdf_path and pdf_path.exists():
+                doc = fitz.open(str(pdf_path))
+                temp_file = None
+            else:
+                # Create temp file for bytes
+                temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
+                temp_file.write(pdf_bytes)
+                temp_file.close()
+                doc = fitz.open(temp_file.name)
+            
+            try:
+                num_pages = len(doc)
+                st.caption(f"📑 {num_pages} page(s)")
+                
+                if num_pages <= 5:
+                    # Show all pages for short documents
+                    for page_num in range(num_pages):
+                        page = doc[page_num]
+                        mat = fitz.Matrix(1.5, 1.5)
+                        pix = page.get_pixmap(matrix=mat)
+                        img_bytes = pix.tobytes("png")
+                        st.image(img_bytes, caption=f"Page {page_num + 1}", use_container_width=True)
+                else:
+                    # Use slider for longer documents
+                    page_num = st.slider(
+                        "Page", 1, num_pages, 1,
+                        key=f"pdf_page_slider_{key_suffix}"
+                    ) - 1
+                    
+                    page = doc[page_num]
+                    mat = fitz.Matrix(1.5, 1.5)
+                    pix = page.get_pixmap(matrix=mat)
+                    img_bytes = pix.tobytes("png")
+                    st.image(img_bytes, caption=f"Page {page_num + 1} of {num_pages}", use_container_width=True)
+                
+                doc.close()
+            finally:
+                # Clean up temp file
+                if temp_file:
+                    import os
+                    try:
+                        os.unlink(temp_file.name)
+                    except:
+                        pass
+                        
+        except ImportError:
+            st.warning("PyMuPDF not installed - falling back to PDF.js viewer")
+            render_pdf_viewer(pdf_bytes, filename, unique_key=str(key_suffix))
+        except Exception as e:
+            st.error(f"Error rendering pages: {e}")
+            logger.error(f"PyMuPDF error: {e}")
+    
+    elif view_mode == "📝 Text Only":
+        # Extract text from PDF
+        try:
+            from core.ai import extract_pdf_text
+            
+            # extract_pdf_text expects a file path
+            if pdf_path and pdf_path.exists():
+                text_content = extract_pdf_text(str(pdf_path))
+            else:
+                # Create temp file for extraction
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp_file:
+                    temp_file.write(pdf_bytes)
+                    temp_path = temp_file.name
+                
+                try:
+                    text_content = extract_pdf_text(temp_path)
+                finally:
+                    import os
+                    try:
+                        os.unlink(temp_path)
+                    except:
+                        pass
+            
+            if text_content.startswith("(") and text_content.endswith(")"):
+                # Error message from extraction
+                st.warning(text_content)
+            else:
+                st.text_area(
+                    "Extracted Text",
+                    value=text_content,
+                    height=400,
+                    key=f"pdf_text_{key_suffix}",
+                    disabled=True,
+                    label_visibility="collapsed"
+                )
+        except Exception as e:
+            st.error(f"Error extracting text: {e}")
+            logger.error(f"Text extraction error: {e}")
+
 def render_docx_viewer(docx_bytes: bytes, filename: str = "document.docx", unique_key: str = ""):
     """
     DOCX content viewer using mammoth.js with document metadata display.
@@ -1079,8 +1258,8 @@ def _render_file_preview(selected_path: str, owner: str, repo: str,
                 try:
                     resp = requests.get(download_url, timeout=30)
                     if resp.status_code == 200:
-                        # Use the shared PDF viewer with bytes directly
-                        render_pdf_viewer(resp.content, filename, unique_key=f"gh_{hash(download_url)}")
+                        # Use the unified PDF content viewer with view modes
+                        render_pdf_content(resp.content, filename, unique_key=f"gh_{abs(hash(download_url))}")
                     else:
                         st.warning(f"Could not fetch PDF (HTTP {resp.status_code})")
                         st.markdown(f"[📥 Download {filename}]({download_url})")
@@ -1099,7 +1278,7 @@ def _render_file_preview(selected_path: str, owner: str, repo: str,
                     resp = requests.get(download_url, timeout=30)
                     if resp.status_code == 200:
                         # Use the shared DOCX viewer
-                        render_docx_viewer(resp.content, filename, unique_key=f"gh_{hash(download_url)}")
+                        render_docx_viewer(resp.content, filename, unique_key=f"gh_{abs(hash(download_url))}")
                     else:
                         st.warning(f"Could not fetch DOCX (HTTP {resp.status_code})")
                         st.markdown(f"[📥 Download {filename}]({download_url})")
@@ -1211,13 +1390,11 @@ def _render_file_preview(selected_path: str, owner: str, repo: str,
                                         text_content = file_content.decode('utf-8', errors='ignore')
                                         st.code(text_content, language='json')
                                     elif file_ext == '.pdf':
-                                        # Use the reusable PDF viewer for PDFs inside ZIP
+                                        # Use the unified PDF content viewer with view modes
                                         if len(file_content) < 100:
                                             st.warning(f"⚠️ PDF appears empty or corrupted ({len(file_content)} bytes)")
                                         else:
-                                            # Show size info and render
-                                            st.caption(f"📄 Loading PDF ({len(file_content) / 1024:.1f} KB)...")
-                                            render_pdf_viewer(file_content, file_name, unique_key=f"zip_{abs(hash(selected_zip_file))}")
+                                            render_pdf_content(file_content, file_name, unique_key=f"zip_{abs(hash(selected_zip_file))}")
                                     elif file_ext in ['.docx', '.doc']:
                                         # Use the reusable DOCX viewer
                                         render_docx_viewer(file_content, file_name, unique_key=f"zip_{abs(hash(selected_zip_file))}")

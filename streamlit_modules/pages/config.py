@@ -91,12 +91,7 @@ CONFIG_SCHEMA = {
         }
     },
     "AI / Gemini": {
-        "gemini_api_key": {
-            "label": "API Key",
-            "help": "Gemini API key from Google AI Studio (https://aistudio.google.com/app/apikey)",
-            "default": "",
-            "type": "password"
-        },
+        # gemini_api_keys is handled separately with custom UI
         "gemini_model": {
             "label": "Model",
             "help": "Gemini model to use (e.g., gemini-2.5-flash, gemini-2.0-flash, gemini-1.5-pro)",
@@ -113,6 +108,18 @@ CONFIG_SCHEMA = {
             "label": "Max Images for AI Scoring",
             "help": "Maximum number of images to extract from documents (DOCX, PDF, ZIP) for AI scoring. Higher = more accurate but uses more tokens. Default: 10",
             "default": "10",
+            "type": "text"
+        },
+        "github_recursive_depth": {
+            "label": "GitHub Recursive Depth",
+            "help": "How many levels deep to fetch subdirectory contents from GitHub repos. Default: 5",
+            "default": "5",
+            "type": "text"
+        },
+        "max_image_dimension": {
+            "label": "Max Image Dimension",
+            "help": "Resize images larger than this (in pixels) before sending to AI. Smaller = fewer tokens. 0 = no resizing. Default: 800",
+            "default": "800",
             "type": "text"
         }
     },
@@ -160,6 +167,74 @@ def render_config_page():
     
     # Track changes
     changes = {}
+    
+    # === Custom API Keys Section ===
+    with st.expander("**🔑 Gemini API Keys**", expanded=True):
+        st.caption("Keys are tried in order. Falls back to next on quota/rate-limit errors.")
+        
+        # Load existing keys from config
+        import json
+        api_keys_json = current_config.get("gemini_api_keys", "[]")
+        try:
+            api_keys = json.loads(api_keys_json) if api_keys_json else []
+        except:
+            api_keys = []
+        
+        # Migrate from old single key format
+        if not api_keys and current_config.get("gemini_api_key"):
+            api_keys = [{"name": "Default", "key": current_config.get("gemini_api_key")}]
+        
+        # Initialize session state for keys
+        if "temp_api_keys" not in st.session_state:
+            st.session_state.temp_api_keys = api_keys.copy()
+        
+        # Display existing keys
+        keys_to_remove = []
+        for i, key_info in enumerate(st.session_state.temp_api_keys):
+            col1, col2, col3 = st.columns([2, 4, 1])
+            with col1:
+                new_name = st.text_input(
+                    "Name", 
+                    value=key_info.get("name", f"Key {i+1}"),
+                    key=f"api_key_name_{i}",
+                    label_visibility="collapsed",
+                    placeholder="Key name"
+                )
+                st.session_state.temp_api_keys[i]["name"] = new_name
+            with col2:
+                # Show masked key with option to update
+                current_key = key_info.get("key", "")
+                masked = f"{current_key[:10]}...{current_key[-4:]}" if len(current_key) > 14 else "****"
+                new_key = st.text_input(
+                    "Key",
+                    value="",
+                    type="password",
+                    key=f"api_key_value_{i}",
+                    label_visibility="collapsed",
+                    placeholder=f"🔒 {masked} (enter to change)"
+                )
+                if new_key:
+                    st.session_state.temp_api_keys[i]["key"] = new_key
+            with col3:
+                if st.button("🗑️", key=f"remove_key_{i}"):
+                    keys_to_remove.append(i)
+        
+        # Remove marked keys
+        for i in reversed(keys_to_remove):
+            st.session_state.temp_api_keys.pop(i)
+            st.rerun()
+        
+        # Add new key button
+        if st.button("➕ Add API Key"):
+            st.session_state.temp_api_keys.append({"name": f"Key {len(st.session_state.temp_api_keys) + 1}", "key": ""})
+            st.rerun()
+        
+        # Track API key changes for unified save
+        valid_keys = [k for k in st.session_state.temp_api_keys if k.get("key")]
+        current_keys_json = json.dumps(valid_keys)
+        saved_keys_json = current_config.get("gemini_api_keys", "[]")
+        if current_keys_json != saved_keys_json:
+            changes["gemini_api_keys"] = current_keys_json
     
     # Render each category
     for category, settings in CONFIG_SCHEMA.items():

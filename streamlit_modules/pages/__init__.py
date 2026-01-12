@@ -12,6 +12,7 @@ from .feedback import render_feedback_tab
 from .tryhackme import render_tryhackme_tab
 from .quizizz import render_quizizz_tab
 from .video_importer import render_video_importer_tab
+from .ai_debug import render_ai_debug_tab
 
 __all__ = [
     'render_tasks_tab',
@@ -22,6 +23,7 @@ __all__ = [
     'render_feedback_tab',
     'render_tryhackme_tab',
     'render_quizizz_tab',
-    'render_video_importer_tab'
+    'render_video_importer_tab',
+    'render_ai_debug_tab'
 ]
 

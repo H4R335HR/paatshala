@@ -1569,6 +1569,56 @@ def fetch_submissions(session_id, module_id, group_id=None):
         return [], None
 
 
+def fetch_full_feedback(session_id, module_id, user_id):
+    """
+    Fetch the complete feedback comment for a student from the grade form.
+    
+    The grading table shows truncated feedback. This function fetches the 
+    grade form page which contains the full feedback in the editor textarea.
+    
+    Args:
+        session_id: Moodle session cookie
+        module_id: Assignment module ID (cmid)
+        user_id: The Moodle user ID of the student
+    
+    Returns:
+        dict: {
+            'success': bool,
+            'feedback': str (full feedback text),
+            'feedback_html': str (HTML formatted feedback if available),
+            'error': str or None
+        }
+    """
+    session = setup_session(session_id)
+    
+    try:
+        # Fetch the grade form URL which renders server-side with feedback populated
+        grade_url = f"{BASE}/mod/assign/view.php?id={module_id}&action=grade&rownum=0&userid={user_id}"
+        
+        resp = session.get(grade_url, timeout=30)
+        if not resp.ok:
+            logger.error(f"Failed to fetch grade form: {resp.status_code}")
+            return {'success': False, 'feedback': '', 'feedback_html': '', 'error': f"HTTP {resp.status_code}"}
+        
+        soup = BeautifulSoup(resp.text, "html.parser")
+        
+        # The form contains a textarea with the feedback HTML
+        editor_textarea = soup.find("textarea", {"name": re.compile(r"assignfeedbackcomments_editor\[text\]", re.I)})
+        if editor_textarea:
+            feedback_html = editor_textarea.get_text()
+            if feedback_html.strip():
+                feedback_text = BeautifulSoup(feedback_html, "html.parser").get_text(" ", strip=True)
+                logger.info(f"Got feedback from grade form for user {user_id} ({len(feedback_text)} chars)")
+                return {'success': True, 'feedback': feedback_text, 'feedback_html': feedback_html, 'error': None}
+        
+        logger.info(f"No feedback found for user {user_id}")
+        return {'success': True, 'feedback': '', 'feedback_html': '', 'error': None}
+            
+    except Exception as e:
+        logger.error(f"Error fetching full feedback: {e}")
+        return {'success': False, 'feedback': '', 'feedback_html': '', 'error': str(e)}
+
+
 
 def submit_grade(session, assignment_id, user_id, module_id, grade, feedback_html, sesskey):
     """

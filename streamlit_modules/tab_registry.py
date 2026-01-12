@@ -68,13 +68,20 @@ TAB_REGISTRY = {
         'module': 'streamlit_modules.pages',
         'function': 'render_video_importer_tab',
     },
+    'ai_debug': {
+        'id': 'ai_debug',
+        'name': '🔬 AI Debug',
+        'description': 'AI request/response logs for debugging',
+        'module': 'streamlit_modules.pages',
+        'function': 'render_ai_debug_tab',
+    },
 }
 
 # Default tabs to enable on first run
 DEFAULT_ENABLED_TABS = ['tasks', 'quiz', 'submissions', 'evaluation']
 
 # Tab order (for consistent display)
-TAB_ORDER = ['tasks', 'quiz', 'submissions', 'evaluation', 'workshops', 'feedback', 'tryhackme', 'quizizz', 'video_importer']
+TAB_ORDER = ['tasks', 'quiz', 'submissions', 'evaluation', 'workshops', 'feedback', 'tryhackme', 'quizizz', 'video_importer', 'ai_debug']
 
 
 def get_all_tab_ids():

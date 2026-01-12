@@ -7,7 +7,7 @@ import logging
 from datetime import datetime, timedelta
 import streamlit as st
 
-from core.api import fetch_submissions, fetch_tasks_list, get_assignment_dates, update_assignment_dates, clean_name
+from core.api import fetch_submissions, fetch_tasks_list, get_assignment_dates, update_assignment_dates, clean_name, fetch_full_feedback
 from core.auth import setup_session
 from core.persistence import (
     load_csv_from_disk, save_csv_to_disk, 
@@ -362,11 +362,100 @@ def render_submissions_tab(course, meta):
                 if 'Name' in df.columns:
                     df['Name'] = df['Name'].apply(clean_name)
                 
-                st.dataframe(
+                # Add selection capability to dataframe
+                selection = st.dataframe(
                     df,
                     width="stretch",
-                    hide_index=True
+                    hide_index=True,
+                    selection_mode="single-row",
+                    on_select="rerun",
+                    key=f"submissions_table_{module_id}_{selected_group_id}"
                 )
+                
+                # Check if a row is selected and show dialog
+                if selection and selection.selection and selection.selection.rows:
+                    selected_idx = selection.selection.rows[0]
+                    selected_row = display_data[selected_idx]
+                    
+                    @st.dialog("Submission Details", width="large")
+                    def show_feedback_dialog(row, mod_id):
+                        st.markdown(f"**Student:** {row.get('Name', 'N/A')}")
+                        st.markdown(f"**Email:** {row.get('Email', 'N/A')}")
+                        st.markdown(f"**Status:** {row.get('Status', 'N/A')}")
+                        st.markdown(f"**Final Grade:** {row.get('Final Grade', 'N/A')}")
+                        st.divider()
+                        st.markdown("**Feedback Comments:**")
+                        
+                        # Fetch full feedback from grader page (table data is truncated)
+                        user_id = row.get('User_ID')
+                        if user_id and st.session_state.get('session_id'):
+                            with st.spinner("Loading full feedback..."):
+                                result = fetch_full_feedback(
+                                    st.session_state.session_id, 
+                                    mod_id, 
+                                    user_id
+                                )
+                            
+                            if result['success'] and result['feedback_html']:
+                                # Render HTML feedback with styling for better presentation
+                                html_content = f"""
+                                <div style="
+                                    max-height: 400px; 
+                                    overflow-y: auto; 
+                                    padding: 15px; 
+                                    background-color: rgba(255,255,255,0.05); 
+                                    border: 1px solid rgba(255,255,255,0.1); 
+                                    border-radius: 8px;
+                                    font-size: 14px;
+                                    line-height: 1.6;
+                                ">
+                                    {result['feedback_html']}
+                                </div>
+                                <style>
+                                    /* Style tables in feedback */
+                                    div[data-testid="stMarkdown"] table {{
+                                        border-collapse: collapse;
+                                        width: 100%;
+                                        margin: 10px 0;
+                                    }}
+                                    div[data-testid="stMarkdown"] th,
+                                    div[data-testid="stMarkdown"] td {{
+                                        border: 1px solid rgba(255,255,255,0.2);
+                                        padding: 8px 12px;
+                                        text-align: left;
+                                    }}
+                                    div[data-testid="stMarkdown"] th {{
+                                        background-color: rgba(255,255,255,0.1);
+                                        font-weight: bold;
+                                    }}
+                                    div[data-testid="stMarkdown"] tr:nth-child(even) {{
+                                        background-color: rgba(255,255,255,0.02);
+                                    }}
+                                </style>
+                                """
+                                st.markdown(html_content, unsafe_allow_html=True)
+                            elif result['success'] and result['feedback']:
+                                # Plain text fallback
+                                st.text_area("Feedback", value=result['feedback'], height=300, disabled=True, label_visibility="collapsed")
+                            elif result['error']:
+                                st.error(f"Failed to load feedback: {result['error']}")
+                                # Fallback: show truncated feedback from table
+                                fallback = row.get('Feedback Comments', '')
+                                if fallback:
+                                    st.caption("Showing cached (truncated) feedback:")
+                                    st.text_area("Feedback", value=fallback, height=150, disabled=True, label_visibility="collapsed")
+                            else:
+                                st.info("No feedback comments available.")
+                        else:
+                            # Fallback: show truncated feedback from table if no User_ID
+                            feedback = row.get('Feedback Comments', '')
+                            if feedback:
+                                st.caption("⚠️ Showing cached feedback (may be truncated):")
+                                st.text_area("Feedback", value=feedback, height=300, disabled=True, label_visibility="collapsed")
+                            else:
+                                st.info("No feedback comments available.")
+                    
+                    show_feedback_dialog(selected_row, module_id)
                 
                 csv_data = dataframe_to_csv(display_data)
                 st.download_button(
