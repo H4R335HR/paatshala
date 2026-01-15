@@ -4,6 +4,7 @@ Handles submission evaluation and detailed analysis.
 """
 
 import logging
+import time
 from pathlib import Path
 import pandas as pd
 import streamlit as st
@@ -16,7 +17,8 @@ from core.ai import generate_rubric, save_rubric, load_rubric, refine_rubric, fe
 from streamlit_modules.ui.components import format_timestamp
 from streamlit_modules.ui.content_viewer import (
     render_docx_viewer, render_pdf_viewer, render_pdf_content,
-    IMAGE_EXTENSIONS, LANGUAGE_MAP, render_code_content, render_image_content
+    IMAGE_EXTENSIONS, LANGUAGE_MAP, render_code_content, render_image_content,
+    detect_file_type
 )
 
 logger = logging.getLogger(__name__)
@@ -122,12 +124,32 @@ def render_evaluation_tab(course, meta):
         for col in ["Link", "Valid?", "Fork?"]:
             cols_config[col] = None
     
+    # Get module_id and group_id for loading AI scores
+    module_id = data[0].get('Module ID') if data else None
+    selected_group_id = st.session_state.selected_group['id'] if st.session_state.selected_group else None
+    
     with table_placeholder:
         display_df = pd.DataFrame(get_display_dataframe(data))
+        
+        # Add AI Score column by loading saved evaluations
+        if module_id:
+            ai_scores = []
+            for row in data:
+                student_name = row.get('Name', 'Unknown')
+                existing_eval = load_evaluation(course['id'], module_id, student_name, selected_group_id)
+                if existing_eval and existing_eval.get('total_score') is not None:
+                    ai_scores.append(f"{existing_eval['total_score']}%")
+                else:
+                    ai_scores.append("-")
+            display_df.insert(2, "AI Score", ai_scores)  # Insert after Status column
+        
         if assignment_type == 'file':
             # Remove columns from display DF
             cols_to_drop = [c for c in ["Link", "Valid?", "Repo Status", "Fork?"] if c in display_df.columns]
             display_df = display_df.drop(columns=cols_to_drop)
+        
+        # Add column config for AI Score
+        cols_config["AI Score"] = st.column_config.TextColumn("AI Score", width="small")
         
         event = st.dataframe(
             display_df,
@@ -549,7 +571,24 @@ def _render_file_submission(course, row, idx):
                     st.info(f"📦 {ext.upper()} archive - extraction not supported, use Download button")
             
             else:
-                st.info(f"📦 Binary file ({ext}) - use Download button to view")
+                # Unknown extension - try magic byte detection
+                with open(path, 'rb') as f:
+                    file_bytes = f.read()
+                
+                detected_type = detect_file_type(file_bytes)
+                
+                if detected_type == '.pdf':
+                    render_pdf_content(file_bytes, fname, unique_key=f"eval_magic_{idx}_{selected_file_idx}")
+                elif detected_type in IMAGE_EXTENSIONS:
+                    render_image_content(file_bytes, caption=fname)
+                elif detected_type in ['.docx', '.doc']:
+                    render_docx_viewer(file_bytes, fname, unique_key=f"eval_magic_{idx}_{selected_file_idx}")
+                elif detected_type == '.txt':
+                    # Detected as text
+                    text_content = file_bytes.decode('utf-8', errors='ignore')
+                    render_code_content(text_content, fname)
+                else:
+                    st.info(f"📦 Binary file ({ext}) - use Download button to view")
         
         else:
             # File not fetched yet
@@ -758,6 +797,19 @@ def _render_rubric_section(course, data):
             # Refine dialog
             if refine_btn:
                 _show_refine_dialog(rubric_key, edited_df.to_dict('records'), task_description, module_id)
+            
+            # Batch Score button
+            st.divider()
+            col_batch1, col_batch2, col_batch3 = st.columns(3)
+            with col_batch1:
+                if st.button("🎯 Batch Score with AI", width="stretch", help="Score all pending submissions with AI using this rubric"):
+                    _perform_batch_scoring(course, data, edited_df.to_dict('records'), module_id, selected_group_id)
+            with col_batch2:
+                if st.button("📤 Batch Submit to Moodle", width="stretch", help="Submit all AI-scored evaluations to Moodle"):
+                    _perform_batch_submit_to_moodle(course, data, module_id, selected_group_id)
+            with col_batch3:
+                if st.button("🗑️ Clear AI Scores", width="stretch", help="Delete all saved AI scores for this assignment"):
+                    _clear_ai_scores(course, data, module_id, selected_group_id)
         
         # Show task description for reference
         with st.expander("📝 Task Description (Reference)", expanded=False):
@@ -844,19 +896,37 @@ def _render_ai_scoring_section(course, row, idx, data):
     existing_eval = load_evaluation(course['id'], module_id, student_name, selected_group_id)
     
     # Get max grade for this task (needed for display and restore)
-    max_grade = 15  # Default
+    max_grade = None
+    max_grade_source = None
+    
+    # First, try to get from tasks_data (most reliable)
     if st.session_state.tasks_data:
         for task in st.session_state.tasks_data:
             if str(task.get('Module ID')) == str(module_id):
-                max_grade_str = task.get('Max Grade', '15')
-                try:
-                    max_grade = float(max_grade_str.replace('/100.00', '').strip())
-                except:
-                    max_grade = 15
+                max_grade_str = task.get('Max Grade', '')
+                if max_grade_str:
+                    try:
+                        max_grade = float(max_grade_str.replace('/100.00', '').strip())
+                        max_grade_source = 'tasks_data'
+                    except:
+                        pass
                 break
     
-    # Get Moodle grade from row data (already fetched by parse_grading_table)
+    # Fallback: Try to extract from Moodle grade string (e.g., "12.5 / 15.00")
     moodle_grade = row.get('Final Grade', '')
+    if max_grade is None and moodle_grade:
+        _, moodle_max = _parse_moodle_grade(moodle_grade)
+        if moodle_max:
+            max_grade = moodle_max
+            max_grade_source = 'moodle_grade'
+    
+    # Final fallback with warning
+    if max_grade is None:
+        max_grade = 15
+        max_grade_source = 'default'
+        logger.warning(f"Using default max_grade=15 for module {module_id}. Consider fetching tasks first.")
+    
+    # Get Moodle feedback from row data
     moodle_feedback = row.get('Feedback Comments', '')
     
     # Check for pending rescore result
@@ -963,7 +1033,7 @@ def _render_ai_scoring_section(course, row, idx, data):
         
         if submit_btn:
             with st.spinner("Submitting to Moodle..."):
-                _submit_to_moodle(course, row, existing_eval, max_grade)
+                _submit_to_moodle(course, row, existing_eval, max_grade, max_grade_source)
     else:
         # No AI evaluation yet - show Moodle status if available
         moodle_score, moodle_max = _parse_moodle_grade(moodle_grade)
@@ -1016,6 +1086,292 @@ def _render_ai_scoring_section(course, row, idx, data):
             else:
                 st.caption(f"Using {len(rubric)} criteria")
 
+
+def _perform_batch_scoring(course, data, rubric, module_id, group_id):
+    """Perform AI scoring on all pending submissions sequentially.
+    
+    Args:
+        course: Course dict with 'id'
+        data: List of submission rows
+        rubric: List of rubric criteria dicts
+        module_id: Module ID for the assignment
+        group_id: Optional group ID for batch-specific rubrics
+    """
+    # Get task description for scoring context
+    task_description = _get_task_description(module_id)
+    
+    if not task_description:
+        st.warning("⚠️ Task description not available. Fetch tasks in Submissions tab first.")
+        return
+    
+    # Filter to students without AI evaluation
+    pending = []
+    for i, row in enumerate(data):
+        student_name = row.get('Name', 'Unknown')
+        existing_eval = load_evaluation(course['id'], module_id, student_name, group_id)
+        if not existing_eval or existing_eval.get('total_score') is None:
+            pending.append((i, row))
+    
+    if not pending:
+        st.info("✅ All submissions already have AI scores.")
+        return
+    
+    # Progress tracking
+    progress_bar = st.progress(0, text=f"Scoring 0/{len(pending)} submissions...")
+    status_text = st.empty()
+    results = {'scored': 0, 'failed': 0, 'skipped': 0}
+    
+    for idx, (i, row) in enumerate(pending):
+        student_name = row.get('Name', 'Unknown')
+        
+        # Update progress
+        progress_bar.progress((idx) / len(pending), 
+                             text=f"Scoring {idx + 1}/{len(pending)}: {student_name}...")
+        
+        try:
+            # Fetch submission content (same as individual scoring)
+            submission_content = fetch_submission_content(row, course['id'])
+            
+            if submission_content.get('error'):
+                status_text.caption(f"⚠️ {student_name}: {submission_content['error']}")
+            
+            # Add deadline info if available
+            dates_key = f"dates_info_{module_id}"
+            if dates_key in st.session_state and st.session_state[dates_key]:
+                dates_info = st.session_state[dates_key]
+                if dates_info.get('due_date_enabled') and dates_info.get('due_date'):
+                    due_date = dates_info['due_date']
+                    submission_content['deadline'] = due_date.strftime('%A, %d %B %Y, %I:%M %p')
+                    
+                    # Check if on time
+                    last_modified = row.get('Last Modified', '')
+                    if last_modified:
+                        from datetime import datetime
+                        try:
+                            sub_time = datetime.strptime(last_modified, "%A, %d %B %Y, %I:%M %p")
+                            submission_content['on_time'] = sub_time <= due_date
+                        except ValueError:
+                            pass
+            
+            # Score with AI - with retry logic for transient errors
+            max_retries = 3
+            retry_delay = 3  # Start with 3 seconds
+            result = None
+            
+            for attempt in range(max_retries):
+                result = score_submission(
+                    submission_content,
+                    rubric,
+                    task_description,
+                    student_name
+                )
+                
+                # Check for transient errors that should be retried
+                if result and result.get('error'):
+                    error_msg = str(result.get('error', '')).lower()
+                    is_transient = any(x in error_msg for x in ['503', 'overloaded', 'unavailable', '429', 'rate'])
+                    
+                    if is_transient and attempt < max_retries - 1:
+                        status_text.caption(f"⏳ {student_name}: API busy, retrying in {retry_delay}s... (attempt {attempt + 1}/{max_retries})")
+                        time.sleep(retry_delay)
+                        retry_delay *= 2  # Exponential backoff
+                        continue
+                
+                break  # Success or non-transient error, exit retry loop
+            
+            if result and result.get('error'):
+                status_text.caption(f"❌ {student_name}: {result['error']}")
+                results['failed'] += 1
+            elif result:
+                # Save evaluation
+                save_evaluation(course['id'], module_id, student_name, result, group_id)
+                status_text.caption(f"✓ {student_name}: {result['total_score']}/100")
+                results['scored'] += 1
+            else:
+                results['failed'] += 1
+        
+        except Exception as e:
+            logger.error(f"Error scoring {student_name}: {e}")
+            status_text.caption(f"❌ {student_name}: Error - {str(e)[:50]}")
+            results['failed'] += 1
+        
+        # Small delay between API calls to avoid rate limiting
+        if idx < len(pending) - 1:  # Don't delay after last item
+            time.sleep(1.5)
+    
+    # Complete progress bar
+    progress_bar.progress(1.0, text="Batch scoring complete!")
+    
+    # Show completion notification (toast)
+    st.toast(f"🎯 Batch scoring complete: {results['scored']} scored, {results['failed']} failed", icon="✅")
+    
+    # Show summary
+    if results['failed'] == 0:
+        st.success(f"✅ Batch scoring complete! Scored {results['scored']} submissions.")
+    else:
+        st.warning(f"⚠️ Batch scoring complete: {results['scored']} scored, {results['failed']} failed.")
+    
+    # Trigger rerun to refresh the UI with new scores
+    st.rerun()
+
+
+def _perform_batch_submit_to_moodle(course, data, module_id, group_id):
+    """Submit all AI-scored evaluations to Moodle in batch.
+    
+    Args:
+        course: Course dict with 'id'
+        data: List of submission rows
+        module_id: Module ID for the assignment
+        group_id: Optional group ID for batch-specific evaluations
+    """
+    from core.api import submit_grade, get_fresh_sesskey, setup_session
+    
+    # Get max grade for this task
+    max_grade = 15  # Default
+    if st.session_state.tasks_data:
+        for task in st.session_state.tasks_data:
+            if str(task.get('Module ID')) == str(module_id):
+                max_grade_str = task.get('Max Grade', '')
+                if max_grade_str:
+                    try:
+                        max_grade = float(max_grade_str.replace('/100.00', '').strip())
+                    except:
+                        pass
+                break
+    
+    # Get assignment ID
+    assignment_id = st.session_state.get(f"assignment_id_{module_id}")
+    if not assignment_id:
+        st.error(f"❌ Assignment ID not available for module {module_id}. Please re-fetch submissions.")
+        return
+    
+    # Get session and sesskey
+    session = setup_session(st.session_state.session_id)
+    sesskey = get_fresh_sesskey(session, course['id'])
+    if not sesskey:
+        st.error("❌ Could not get session key. Please try again.")
+        return
+    
+    # Filter to students with AI evaluation that haven't been submitted yet
+    pending = []
+    for i, row in enumerate(data):
+        student_name = row.get('Name', 'Unknown')
+        existing_eval = load_evaluation(course['id'], module_id, student_name, group_id)
+        
+        if existing_eval and existing_eval.get('total_score') is not None:
+            # Has AI score - check if already submitted to Moodle
+            moodle_grade = row.get('Final Grade', '')
+            ai_score = existing_eval.get('total_score', 0)
+            scaled_ai = round((ai_score / 100) * max_grade)
+            
+            # Parse Moodle grade to compare
+            moodle_score, _ = _parse_moodle_grade(moodle_grade)
+            
+            # Submit if Moodle grade is missing or different from AI score
+            if moodle_score is None or abs(moodle_score - scaled_ai) >= 0.5:
+                pending.append((i, row, existing_eval))
+    
+    if not pending:
+        st.info("✅ All AI-scored evaluations are already submitted to Moodle.")
+        return
+    
+    # Progress tracking
+    progress_bar = st.progress(0, text=f"Submitting 0/{len(pending)} to Moodle...")
+    status_text = st.empty()
+    results = {'submitted': 0, 'failed': 0}
+    
+    for idx, (i, row, evaluation) in enumerate(pending):
+        student_name = row.get('Name', 'Unknown')
+        user_id = row.get('User_ID')
+        
+        # Update progress
+        progress_bar.progress((idx) / len(pending), 
+                             text=f"Submitting {idx + 1}/{len(pending)}: {student_name}...")
+        
+        if not user_id:
+            status_text.caption(f"⚠️ {student_name}: No user ID")
+            results['failed'] += 1
+            continue
+        
+        try:
+            # Calculate scaled grade
+            total_score = evaluation.get('total_score', 0)
+            scaled_grade = round((total_score / 100) * max_grade)
+            
+            # Format feedback as HTML
+            feedback_html = _format_feedback_html(evaluation)
+            
+            # Submit grade
+            result = submit_grade(
+                session,
+                assignment_id,
+                user_id,
+                module_id,
+                scaled_grade,
+                feedback_html,
+                sesskey
+            )
+            
+            if result['success']:
+                status_text.caption(f"✓ {student_name}: {scaled_grade}/{int(max_grade)}")
+                results['submitted'] += 1
+            else:
+                status_text.caption(f"❌ {student_name}: {result.get('error', 'Unknown error')[:50]}")
+                results['failed'] += 1
+        
+        except Exception as e:
+            logger.error(f"Error submitting {student_name}: {e}")
+            status_text.caption(f"❌ {student_name}: Error - {str(e)[:50]}")
+            results['failed'] += 1
+        
+        # Small delay between submissions
+        if idx < len(pending) - 1:
+            time.sleep(0.5)
+    
+    # Complete progress bar
+    progress_bar.progress(1.0, text="Batch submission complete!")
+    
+    # Show completion notification (toast)
+    st.toast(f"📤 Batch submission complete: {results['submitted']} submitted, {results['failed']} failed", icon="✅")
+    
+    # Show summary
+    if results['failed'] == 0:
+        st.success(f"✅ Batch submission complete! Submitted {results['submitted']} evaluations to Moodle.")
+    else:
+        st.warning(f"⚠️ Batch submission complete: {results['submitted']} submitted, {results['failed']} failed.")
+    
+    # Trigger rerun to refresh the UI
+    st.rerun()
+
+
+def _clear_ai_scores(course, data, module_id, group_id):
+    """Clear all saved AI evaluations for the current module.
+    
+    Args:
+        course: Course dict with 'id'
+        data: List of submission rows
+        module_id: Module ID for the assignment
+        group_id: Optional group ID for batch-specific evaluations
+    """
+    from core.ai import delete_evaluation
+    
+    cleared_count = 0
+    
+    for row in data:
+        student_name = row.get('Name', 'Unknown')
+        # Check if evaluation exists before trying to delete
+        existing_eval = load_evaluation(course['id'], module_id, student_name, group_id)
+        if existing_eval and existing_eval.get('total_score') is not None:
+            if delete_evaluation(course['id'], module_id, student_name, group_id):
+                cleared_count += 1
+    
+    if cleared_count > 0:
+        st.success(f"✅ Cleared {cleared_count} AI score(s).")
+        st.toast(f"🗑️ Cleared {cleared_count} AI scores", icon="✅")
+    else:
+        st.info("ℹ️ No AI scores to clear.")
+    
+    st.rerun()
 
 def _get_task_description(module_id):
     """Get task description from session state tasks data."""
@@ -1219,9 +1575,13 @@ def _format_feedback_html(evaluation):
     return "".join(html_parts)
 
 
-def _submit_to_moodle(course, row, evaluation, max_grade):
+def _submit_to_moodle(course, row, evaluation, max_grade, max_grade_source='unknown'):
     """Submit grade and feedback to Moodle."""
     import html
+    
+    # Warn user if using default max grade
+    if max_grade_source == 'default':
+        st.warning(f"⚠️ Using default max grade of {max_grade}. For accuracy, fetch tasks in Submissions tab first.")
     
     # Check required data
     module_id = row.get('Module ID')
@@ -1245,7 +1605,7 @@ def _submit_to_moodle(course, row, evaluation, max_grade):
     # Calculate scaled grade
     total_score = evaluation.get('total_score', 0)
     scaled_grade = (total_score / 100) * max_grade
-    scaled_grade = round(scaled_grade, 2)
+    scaled_grade = round(scaled_grade)  # Round to nearest whole number
     
     # Format feedback as HTML
     feedback_html = _format_feedback_html(evaluation)

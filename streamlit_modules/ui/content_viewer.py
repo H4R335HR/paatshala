@@ -69,6 +69,48 @@ TEXT_EXTENSIONS = ['.txt', '.log', '.csv', '.md']
 ARCHIVE_EXTENSIONS = ['.zip', '.7z', '.rar', '.tar', '.gz']
 
 
+def detect_file_type(data: bytes) -> Optional[str]:
+    """
+    Detect file type from magic bytes using the filetype library.
+    
+    Returns the detected extension (e.g., '.pdf', '.png') or None if unknown.
+    Falls back to checking if content is mostly printable text.
+    
+    Args:
+        data: File content as bytes (at least first 261 bytes needed)
+    
+    Returns:
+        Extension string like '.pdf' or '.txt', or None for binary files
+    """
+    try:
+        import filetype
+        
+        # Try magic byte detection
+        kind = filetype.guess(data)
+        if kind is not None:
+            return f'.{kind.extension}'
+        
+        # Not a known binary format - check if it's text
+        try:
+            # Try to decode as UTF-8
+            sample = data[:4096] if len(data) > 4096 else data
+            text = sample.decode('utf-8')
+            
+            # Check if mostly printable (>90% printable chars)
+            if text and len(text) > 0:
+                printable_ratio = sum(c.isprintable() or c in '\n\r\t' for c in text) / len(text)
+                if printable_ratio > 0.9:
+                    return '.txt'  # Treat as text
+        except UnicodeDecodeError:
+            pass
+        
+        return None  # Unknown binary
+        
+    except ImportError:
+        logger.warning("filetype library not installed - falling back to extension-based detection")
+        return None
+
+
 # ============================================================================
 # SHARED CONTENT RENDERING HELPERS
 # ============================================================================
@@ -1399,15 +1441,21 @@ def _render_file_preview(selected_path: str, owner: str, repo: str,
                                         # Use the reusable DOCX viewer
                                         render_docx_viewer(file_content, file_name, unique_key=f"zip_{abs(hash(selected_zip_file))}")
                                     else:
-                                        # Try to display as text for files without extension or unknown types
-                                        try:
-                                            text_content = file_content.decode('utf-8')
-                                            # Check if it looks like text (mostly printable)
-                                            if text_content and sum(c.isprintable() or c in '\n\r\t' for c in text_content) / len(text_content) > 0.9:
-                                                st.code(text_content[:50000], language=None)
-                                            else:
-                                                st.info(f"📦 Binary file ({file_type_str}) - cannot display inline")
-                                        except UnicodeDecodeError:
+                                        # Unknown extension - try magic byte detection
+                                        detected_type = detect_file_type(file_content)
+                                        
+                                        if detected_type == '.pdf':
+                                            render_pdf_content(file_content, file_name, unique_key=f"zip_magic_{abs(hash(selected_zip_file))}")
+                                        elif detected_type in IMAGE_EXTENSIONS:
+                                            render_image_content(file_content, caption=file_name)
+                                        elif detected_type in ['.docx', '.doc']:
+                                            render_docx_viewer(file_content, file_name, unique_key=f"zip_magic_{abs(hash(selected_zip_file))}")
+                                        elif detected_type == '.txt':
+                                            # Detected as text
+                                            text_content = file_content.decode('utf-8', errors='ignore')
+                                            st.code(text_content[:50000], language=None)
+                                        else:
+                                            # Unknown binary
                                             st.info(f"📦 Binary file ({file_type_str}) - cannot display inline")
                                 except Exception as e:
                                     st.error(f"❌ Error reading file: {e}")
@@ -1480,13 +1528,50 @@ def _render_file_preview(selected_path: str, owner: str, repo: str,
             if download_url:
                 st.markdown(f"[📥 Download {filename}]({download_url})")
     else:
-        # For other binary files, don't show garbled content
-        if content and not content.isprintable():
-            st.info(f"📦 Binary file ({file_type}) - download to view")
-            if download_url:
-                st.markdown(f"[📥 Download {filename}]({download_url})")
+        # Unknown extension - try magic byte detection
+        if download_url:
+            import requests
+            
+            try:
+                resp = requests.get(download_url, timeout=30)
+                if resp.status_code == 200:
+                    raw_bytes = resp.content
+                    detected_type = detect_file_type(raw_bytes)
+                    
+                    if detected_type == '.pdf':
+                        render_pdf_content(raw_bytes, filename, unique_key=f"gh_magic_{abs(hash(download_url))}")
+                    elif detected_type in IMAGE_EXTENSIONS:
+                        render_image_content(raw_bytes, caption=filename)
+                    elif detected_type in ['.docx', '.doc']:
+                        render_docx_viewer(raw_bytes, filename, unique_key=f"gh_magic_{abs(hash(download_url))}")
+                    elif detected_type in ['.zip']:
+                        st.info("📦 Detected ZIP archive - download to view contents")
+                        st.markdown(f"[📥 Download {filename}]({download_url})")
+                    elif detected_type == '.txt':
+                        # Detected as text - display as code
+                        text_content = raw_bytes.decode('utf-8', errors='ignore')
+                        st.code(text_content[:50000], language=None)
+                    else:
+                        # Unknown binary
+                        st.info(f"📦 Binary file ({file_type}) - download to view")
+                        st.markdown(f"[📥 Download {filename}]({download_url})")
+                else:
+                    st.warning(f"Could not fetch file (HTTP {resp.status_code})")
+                    st.markdown(f"[📥 Download {filename}]({download_url})")
+            except Exception as e:
+                logger.debug(f"Magic byte detection failed: {e}")
+                # Fallback to original behavior
+                if content and not content.isprintable():
+                    st.info(f"📦 Binary file ({file_type}) - download to view")
+                    st.markdown(f"[📥 Download {filename}]({download_url})")
+                else:
+                    st.code(content, language=None)
         else:
-            st.code(content, language=None)
+            # No download URL - use original printability check
+            if content and not content.isprintable():
+                st.info(f"📦 Binary file ({file_type}) - download to view")
+            else:
+                st.code(content, language=None)
 
 
 def render_submission_content(row: Dict[str, Any], course_id: int):

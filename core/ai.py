@@ -181,6 +181,9 @@ def _load_key_stats() -> Dict:
                 for key_name in stats.get("keys", {}):
                     stats["keys"][key_name]["call_count_today"] = 0
                     stats["keys"][key_name]["error_count_today"] = 0
+                    stats["keys"][key_name]["quota_exhausted"] = False
+                # Reset active key to start fresh on new day (quotas reset daily)
+                stats["active_key"] = None
                 stats["last_reset_date"] = today
                 _save_key_stats(stats)
             
@@ -371,14 +374,14 @@ def get_gemini_client(api_key: str = None):
         return None
 
 
-def call_gemini_with_fallback(model: str, contents, start_key_index: int = 0):
+def call_gemini_with_fallback(model: str, contents, start_key_index: int = None):
     """
     Call Gemini API with automatic fallback to next API key on quota errors.
     
     Args:
         model: Model name to use
         contents: The prompt/contents to send
-        start_key_index: Index of first key to try (for retry scenarios)
+        start_key_index: Index of first key to try. If None, uses the last successful key.
     
     Returns:
         Tuple of (response, key_name_used, key_index_used) or raises exception
@@ -387,6 +390,18 @@ def call_gemini_with_fallback(model: str, contents, start_key_index: int = 0):
     
     if not keys:
         raise ValueError("No Gemini API keys configured")
+    
+    # Determine starting index: use provided value, or find last successful key
+    if start_key_index is None:
+        active_key_name = get_active_key()
+        if active_key_name:
+            # Find the index of the active key
+            for idx, key_info in enumerate(keys):
+                if key_info.get("name") == active_key_name:
+                    start_key_index = idx
+                    break
+        if start_key_index is None:
+            start_key_index = 0
     
     last_error = None
     
@@ -660,6 +675,115 @@ def convert_docx_to_pdf_images(docx_bytes: bytes, max_pages: int = 10, dpi: int 
         return f"(Error converting DOCX: {e})", []
 
 
+def extract_pcapng_summary(pcap_source, filename: str = "capture") -> str:
+    """
+    Extract a human-readable summary from a PCAP/PCAPNG file for AI evaluation.
+    
+    Uses dpkt to parse packet data and summarize protocols, ICMP stats, and endpoints.
+    
+    Args:
+        pcap_source: Path to the file (str) OR raw bytes
+        filename: Name for display purposes
+    
+    Returns:
+        Human-readable summary string for AI evaluation
+    """
+    try:
+        import dpkt
+        import io
+        import socket
+        from collections import Counter
+        
+        # Handle both path and bytes
+        if isinstance(pcap_source, bytes):
+            file_obj = io.BytesIO(pcap_source)
+        else:
+            file_obj = open(pcap_source, 'rb')
+        
+        try:
+            # Try pcapng first, fall back to pcap
+            try:
+                reader = dpkt.pcapng.Reader(file_obj)
+            except (ValueError, dpkt.dpkt.NeedData):
+                file_obj.seek(0)
+                reader = dpkt.pcap.Reader(file_obj)
+            
+            packets = []
+            protocols = Counter()
+            icmp_types = Counter()
+            endpoints = set()
+            
+            for ts, buf in reader:
+                packets.append((ts, buf))
+                
+                try:
+                    eth = dpkt.ethernet.Ethernet(buf)
+                    
+                    if isinstance(eth.data, dpkt.ip.IP):
+                        ip = eth.data
+                        src_ip = socket.inet_ntoa(ip.src)
+                        dst_ip = socket.inet_ntoa(ip.dst)
+                        endpoints.add(src_ip)
+                        endpoints.add(dst_ip)
+                        
+                        # Identify protocol
+                        if isinstance(ip.data, dpkt.icmp.ICMP):
+                            protocols["ICMP"] += 1
+                            icmp = ip.data
+                            # ICMP types: 8 = Echo Request, 0 = Echo Reply
+                            if icmp.type == 8:
+                                icmp_types["Echo Request (ping)"] += 1
+                            elif icmp.type == 0:
+                                icmp_types["Echo Reply"] += 1
+                            else:
+                                icmp_types[f"Type {icmp.type}"] += 1
+                        elif isinstance(ip.data, dpkt.tcp.TCP):
+                            protocols["TCP"] += 1
+                        elif isinstance(ip.data, dpkt.udp.UDP):
+                            protocols["UDP"] += 1
+                            udp = ip.data
+                            if udp.sport == 53 or udp.dport == 53:
+                                protocols["DNS"] += 1
+                        else:
+                            protocols["Other IP"] += 1
+                    elif isinstance(eth.data, dpkt.arp.ARP):
+                        protocols["ARP"] += 1
+                    else:
+                        protocols["Other"] += 1
+                        
+                except Exception:
+                    protocols["Unparseable"] += 1
+            
+            # Build summary
+            lines = [f"PCAPNG Summary ({filename}):"]
+            lines.append(f"Total packets: {len(packets)}")
+            
+            if protocols:
+                proto_str = ", ".join(f"{k} ({v})" for k, v in protocols.most_common())
+                lines.append(f"Protocols: {proto_str}")
+            
+            if icmp_types:
+                lines.append("ICMP Breakdown:")
+                for icmp_type, count in icmp_types.most_common():
+                    lines.append(f"  - {icmp_type}: {count} packets")
+            
+            if endpoints:
+                lines.append(f"Endpoints: {', '.join(sorted(endpoints)[:10])}")
+            
+            return "\n".join(lines)
+            
+        finally:
+            if not isinstance(pcap_source, bytes):
+                file_obj.close()
+    
+    except ImportError:
+        logger.warning("dpkt not installed - cannot parse PCAPNG files")
+        return f"(PCAPNG parsing unavailable - dpkt not installed)"
+    except Exception as e:
+        logger.error(f"Failed to parse PCAPNG file {filename}: {e}")
+        return f"(Error parsing PCAPNG: {e})"
+
+
 def extract_zip_images(zip_path: str, password: str = "ictkerala.org", max_images: int = 10) -> List[bytes]:
     """
     Extract images from a ZIP archive for multimodal AI input.
@@ -712,9 +836,79 @@ def extract_zip_listing(zip_path: str, password: str = "ictkerala.org") -> str:
         return f"(Error reading ZIP: {e})"
 
 
+def _normalize_weights_to_fives(rubric: List[Dict], target_total: int = 100) -> List[Dict]:
+    """
+    Normalize rubric weights to be multiples of 5 that sum to target_total.
+    
+    Args:
+        rubric: List of rubric criteria dicts with 'weight_percent' keys
+        target_total: The target sum for weights (default 100)
+    
+    Returns:
+        Modified rubric with normalized weights
+    """
+    if not rubric:
+        return rubric
+    
+    # Get current total
+    current_total = sum(item.get("weight_percent", 0) for item in rubric)
+    
+    if current_total == 0:
+        # Distribute evenly in multiples of 5
+        base_weight = (target_total // len(rubric) // 5) * 5
+        remainder = target_total - (base_weight * len(rubric))
+        for i, item in enumerate(rubric):
+            item["weight_percent"] = base_weight + (5 if i < remainder // 5 else 0)
+        return rubric
+    
+    # Scale to target and round to nearest 5
+    for item in rubric:
+        raw = item["weight_percent"] * target_total / current_total
+        item["weight_percent"] = round(raw / 5) * 5
+    
+    # Ensure minimum of 5 for each item
+    for item in rubric:
+        if item["weight_percent"] < 5:
+            item["weight_percent"] = 5
+    
+    # Adjust to hit target exactly
+    current_sum = sum(item["weight_percent"] for item in rubric)
+    diff = target_total - current_sum
+    
+    if diff != 0:
+        # Sort by weight to adjust largest/smallest appropriately
+        sorted_indices = sorted(range(len(rubric)), key=lambda i: rubric[i]["weight_percent"], reverse=(diff < 0))
+        
+        # Distribute the difference in increments of 5
+        remaining = abs(diff)
+        i = 0
+        while remaining >= 5 and i < len(sorted_indices):
+            idx = sorted_indices[i % len(sorted_indices)]
+            if diff > 0:
+                rubric[idx]["weight_percent"] += 5
+            else:
+                # Don't go below 5
+                if rubric[idx]["weight_percent"] > 5:
+                    rubric[idx]["weight_percent"] -= 5
+            remaining -= 5
+            i += 1
+        
+        # Handle any remaining difference (should be 0 if multiples of 5)
+        # If there's still a gap, add/subtract from largest
+        final_diff = target_total - sum(item["weight_percent"] for item in rubric)
+        if final_diff != 0:
+            largest_idx = max(range(len(rubric)), key=lambda i: rubric[i]["weight_percent"])
+            rubric[largest_idx]["weight_percent"] += final_diff
+    
+    return rubric
+
+
 def generate_rubric(task_description: str) -> Optional[List[Dict[str, Any]]]:
     """
     Generate a scoring rubric from a task description using Gemini API.
+    
+    Automatically includes a "Timely Submission" criterion based on config.
+    Weights are normalized to multiples of 5.
     
     Args:
         task_description: The task description text
@@ -726,20 +920,38 @@ def generate_rubric(task_description: str) -> Optional[List[Dict[str, Any]]]:
     if not get_api_keys():
         return None
     
+    # Get timely submission weight from config (default 25%)
+    try:
+        timely_weight = int(get_config("timely_submission_weight") or "25")
+    except (ValueError, TypeError):
+        timely_weight = 25
+    
+    # Clamp to valid range and round to nearest 5
+    timely_weight = max(0, min(50, timely_weight))
+    timely_weight = round(timely_weight / 5) * 5
+    
+    # Calculate remaining weight for other criteria
+    remaining_weight = 100 - timely_weight
+    
     prompt = f"""Analyze this task description and create a scoring rubric for evaluating student submissions.
 
 Task Description:
 {task_description}
 
-Create a rubric with 3-6 clear criteria. Each criterion should have:
+Create 3-5 clear criteria (NOT including timely submission - that will be added separately).
+The weights for these criteria must sum to exactly {remaining_weight}%.
+
+IMPORTANT: All weight_percent values MUST be multiples of 5 (e.g., 20, 25, 30, 35, etc.)
+
+Each criterion should have:
 - criterion: A short name (e.g., "Code Quality", "Functionality", "Documentation")
 - description: What specifically to evaluate (1-2 sentences)
-- weight_percent: Percentage weight (integer, all must sum to exactly 100)
+- weight_percent: Percentage weight (must be a multiple of 5, all must sum to {remaining_weight})
 
 Return ONLY a valid JSON array, no markdown formatting, no explanation. Example format:
 [
-  {{"criterion": "Code Quality", "description": "Clean, readable, well-structured code", "weight_percent": 30}},
-  {{"criterion": "Functionality", "description": "Program works correctly as specified", "weight_percent": 40}}
+  {{"criterion": "Code Quality", "description": "Clean, readable, well-structured code", "weight_percent": 25}},
+  {{"criterion": "Functionality", "description": "Program works correctly as specified", "weight_percent": 35}}
 ]"""
 
     try:
@@ -792,18 +1004,16 @@ Return ONLY a valid JSON array, no markdown formatting, no explanation. Example 
                 logger.error(f"Rubric item missing required keys: {item}")
                 return None
         
-        # Validate weights sum to 100
-        total_weight = sum(item.get("weight_percent", 0) for item in rubric)
-        if total_weight != 100:
-            logger.warning(f"Rubric weights sum to {total_weight}, not 100. Normalizing...")
-            # Normalize weights
-            if total_weight > 0:
-                for item in rubric:
-                    item["weight_percent"] = round(item["weight_percent"] * 100 / total_weight)
-                # Adjust rounding errors
-                diff = 100 - sum(item["weight_percent"] for item in rubric)
-                if diff != 0 and rubric:
-                    rubric[0]["weight_percent"] += diff
+        # Normalize weights to multiples of 5 that sum to remaining_weight
+        rubric = _normalize_weights_to_fives(rubric, remaining_weight)
+        
+        # Add Timely Submission criterion if weight > 0
+        if timely_weight > 0:
+            rubric.append({
+                "criterion": "Timely Submission",
+                "description": "Assesses if the assignment was submitted by the specified deadline.",
+                "weight_percent": timely_weight
+            })
         
         return rubric
         
@@ -863,7 +1073,9 @@ User Instructions:
 Modify the rubric according to the user's instructions. Keep the same JSON structure:
 - criterion: A short name
 - description: What to evaluate (1-2 sentences)
-- weight_percent: Percentage weight (all must sum to exactly 100)
+- weight_percent: Percentage weight (MUST be a multiple of 5, all must sum to exactly 100)
+
+IMPORTANT: All weight_percent values MUST be multiples of 5 (e.g., 20, 25, 30, 35, etc.)
 
 Return ONLY a valid JSON array with the modified rubric, no markdown formatting, no explanation."""
 
@@ -910,14 +1122,8 @@ Return ONLY a valid JSON array with the modified rubric, no markdown formatting,
                 logger.error(f"Invalid rubric item: {item}")
                 return None
         
-        # Normalize weights if needed
-        total_weight = sum(item.get("weight_percent", 0) for item in rubric)
-        if total_weight != 100 and total_weight > 0:
-            for item in rubric:
-                item["weight_percent"] = round(item["weight_percent"] * 100 / total_weight)
-            diff = 100 - sum(item["weight_percent"] for item in rubric)
-            if diff != 0 and rubric:
-                rubric[0]["weight_percent"] += diff
+        # Normalize weights to multiples of 5 that sum to 100
+        rubric = _normalize_weights_to_fives(rubric, 100)
         
         return rubric
         
@@ -1211,6 +1417,16 @@ def fetch_github_content(repo_url: str, pat: Optional[str] = None) -> Dict[str, 
                             result["file_contents"].append(f"--- {fname} ---\n(Screenshot/Image, {len(resized_bytes) / 1024:.1f} KB - sent as visual for AI)")
                     except Exception as e:
                         logger.debug(f"Failed to download image {fname}: {e}")
+                
+                # Download PCAP/PCAPNG files and extract summary
+                elif ext in ['.pcap', '.pcapng'] and file_size < 10 * 1024 * 1024:
+                    try:
+                        pcap_resp = requests.get(download_url, timeout=30)
+                        if pcap_resp.status_code == 200:
+                            pcap_summary = extract_pcapng_summary(pcap_resp.content, fname)
+                            result["file_contents"].append(f"--- {fname} (Network Capture) ---\n{pcap_summary}")
+                    except Exception as e:
+                        logger.debug(f"Failed to process PCAPNG {fname}: {e}")
             
             # Recursively fetch subdirectory contents (up to 5 levels deep)
             CODE_EXTENSIONS = [
@@ -1337,6 +1553,11 @@ def extract_zip_listing_from_bytes(zip_bytes: bytes, password: str = "ictkerala.
                         elif ext in ['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp', '.svg']:
                             size_kb = len(file_bytes) / 1024
                             content_sections.append(f"\n--- {info.filename} ---\n(Screenshot/Image file, {size_kb:.1f} KB. Visual evidence of completed work.)")
+                        
+                        # PCAP/PCAPNG network captures
+                        elif ext in ['.pcap', '.pcapng']:
+                            pcap_summary = extract_pcapng_summary(file_bytes, info.filename)
+                            content_sections.append(f"\n--- {info.filename} (Network Capture) ---\n{pcap_summary}")
                             
                     except Exception as e:
                         logger.debug(f"Could not extract {info.filename}: {e}")
@@ -1853,6 +2074,39 @@ def load_evaluation(course_id: int, module_id: int, student_name: str, group_id:
             logger.error(f"Failed to load evaluation: {e}")
     
     return None
+
+
+def delete_evaluation(course_id: int, module_id: int, student_name: str, group_id: Optional[int] = None) -> bool:
+    """
+    Delete an evaluation result from disk.
+    
+    Args:
+        course_id: Course ID
+        module_id: Assignment module ID
+        student_name: Student name
+        group_id: Optional group ID
+    
+    Returns:
+        True if deleted successfully, False otherwise
+    """
+    eval_dir = Path("output") / f"course_{course_id}" / EVALUATIONS_DIR / f"mod{module_id}"
+    if group_id:
+        eval_dir = eval_dir / f"grp{group_id}"
+    
+    safe_name = "".join([c for c in student_name if c.isalnum() or c in (' ', '-', '_')]).strip().replace(' ', '_')
+    filename = f"eval_{safe_name}.json"
+    filepath = eval_dir / filename
+    
+    if filepath.exists():
+        try:
+            filepath.unlink()
+            logger.info(f"Deleted evaluation: {filepath}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to delete evaluation: {e}")
+            return False
+    
+    return False
 
 
 def refine_evaluation(

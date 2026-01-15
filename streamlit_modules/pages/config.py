@@ -121,6 +121,12 @@ CONFIG_SCHEMA = {
             "help": "Resize images larger than this (in pixels) before sending to AI. Smaller = fewer tokens. 0 = no resizing. Default: 800",
             "default": "800",
             "type": "text"
+        },
+        "timely_submission_weight": {
+            "label": "Timely Submission Weight (%)",
+            "help": "Default weight percentage for 'Timely Submission' criterion in generated rubrics. Set to 0 to disable. Default: 25",
+            "default": "25",
+            "type": "text"
         }
     },
     "Google Drive": {
