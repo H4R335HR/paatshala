@@ -176,7 +176,7 @@ def render_config_page():
     
     # === Custom API Keys Section ===
     with st.expander("**🔑 Gemini API Keys**", expanded=True):
-        st.caption("Keys are tried in order. Falls back to next on quota/rate-limit errors.")
+        st.caption("Keys are tried in order (top = first). Falls back to next on quota/rate-limit errors.")
         
         # Load existing keys from config
         import json
@@ -194,20 +194,30 @@ def render_config_page():
         if "temp_api_keys" not in st.session_state:
             st.session_state.temp_api_keys = api_keys.copy()
         
-        # Display existing keys
+        # Version counter to force widget refresh on reorder
+        if "api_keys_version" not in st.session_state:
+            st.session_state.api_keys_version = 0
+        v = st.session_state.api_keys_version
+        
+        # Display existing keys with reorder controls
         keys_to_remove = []
         for i, key_info in enumerate(st.session_state.temp_api_keys):
-            col1, col2, col3 = st.columns([2, 4, 1])
-            with col1:
+            col_pos, col_name, col_key, col_up, col_down, col_del = st.columns([0.5, 2, 4, 0.5, 0.5, 0.5])
+            
+            with col_pos:
+                st.markdown(f"**{i+1}.**")
+            
+            with col_name:
                 new_name = st.text_input(
                     "Name", 
                     value=key_info.get("name", f"Key {i+1}"),
-                    key=f"api_key_name_{i}",
+                    key=f"api_key_name_{v}_{i}",
                     label_visibility="collapsed",
                     placeholder="Key name"
                 )
                 st.session_state.temp_api_keys[i]["name"] = new_name
-            with col2:
+            
+            with col_key:
                 # Show masked key with option to update
                 current_key = key_info.get("key", "")
                 masked = f"{current_key[:10]}...{current_key[-4:]}" if len(current_key) > 14 else "****"
@@ -215,13 +225,34 @@ def render_config_page():
                     "Key",
                     value="",
                     type="password",
-                    key=f"api_key_value_{i}",
+                    key=f"api_key_value_{v}_{i}",
                     label_visibility="collapsed",
                     placeholder=f"🔒 {masked} (enter to change)"
                 )
                 if new_key:
                     st.session_state.temp_api_keys[i]["key"] = new_key
-            with col3:
+            
+            with col_up:
+                # Up button (disabled if first)
+                if st.button("↑", key=f"api_key_up_{i}", disabled=(i == 0)):
+                    # Swap with previous
+                    st.session_state.temp_api_keys[i], st.session_state.temp_api_keys[i - 1] = \
+                        st.session_state.temp_api_keys[i - 1], st.session_state.temp_api_keys[i]
+                    # Increment version to force fresh widgets
+                    st.session_state.api_keys_version += 1
+                    st.rerun()
+            
+            with col_down:
+                # Down button (disabled if last)
+                if st.button("↓", key=f"api_key_down_{i}", disabled=(i == len(st.session_state.temp_api_keys) - 1)):
+                    # Swap with next
+                    st.session_state.temp_api_keys[i], st.session_state.temp_api_keys[i + 1] = \
+                        st.session_state.temp_api_keys[i + 1], st.session_state.temp_api_keys[i]
+                    # Increment version to force fresh widgets
+                    st.session_state.api_keys_version += 1
+                    st.rerun()
+            
+            with col_del:
                 if st.button("🗑️", key=f"remove_key_{i}"):
                     keys_to_remove.append(i)
         

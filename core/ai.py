@@ -315,6 +315,32 @@ def reset_daily_key_stats() -> bool:
         return False
 
 
+def reset_single_key_daily_stats(key_name: str) -> bool:
+    """
+    Reset daily counters for a single API key.
+    
+    Args:
+        key_name: Name of the API key to reset
+    
+    Returns:
+        True if reset successfully
+    """
+    try:
+        stats = _load_key_stats()
+        if key_name in stats.get("keys", {}):
+            stats["keys"][key_name]["call_count_today"] = 0
+            stats["keys"][key_name]["error_count_today"] = 0
+            stats["keys"][key_name]["quota_exhausted"] = False
+            _save_key_stats(stats)
+            return True
+        else:
+            logger.warning(f"Key '{key_name}' not found in stats")
+            return False
+    except Exception as e:
+        logger.error(f"Failed to reset key stats for '{key_name}': {e}")
+        return False
+
+
 def get_api_keys() -> list:
     """
     Get list of configured Gemini API keys.
@@ -378,10 +404,13 @@ def call_gemini_with_fallback(model: str, contents, start_key_index: int = None)
     """
     Call Gemini API with automatic fallback to next API key on quota errors.
     
+    Always starts from the first key and skips keys marked as quota_exhausted.
+    Use reset_single_key_daily_stats() to make a key eligible again.
+    
     Args:
         model: Model name to use
         contents: The prompt/contents to send
-        start_key_index: Index of first key to try. If None, uses the last successful key.
+        start_key_index: Deprecated, ignored. Always starts from first available key.
     
     Returns:
         Tuple of (response, key_name_used, key_index_used) or raises exception
@@ -391,27 +420,27 @@ def call_gemini_with_fallback(model: str, contents, start_key_index: int = None)
     if not keys:
         raise ValueError("No Gemini API keys configured")
     
-    # Determine starting index: use provided value, or find last successful key
-    if start_key_index is None:
-        active_key_name = get_active_key()
-        if active_key_name:
-            # Find the index of the active key
-            for idx, key_info in enumerate(keys):
-                if key_info.get("name") == active_key_name:
-                    start_key_index = idx
-                    break
-        if start_key_index is None:
-            start_key_index = 0
+    # Load key stats to check exhausted status
+    key_stats = _load_key_stats()
     
     last_error = None
+    tried_any = False
     
-    for i in range(start_key_index, len(keys)):
+    # Always start from index 0, skip exhausted keys
+    for i in range(len(keys)):
         key_info = keys[i]
         key_name = key_info.get("name", f"Key {i+1}")
         api_key = key_info.get("key")
         
         if not api_key:
             continue
+        
+        # Skip keys marked as quota exhausted
+        if key_stats.get("keys", {}).get(key_name, {}).get("quota_exhausted", False):
+            logger.debug(f"Skipping exhausted key '{key_name}'")
+            continue
+        
+        tried_any = True
         
         try:
             from google import genai
@@ -434,15 +463,19 @@ def call_gemini_with_fallback(model: str, contents, start_key_index: int = None)
             # Check if it's a quota/rate limit error (429)
             if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str or "quota" in error_str.lower():
                 logger.warning(f"API key '{key_name}' hit quota limit, trying next key...")
-                # Log quota error
+                # Log quota error - this marks the key as exhausted
                 log_key_usage(key_name, success=False, error_message=error_str, is_quota_error=True)
+                # Reload stats since we just updated them
+                key_stats = _load_key_stats()
                 continue
             else:
                 # Non-quota error - log and re-raise immediately
                 log_key_usage(key_name, success=False, error_message=error_str, is_quota_error=False)
                 raise
     
-    # All keys exhausted
+    # All keys exhausted or skipped
+    if not tried_any:
+        raise ValueError("All API keys are marked as exhausted. Reset a key in AI Debug to retry.")
     raise last_error or ValueError("All API keys exhausted")
 
 

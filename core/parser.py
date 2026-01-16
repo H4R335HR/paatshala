@@ -1,5 +1,8 @@
 import re
 from bs4 import BeautifulSoup
+import logging
+
+logger = logging.getLogger(__name__)
 
 def text_or_none(node):
     return node.get_text(" ", strip=True) if node else ""
@@ -47,9 +50,11 @@ def clean_grade_value(text):
     # This is safer than returning empty - preserves unknown formats
     return stripped
 
-def find_table_label_value(soup, wanted_labels):
+def find_table_label_value(soup, wanted_labels, debug_context=""):
     """Scan tables for label-value pairs"""
     out = {}
+    all_labels_found = []  # For debugging
+    
     for table in soup.find_all("table"):
         for tr in table.find_all("tr"):
             th = tr.find("th")
@@ -58,9 +63,16 @@ def find_table_label_value(soup, wanted_labels):
                 continue
             label = text_or_none(th).strip().lower()
             value = text_or_none(td).strip()
+            all_labels_found.append((label, value[:50] if value else ""))  # Truncate for logging
             for key in wanted_labels:
                 if key in label and value:
                     out[key] = value
+    
+    # Warning when searching for grade-related info and not finding it
+    if debug_context and ("grade" in str(wanted_labels).lower()) and not out:
+        logger.warning(f"[{debug_context}] No grade info found! Searched for: {wanted_labels}")
+        logger.warning(f"[{debug_context}] All table labels on page: {all_labels_found}")
+    
     return out
 
 def parse_assign_view(html):
@@ -84,8 +96,12 @@ def parse_assign_view(html):
     status = find_table_label_value(soup, status_labels.keys())
     mapped_status = {status_labels[k]: v for k, v in status.items()}
     
-    grade_info = find_table_label_value(soup, ["maximum grade", "max grade"])
+    grade_info = find_table_label_value(soup, ["maximum grade", "max grade"], debug_context="parse_assign_view")
     max_grade = grade_info.get("maximum grade") or grade_info.get("max grade") or ""
+    
+    # Additional debug logging for max_grade
+    if not max_grade:
+        logger.debug(f"[parse_assign_view] max_grade NOT FOUND - grade_info was: {grade_info}")
     
     comments_count = ""
     for a in soup.find_all("a"):
@@ -151,13 +167,21 @@ def parse_assign_view(html):
     }
 
 def parse_grading_table(html):
-    """Parse the grading table from assignment view page"""
+    """Parse the grading table from assignment view page.
+    
+    Returns:
+        tuple: (rows, max_grade) where:
+            - rows: List of submission dicts
+            - max_grade: Extracted max grade value (float) or None if not found
+    """
     soup = BeautifulSoup(html, "html.parser")
     table = soup.find("table", class_="flexible generaltable generalbox")
     if not table:
-        return []
+        return [], None
     
     rows = []
+    max_grade = None
+    
     # Detect assignment type and column indices from headers
     assignment_type = "link"  # Default
     grade_col_idx = 5  # Default grade column (fallback)
@@ -179,11 +203,36 @@ def parse_grading_table(html):
             # Match "grade" but not "final grade" - the "grade" column has the editable score
             if h.strip().startswith("grade") and "final" not in h:
                 grade_col_idx = i
+                
+                # Try to extract max grade from header text (format: "Grade / 15.00" or "Grade / 100.00")
+                header_text = text_or_none(header_ths[i])
+                grade_match = re.search(r'/\s*(\d+(?:\.\d+)?)', header_text)
+                if grade_match:
+                    try:
+                        max_grade = float(grade_match.group(1))
+                        logger.info(f"[parse_grading_table] Extracted max_grade={max_grade} from header: '{header_text}'")
+                    except ValueError:
+                        pass
                 break
+    
+    # Alternative: Try to find max_grade from grade input fields (data-gradedesc attribute)
+    # Format: "Grade out of 15.00" or similar
+    if max_grade is None:
+        grade_input = soup.find("input", attrs={"data-gradedesc": True})
+        if grade_input:
+            grade_desc = grade_input.get("data-gradedesc", "")
+            # Look for "Grade out of XX" or "XX.XX" at the end
+            out_of_match = re.search(r'out of\s*(\d+(?:\.\d+)?)', grade_desc, re.I)
+            if out_of_match:
+                try:
+                    max_grade = float(out_of_match.group(1))
+                    logger.info(f"[parse_grading_table] Extracted max_grade={max_grade} from input data-gradedesc: '{grade_desc}'")
+                except ValueError:
+                    pass
     
     tbody = table.find("tbody")
     if not tbody:
-        return []
+        return [], max_grade
 
     for tr in tbody.find_all("tr"):
         if "emptyrow" in tr.get("class", []):
@@ -252,7 +301,7 @@ def parse_grading_table(html):
             "Final Grade": final_grade
         })
     
-    return rows
+    return rows, max_grade
 
 
 def extract_assignment_id(html):

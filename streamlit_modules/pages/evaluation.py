@@ -16,8 +16,8 @@ from core.persistence import save_csv_to_disk, get_config
 from core.ai import generate_rubric, save_rubric, load_rubric, refine_rubric, fetch_submission_content, score_submission, save_evaluation, load_evaluation, refine_evaluation
 from streamlit_modules.ui.components import format_timestamp
 from streamlit_modules.ui.content_viewer import (
-    render_docx_viewer, render_pdf_viewer, render_pdf_content,
-    IMAGE_EXTENSIONS, LANGUAGE_MAP, render_code_content, render_image_content,
+    render_docx_viewer, render_pdf_viewer, render_pdf_content, render_html_viewer,
+    IMAGE_EXTENSIONS, LANGUAGE_MAP, HTML_EXTENSIONS, render_code_content, render_image_content,
     detect_file_type
 )
 
@@ -509,6 +509,15 @@ def _render_file_submission(course, row, idx):
                     docx_bytes = f.read()
                 render_docx_viewer(docx_bytes, fname, unique_key=f"eval_{idx}")
             
+            elif ext in HTML_EXTENSIONS:
+                # HTML file - render with HTML viewer
+                try:
+                    with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+                        html_content = f.read()
+                    render_html_viewer(html_content, fname, unique_key=f"eval_{idx}_{selected_file_idx}")
+                except:
+                    st.warning("Could not read HTML file content")
+            
             elif ext in LANGUAGE_MAP or ext in ['.txt', '.log', '.csv']:
                 try:
                     with open(path, 'r', encoding='utf-8', errors='ignore') as f:
@@ -802,14 +811,19 @@ def _render_rubric_section(course, data):
             st.divider()
             col_batch1, col_batch2, col_batch3 = st.columns(3)
             with col_batch1:
-                if st.button("🎯 Batch Score with AI", width="stretch", help="Score all pending submissions with AI using this rubric"):
-                    _perform_batch_scoring(course, data, edited_df.to_dict('records'), module_id, selected_group_id)
+                do_batch_score = st.button("🎯 Batch Score with AI", width="stretch", help="Score all pending submissions with AI using this rubric")
             with col_batch2:
-                if st.button("📤 Batch Submit to Moodle", width="stretch", help="Submit all AI-scored evaluations to Moodle"):
-                    _perform_batch_submit_to_moodle(course, data, module_id, selected_group_id)
+                do_batch_submit = st.button("📤 Batch Submit to Moodle", width="stretch", help="Submit all AI-scored evaluations to Moodle")
             with col_batch3:
-                if st.button("🗑️ Clear AI Scores", width="stretch", help="Delete all saved AI scores for this assignment"):
-                    _clear_ai_scores(course, data, module_id, selected_group_id)
+                do_clear_scores = st.button("🗑️ Clear AI Scores", width="stretch", help="Delete all saved AI scores for this assignment")
+            
+            # Execute batch operations OUTSIDE column blocks for full-width progress bars
+            if do_batch_score:
+                _perform_batch_scoring(course, data, edited_df.to_dict('records'), module_id, selected_group_id)
+            if do_batch_submit:
+                _perform_batch_submit_to_moodle(course, data, module_id, selected_group_id)
+            if do_clear_scores:
+                _clear_ai_scores(course, data, module_id, selected_group_id)
         
         # Show task description for reference
         with st.expander("📝 Task Description (Reference)", expanded=False):
@@ -899,8 +913,15 @@ def _render_ai_scoring_section(course, row, idx, data):
     max_grade = None
     max_grade_source = None
     
-    # First, try to get from tasks_data (most reliable)
-    if st.session_state.tasks_data:
+    # HIGHEST PRIORITY: Check session state (populated when submissions are fetched from grading page)
+    # This is the most reliable source as it comes directly from the grading table header/input
+    session_state_key = f"max_grade_{module_id}"
+    if session_state_key in st.session_state and st.session_state[session_state_key]:
+        max_grade = st.session_state[session_state_key]
+        max_grade_source = 'grading_page'
+    
+    # Second: try to get from tasks_data (from assignment view page)
+    if max_grade is None and st.session_state.tasks_data:
         for task in st.session_state.tasks_data:
             if str(task.get('Module ID')) == str(module_id):
                 max_grade_str = task.get('Max Grade', '')
@@ -912,21 +933,25 @@ def _render_ai_scoring_section(course, row, idx, data):
                         pass
                 break
     
-    # Fallback: Try to extract from Moodle grade string (e.g., "12.5 / 15.00")
-    moodle_grade = row.get('Final Grade', '')
-    if max_grade is None and moodle_grade:
-        _, moodle_max = _parse_moodle_grade(moodle_grade)
-        if moodle_max:
-            max_grade = moodle_max
-            max_grade_source = 'moodle_grade'
+    # Fallback: Try to extract max from ANY student's Final Grade (format: "12.5 / 15.00")
+    if max_grade is None:
+        for student_row in data:
+            grade_str = student_row.get('Final Grade', '')
+            if grade_str:
+                _, student_max = _parse_moodle_grade(grade_str)
+                if student_max:
+                    max_grade = student_max
+                    max_grade_source = 'submission_data'
+                    break
     
     # Final fallback with warning
     if max_grade is None:
         max_grade = 15
         max_grade_source = 'default'
-        logger.warning(f"Using default max_grade=15 for module {module_id}. Consider fetching tasks first.")
+        logger.warning(f"Using default max_grade=15 for module {module_id}. Fetch submissions first to auto-detect max grade.")
     
-    # Get Moodle feedback from row data
+    # Get Moodle grade and feedback from row data
+    moodle_grade = row.get('Final Grade', '')
     moodle_feedback = row.get('Feedback Comments', '')
     
     # Check for pending rescore result
@@ -1116,7 +1141,7 @@ def _perform_batch_scoring(course, data, rubric, module_id, group_id):
         st.info("✅ All submissions already have AI scores.")
         return
     
-    # Progress tracking
+    # Progress tracking (full-width since function is called outside column blocks)
     progress_bar = st.progress(0, text=f"Scoring 0/{len(pending)} submissions...")
     status_text = st.empty()
     results = {'scored': 0, 'failed': 0, 'skipped': 0}

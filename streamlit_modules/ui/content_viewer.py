@@ -68,6 +68,9 @@ TEXT_EXTENSIONS = ['.txt', '.log', '.csv', '.md']
 # Archive file extensions
 ARCHIVE_EXTENSIONS = ['.zip', '.7z', '.rar', '.tar', '.gz']
 
+# HTML file extensions (for rich preview, separate from code view)
+HTML_EXTENSIONS = ['.html', '.htm']
+
 
 def detect_file_type(data: bytes) -> Optional[str]:
     """
@@ -133,6 +136,11 @@ def is_text_file(filename: str) -> bool:
 def is_archive_file(filename: str) -> bool:
     """Check if filename is an archive."""
     return Path(filename).suffix.lower() in ARCHIVE_EXTENSIONS
+
+
+def is_html_file(filename: str) -> bool:
+    """Check if filename is an HTML file for rich preview."""
+    return Path(filename).suffix.lower() in HTML_EXTENSIONS
 
 
 def get_language_for_file(filename: str) -> Optional[str]:
@@ -871,6 +879,128 @@ def render_docx_viewer(docx_bytes: bytes, filename: str = "document.docx", uniqu
         st.error(f"Could not display DOCX: {e}")
 
 
+def render_html_viewer(html_content: str, filename: str = "document.html", unique_key: str = ""):
+    """
+    HTML content viewer with iframe preview and source code toggle.
+    
+    Provides rich viewing experience with:
+    - Rendered HTML preview in sandboxed iframe
+    - Fullscreen support
+    - Toggle to view source code
+    
+    Args:
+        html_content: The HTML content as string
+        filename: Display name for the document
+        unique_key: Optional unique key suffix to prevent duplicate key errors
+    """
+    try:
+        if not html_content or len(html_content) < 10:
+            st.warning("⚠️ Empty or invalid HTML content")
+            return
+        
+        idx = unique_key or abs(hash(html_content[:100]))
+        
+        # Escape HTML for embedding in JavaScript string
+        import json
+        escaped_html = json.dumps(html_content)
+        
+        # HTML viewer with iframe and controls
+        html_viewer = f'''
+        <style>
+            #htmlContainer_{idx} {{ 
+                width: 100%; 
+                background: #ffffff; 
+                border-radius: 8px; 
+                padding: 10px;
+            }}
+            #htmlContainer_{idx}:fullscreen {{
+                background: #ffffff;
+                padding: 20px;
+            }}
+            #htmlFrame_{idx} {{
+                width: 100%;
+                height: 500px;
+                border: 1px solid #ddd;
+                border-radius: 4px;
+                background: #fff;
+            }}
+            #htmlContainer_{idx}:fullscreen #htmlFrame_{idx} {{
+                height: calc(100vh - 80px);
+            }}
+            .html-controls_{idx} {{
+                display: flex;
+                justify-content: flex-end;
+                gap: 10px;
+                margin-bottom: 10px;
+            }}
+            .html-btn_{idx} {{
+                background: #333;
+                color: white;
+                border: 1px solid #555;
+                padding: 6px 12px;
+                border-radius: 4px;
+                cursor: pointer;
+                font-size: 13px;
+            }}
+            .html-btn_{idx}:hover {{ background: #444; }}
+        </style>
+        
+        <div id="htmlContainer_{idx}">
+            <div class="html-controls_{idx}">
+                <button class="html-btn_{idx}" onclick="toggleFullscreen_{idx}()" id="fsBtn_{idx}">⛶ Fullscreen</button>
+            </div>
+            <iframe id="htmlFrame_{idx}" sandbox="allow-same-origin"></iframe>
+        </div>
+        
+        <script>
+            (function() {{
+                const iframe = document.getElementById('htmlFrame_{idx}');
+                const htmlContent = {escaped_html};
+                
+                // Write HTML content to iframe
+                const doc = iframe.contentDocument || iframe.contentWindow.document;
+                doc.open();
+                doc.write(htmlContent);
+                doc.close();
+                
+                window.toggleFullscreen_{idx} = function() {{
+                    const cont = document.getElementById('htmlContainer_{idx}');
+                    const btn = document.getElementById('fsBtn_{idx}');
+                    
+                    if (document.fullscreenElement) {{
+                        document.exitFullscreen();
+                        btn.textContent = '⛶ Fullscreen';
+                    }} else {{
+                        cont.requestFullscreen().then(() => {{
+                            btn.textContent = '✕ Exit';
+                        }}).catch(err => {{
+                            alert('Fullscreen not available: ' + err.message);
+                        }});
+                    }}
+                }};
+                
+                document.addEventListener('fullscreenchange', () => {{
+                    const btn = document.getElementById('fsBtn_{idx}');
+                    if (btn && !document.fullscreenElement) {{
+                        btn.textContent = '⛶ Fullscreen';
+                    }}
+                }});
+            }})();
+        </script>
+        '''
+        st.components.v1.html(html_viewer, height=600)
+        
+        # Source code toggle
+        with st.expander("📝 View Source Code"):
+            st.code(html_content[:50000] if len(html_content) > 50000 else html_content, language="html")
+        
+        st.caption("💡 Rendered HTML preview • Fullscreen mode available • Expand to view source")
+        
+    except Exception as e:
+        logger.error(f"Error rendering HTML viewer: {e}")
+        st.error(f"Could not display HTML: {e}")
+
+
 def render_github_viewer(repo_url: str, pat: Optional[str] = None):
     """
     Interactive GitHub repository browser with file table and content preview.
@@ -1283,6 +1413,9 @@ def _render_file_preview(selected_path: str, owner: str, repo: str,
     # Render based on file type
     if ext == '.md':
         st.markdown(content)
+    elif ext in HTML_EXTENSIONS:
+        # HTML file - render with HTML viewer
+        render_html_viewer(content, filename, unique_key=f"gh_{abs(hash(content[:100]))}")
     elif ext in LANGUAGE_MAP:
         st.code(content, language=LANGUAGE_MAP[ext])
     elif ext in IMAGE_EXTENSIONS:
@@ -1423,6 +1556,10 @@ def _render_file_preview(selected_path: str, owner: str, repo: str,
                                             st.markdown(text_content)
                                         else:
                                             st.code(text_content[:50000], language=None)
+                                    elif file_ext in HTML_EXTENSIONS:
+                                        # HTML file - render with HTML viewer
+                                        text_content = file_content.decode('utf-8', errors='ignore')
+                                        render_html_viewer(text_content, file_name, unique_key=f"zip_{abs(hash(selected_zip_file))}")
                                     elif file_ext in LANGUAGE_MAP:
                                         text_content = file_content.decode('utf-8', errors='ignore')
                                         st.code(text_content[:50000], language=LANGUAGE_MAP[file_ext])

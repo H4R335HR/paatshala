@@ -13,7 +13,7 @@ def render_ai_debug_tab(course=None, meta=None):
     st.caption("View AI request/response history for debugging and optimization.")
     
     # Import here to avoid circular imports
-    from core.ai import get_ai_logs, clear_ai_logs, get_key_stats, get_api_keys, reset_daily_key_stats
+    from core.ai import get_ai_logs, clear_ai_logs, get_key_stats, get_api_keys, reset_daily_key_stats, reset_single_key_daily_stats
     
     # ========== API KEYS STATISTICS SECTION ==========
     st.subheader("🔑 API Keys Statistics")
@@ -30,12 +30,13 @@ def render_ai_debug_tab(course=None, meta=None):
         with col1:
             st.caption(f"Last reset: {key_stats.get('last_reset_date', 'Never')}")
         with col2:
-            if st.button("🔄 Reset Daily Stats", key="reset_key_stats"):
+            if st.button("🔄 Reset All Stats", key="reset_key_stats"):
                 if reset_daily_key_stats():
-                    st.toast("Daily stats reset!", icon="✅")
+                    st.toast("All daily stats reset!", icon="✅")
                     st.rerun()
         
-        # Build table data
+        # Build table data with per-key reset functionality
+        import pandas as pd
         table_data = []
         for key_info in configured_keys:
             key_name = key_info.get("name", "Unknown")
@@ -71,10 +72,39 @@ def render_ai_debug_tab(course=None, meta=None):
                 "Total Calls": stats.get("total_calls", 0)
             })
         
-        # Display as dataframe
-        import pandas as pd
+        # Display as dataframe for overview
         df = pd.DataFrame(table_data)
         st.dataframe(df, width="stretch", hide_index=True)
+        
+        # Per-key reset section - scalable dropdown approach
+        with st.expander("🔧 Individual Key Actions", expanded=False):
+            # Build options with stats for context
+            key_options = []
+            for key_info in configured_keys:
+                key_name = key_info.get("name", "Unknown")
+                stats = key_stats.get("keys", {}).get(key_name, {})
+                calls = stats.get("call_count_today", 0)
+                errors = stats.get("error_count_today", 0)
+                exhausted = "🔴" if stats.get("quota_exhausted") else ""
+                key_options.append(f"{key_name} ({calls} calls, {errors} errors) {exhausted}".strip())
+            
+            col1, col2 = st.columns([3, 1])
+            with col1:
+                selected = st.selectbox(
+                    "Select API key to reset",
+                    options=key_options,
+                    key="single_key_reset_select",
+                    label_visibility="collapsed"
+                )
+            with col2:
+                if st.button("🔄 Reset Key", key="reset_single_key_btn", use_container_width=True):
+                    # Extract key name from selection (before the first " (")
+                    selected_key_name = selected.split(" (")[0] if selected else None
+                    if selected_key_name and reset_single_key_daily_stats(selected_key_name):
+                        st.toast(f"Reset stats for '{selected_key_name}'", icon="✅")
+                        st.rerun()
+                    else:
+                        st.toast("Failed to reset key", icon="❌")
         
         # Google Cloud Console link
         st.markdown(

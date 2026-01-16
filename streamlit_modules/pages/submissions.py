@@ -79,6 +79,25 @@ def render_submissions_tab(course, meta):
         if selected_task and selected_task.get('description'):
             with st.expander("📋 Task Description", expanded=False):
                 st.markdown(selected_task['description'])
+                
+                # Refresh button to fetch latest task description
+                if st.button("🔄 Refresh Description", key=f"refresh_desc_{selected_task['Module ID']}"):
+                    with st.spinner("Fetching latest description..."):
+                        from core.api import fetch_task_description
+                        session = setup_session(st.session_state.session_id)
+                        new_description = fetch_task_description(session, selected_task['Module ID'])
+                        if new_description:
+                            # Update the task in tasks_data
+                            for task in st.session_state.tasks_data:
+                                if str(task.get('Module ID')) == str(selected_task['Module ID']):
+                                    task['description'] = new_description
+                                    break
+                            # Save updated tasks to disk
+                            save_csv_to_disk(course['id'], f"tasks_{course['id']}.csv", st.session_state.tasks_data)
+                            st.success("✓ Description refreshed!")
+                            st.rerun()
+                        else:
+                            st.warning("Could not fetch description. The task page may not be accessible.")
         
         # =========================================================================
         # DATE EDITING SECTION (Lazy loaded when user expands)
@@ -281,8 +300,8 @@ def render_submissions_tab(course, meta):
                         selected_group_id
                     )
                     
-                    # Unpack tuple result (submissions_list, assignment_id)
-                    rows, assignment_id = result
+                    # Unpack tuple result (submissions_list, assignment_id, max_grade)
+                    rows, assignment_id, max_grade = result
                     
                     if rows:
                         # Add task info to rows
@@ -298,6 +317,11 @@ def render_submissions_tab(course, meta):
                         # Store assignment_id for grade submission API
                         if assignment_id:
                             st.session_state[f"assignment_id_{module_id}"] = assignment_id
+                        
+                        # Store max_grade for evaluation tab (extracted from grading table)
+                        if max_grade:
+                            st.session_state[f"max_grade_{module_id}"] = max_grade
+                            logger.info(f"Stored max_grade={max_grade} for module {module_id}")
                         
                         # Save to disk
                         save_csv_to_disk(course['id'], submissions_filename, rows)

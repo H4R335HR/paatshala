@@ -1318,26 +1318,6 @@ def update_assignment_dates(session, module_id,
     logger.info(f"Sending duedate: day={form_data.get('duedate[day]')}, month={form_data.get('duedate[month]')}, year={form_data.get('duedate[year]')}, enabled={form_data.get('duedate[enabled]')}")
     logger.info(f"Sending cutoffdate: enabled={form_data.get('cutoffdate[enabled]')}")
     
-    # Debug: Dump full POST data to file for comparison with Burp
-    try:
-        from pathlib import Path
-        debug_dir = Path("output")
-        debug_dir.mkdir(exist_ok=True)
-        debug_file = debug_dir / "debug_form_post.txt"
-        
-        # Build URL-encoded form body like Burp shows
-        from urllib.parse import urlencode
-        encoded_body = urlencode(form_data)
-        
-        with open(debug_file, 'w', encoding='utf-8') as f:
-            f.write("=== FORM DATA (sorted by key) ===\n\n")
-            for key in sorted(form_data.keys()):
-                f.write(f"{key} = {form_data[key]}\n")
-            f.write(f"\n\n=== URL ENCODED BODY ===\n\n{encoded_body}\n")
-        logger.info(f"Wrote debug form data to {debug_file}")
-    except Exception as e:
-        logger.warning(f"Could not write debug file: {e}")
-    
     # POST the form
     url = f"{BASE}/course/modedit.php"
     
@@ -1528,9 +1508,10 @@ def fetch_submissions(session_id, module_id, group_id=None):
     Fetch submissions for a specific task/module.
     
     Returns:
-        tuple: (submissions_list, assignment_id) where:
+        tuple: (submissions_list, assignment_id, max_grade) where:
             - submissions_list: List of submission dicts from parse_grading_table
             - assignment_id: The Moodle assignment instance ID (for grade submission API)
+            - max_grade: The maximum grade for this assignment (float) or None
     """
     session = setup_session(session_id)
     
@@ -1541,9 +1522,9 @@ def fetch_submissions(session_id, module_id, group_id=None):
     try:
         resp = session.get(url, timeout=30)
         if not resp.ok:
-            return [], None
+            return [], None, None
         
-        submissions = parse_grading_table(resp.text)
+        submissions, max_grade = parse_grading_table(resp.text)
         
         # The grading table page doesn't contain assignment_id
         # We need to fetch the grader page for one student to get it
@@ -1564,9 +1545,9 @@ def fetch_submissions(session_id, module_id, group_id=None):
                 except:
                     pass  # Failed to get grader page, assignment_id remains None
         
-        return submissions, assignment_id
+        return submissions, assignment_id, max_grade
     except:
-        return [], None
+        return [], None, None
 
 
 def fetch_full_feedback(session_id, module_id, user_id):
