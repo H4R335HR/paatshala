@@ -180,6 +180,14 @@ def render_submissions_tab(course, meta):
                                 key=f"cutoff_time_picker_{module_id}"
                             )
                     
+                    # Grade reminder toggle - secondary option, placed below main dates
+                    grading_enabled = st.checkbox(
+                        "⏰ Enable 'Remind me to grade by' date",
+                        value=dates_info.get('grading_due_date_enabled', False),
+                        key=f"grading_due_enabled_{module_id}",
+                        help="⚠️ Must be on or after due date. Disable this if you get validation errors when moving due dates."
+                    )
+                    
                     # Quick actions row
                     st.divider()
                     st.markdown("**Quick Actions**")
@@ -247,7 +255,8 @@ def render_submissions_tab(course, meta):
                             due_date=new_due,
                             due_date_enabled=due_enabled,
                             cutoff_date=new_cutoff,
-                            cutoff_date_enabled=cutoff_enabled
+                            cutoff_date_enabled=cutoff_enabled,
+                            grading_due_date_enabled=grading_enabled
                         )
                         
                         if success:

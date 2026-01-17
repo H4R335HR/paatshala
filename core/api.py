@@ -1210,6 +1210,7 @@ def get_assignment_dates(session, module_id):
         due_date, due_enabled = extract_date("duedate")
         cutoff_date, cutoff_enabled = extract_date("cutoffdate")
         allow_from, allow_enabled = extract_date("allowsubmissionsfromdate")
+        grading_due, grading_due_enabled = extract_date("gradingduedate")
         
         # Extract all form fields for later resubmission
         # IMPORTANT: Skip button/submit inputs - they would cause form to cancel!
@@ -1255,6 +1256,8 @@ def get_assignment_dates(session, module_id):
             "cutoff_date_enabled": cutoff_enabled,
             "allow_submissions_from": allow_from,
             "allow_submissions_enabled": allow_enabled,
+            "grading_due_date": grading_due,
+            "grading_due_date_enabled": grading_due_enabled,
             "form_data": form_data
         }
         
@@ -1265,7 +1268,8 @@ def get_assignment_dates(session, module_id):
 
 def update_assignment_dates(session, module_id, 
                             due_date=None, due_date_enabled=None,
-                            cutoff_date=None, cutoff_date_enabled=None):
+                            cutoff_date=None, cutoff_date_enabled=None,
+                            grading_due_date=None, grading_due_date_enabled=None):
     """
     Update assignment dates by POSTing to modedit.php.
     
@@ -1276,6 +1280,8 @@ def update_assignment_dates(session, module_id,
         due_date_enabled: bool to enable/disable (or None to keep current)
         cutoff_date: datetime object for cut-off date (or None to keep current)
         cutoff_date_enabled: bool to enable/disable (or None to keep current)
+        grading_due_date: datetime for 'Remind me to grade by' (or None to keep current)
+        grading_due_date_enabled: bool to enable/disable (or None to keep current)
     
     Returns:
         True on success, False on failure
@@ -1311,12 +1317,23 @@ def update_assignment_dates(session, module_id,
     if cutoff_date is not None or cutoff_date_enabled is not None:
         set_date_fields("cutoffdate", cutoff_date, cutoff_date_enabled)
     
+    # Handle gradingduedate ("Remind me to grade by")
+    if grading_due_date is not None or grading_due_date_enabled is not None:
+        # User explicitly set grading due date options
+        set_date_fields("gradingduedate", grading_due_date, grading_due_date_enabled)
+    elif due_date is not None and form_data.get("gradingduedate[enabled]") == "1":
+        # Auto-update: Moodle requires gradingduedate >= duedate
+        # If user didn't explicitly set grading options, auto-sync with new due date
+        set_date_fields("gradingduedate", due_date, True)
+        logger.info(f"Auto-updating gradingduedate to match new duedate")
+    
     # Ensure submit button is included
     form_data["submitbutton"] = "Save and display"
     
     # Debug: Log what we're about to send for date fields
     logger.info(f"Sending duedate: day={form_data.get('duedate[day]')}, month={form_data.get('duedate[month]')}, year={form_data.get('duedate[year]')}, enabled={form_data.get('duedate[enabled]')}")
     logger.info(f"Sending cutoffdate: enabled={form_data.get('cutoffdate[enabled]')}")
+    logger.info(f"Sending gradingduedate: day={form_data.get('gradingduedate[day]')}, enabled={form_data.get('gradingduedate[enabled]')}")
     
     # POST the form
     url = f"{BASE}/course/modedit.php"
@@ -1334,17 +1351,55 @@ def update_assignment_dates(session, module_id,
             if "mod/assign/view.php" in resp.url or "course/view.php" in resp.url:
                 logger.info("Assignment dates updated successfully")
                 return True
-            # Check for error messages in response
-            if "error" in resp.text.lower() and "validat" in resp.text.lower():
-                logger.warning(f"Validation error in response")
-                # Try to extract error message
+            
+            # Still on modedit.php means form validation failed or form wasn't accepted
+            if "modedit.php" in resp.url:
                 from bs4 import BeautifulSoup
                 soup = BeautifulSoup(resp.text, "html.parser")
-                error_el = soup.find(class_="alert-danger") or soup.find(class_="error")
-                if error_el:
-                    logger.error(f"Moodle error: {error_el.get_text(strip=True)[:200]}")
+                
+                # Save response HTML for debugging
+                try:
+                    from pathlib import Path
+                    debug_dir = Path("output") / "debug"
+                    debug_dir.mkdir(parents=True, exist_ok=True)
+                    debug_file = debug_dir / f"date_update_{module_id}.html"
+                    with open(debug_file, 'w', encoding='utf-8') as f:
+                        f.write(resp.text)
+                    logger.info(f"Saved response HTML to {debug_file}")
+                except Exception as e:
+                    logger.warning(f"Could not save debug HTML: {e}")
+                
+                # Look for error messages - Moodle uses various classes
+                errors = []
+                
+                # Check for alert boxes
+                for alert in soup.find_all(class_=re.compile(r'alert-danger|alert-error')):
+                    text = alert.get_text(strip=True)
+                    if text:
+                        errors.append(text)
+                
+                # Check for form field errors (class="error" near form fields)
+                for err in soup.find_all(class_="error"):
+                    text = err.get_text(strip=True)
+                    if text and "error" not in text.lower()[:10]:  # Skip if just "error" label
+                        errors.append(text)
+                
+                # Check for fdescription errors
+                for err in soup.find_all(class_="fdescription"):
+                    text = err.get_text(strip=True)
+                    if "error" in text.lower() or "must" in text.lower():
+                        errors.append(text)
+                
+                if errors:
+                    logger.warning(f"Form validation errors: {'; '.join(errors[:3])}")
+                else:
+                    logger.warning(f"Stayed on modedit.php without redirect - check output/debug/date_update_{module_id}.html")
+                
                 return False
-            return True
+            
+            # Some other page - unexpected
+            logger.warning(f"Unexpected redirect to: {resp.url}")
+            return False
         else:
             logger.error(f"Failed to update assignment dates: {resp.status_code}")
             return False

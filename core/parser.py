@@ -68,11 +68,6 @@ def find_table_label_value(soup, wanted_labels, debug_context=""):
                 if key in label and value:
                     out[key] = value
     
-    # Warning when searching for grade-related info and not finding it
-    if debug_context and ("grade" in str(wanted_labels).lower()) and not out:
-        logger.warning(f"[{debug_context}] No grade info found! Searched for: {wanted_labels}")
-        logger.warning(f"[{debug_context}] All table labels on page: {all_labels_found}")
-    
     return out
 
 def parse_assign_view(html):
