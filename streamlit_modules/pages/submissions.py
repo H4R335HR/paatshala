@@ -332,6 +332,31 @@ def render_submissions_tab(course, meta):
                             st.session_state[f"max_grade_{module_id}"] = max_grade
                             logger.info(f"Stored max_grade={max_grade} for module {module_id}")
                         
+                        # Calculate timeliness for each submission
+                        try:
+                            from core.api import check_submission_timeliness, get_assignment_dates
+                            from datetime import datetime
+                            session = setup_session(st.session_state.session_id)
+                            dates_info = get_assignment_dates(session, module_id)
+                            
+                            if dates_info and dates_info.get('due_date_enabled') and dates_info.get('due_date'):
+                                due_date = dates_info['due_date']
+                                now = datetime.now()
+                                
+                                for row in rows:
+                                    last_modified = row.get('Last Modified', '')
+                                    if last_modified:
+                                        timeliness = check_submission_timeliness(last_modified, due_date)
+                                        row['Is_On_Time'] = timeliness.get('status', 'Unknown')
+                                    else:
+                                        # No submission - check if due date has passed
+                                        if now > due_date:
+                                            row['Is_On_Time'] = 'Late'
+                                        else:
+                                            row['Is_On_Time'] = 'Pending'
+                        except Exception as e:
+                            logger.debug(f"Could not calculate timeliness: {e}")
+                        
                         # Save to disk
                         save_csv_to_disk(course['id'], submissions_filename, rows)
                         save_meta(course['id'], meta_key, len(rows))

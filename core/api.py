@@ -1266,6 +1266,48 @@ def get_assignment_dates(session, module_id):
         return None
 
 
+def check_submission_timeliness(last_modified: str, due_date) -> dict:
+    """
+    Check if a submission was on time.
+    
+    Args:
+        last_modified: Submission timestamp string (format: "Monday, 15 December 2025, 3:35 PM")
+        due_date: datetime object for the due date
+    
+    Returns:
+        dict with:
+        - is_on_time: bool (True if submitted on/before due date)
+        - status: str ("On Time", "Late", or "Unknown")
+        - hours_late: float or None (how many hours after due date, if late)
+    """
+    result = {
+        "is_on_time": None,
+        "status": "Unknown",
+        "hours_late": None
+    }
+    
+    if not last_modified or not due_date:
+        return result
+    
+    try:
+        # Parse the Last Modified timestamp (format: "Monday, 15 December 2025, 3:35 PM")
+        sub_time = datetime.strptime(last_modified.strip(), "%A, %d %B %Y, %I:%M %p")
+        
+        if sub_time <= due_date:
+            result["is_on_time"] = True
+            result["status"] = "On Time"
+            result["hours_late"] = 0
+        else:
+            result["is_on_time"] = False
+            result["status"] = "Late"
+            delta = sub_time - due_date
+            result["hours_late"] = delta.total_seconds() / 3600  # Convert to hours
+    except ValueError as e:
+        logger.debug(f"Could not parse submission timestamp '{last_modified}': {e}")
+    
+    return result
+
+
 def update_assignment_dates(session, module_id, 
                             due_date=None, due_date_enabled=None,
                             cutoff_date=None, cutoff_date_enabled=None,
@@ -1410,26 +1452,69 @@ def update_assignment_dates(session, module_id,
 
 
 def get_quizzes(session, course_id):
-    """Get list of practice quizzes from course"""
+    """Get list of practice quizzes from course.
+    
+    Returns:
+        List of tuples: (display_name, module_id) where display_name includes the topic name
+        For example: ("#07 - Cybersecurity Principles", "12345")
+    """
     url = f"https://{PAATSHALA_HOST}/course/view.php?id={course_id}"
     resp = session.get(url)
     if not resp.ok:
         return []
     
     soup = BeautifulSoup(resp.text, "html.parser")
-    items = soup.find_all("li", class_="modtype_quiz")
+    
+    # Find all sections to build a mapping of activities to section names
+    sections = soup.find_all("li", class_=lambda c: c and "section" in c and "main" in c)
     
     quizzes = []
-    for item in items:
-        link = item.find("a", href=re.compile(r"mod/quiz/view\.php\?id=\d+"))
-        if not link:
-            continue
-        name = link.get_text(strip=True)
-        name = re.sub(r'\s+(Quiz)$', '', name)
-        if "practice quiz" in name.lower():
-            m = re.search(r"id=(\d+)", link.get("href", ""))
-            if m:
-                quizzes.append((name, m.group(1)))
+    
+    for section in sections:
+        # Get the section/topic name
+        section_name = ""
+        name_node = section.find(class_="sectionname")
+        if not name_node:
+            name_node = section.find(class_="section-title")
+        if name_node:
+            section_name = name_node.get_text(strip=True)
+        else:
+            # Try aria-label on the section itself
+            label = section.get("aria-label")
+            if label:
+                section_name = label
+        
+        # Extract topic name without "Day XX - " prefix if present
+        topic_name = ""
+        day_match = re.search(r'Day\s*\d+\s*[-–—]\s*(.+)', section_name)
+        if day_match:
+            topic_name = day_match.group(1).strip()
+        else:
+            topic_name = section_name
+        
+        # Find all quiz items within this section
+        quiz_items = section.find_all("li", class_="modtype_quiz")
+        
+        for item in quiz_items:
+            link = item.find("a", href=re.compile(r"mod/quiz/view\.php\?id=\d+"))
+            if not link:
+                continue
+            name = link.get_text(strip=True)
+            name = re.sub(r'\s+(Quiz)$', '', name)
+            if "practice quiz" in name.lower():
+                m = re.search(r"id=(\d+)", link.get("href", ""))
+                if m:
+                    # Extract session number from quiz name (e.g., "#07" from "Practice Quiz - Session #07")
+                    session_match = re.search(r'#(\d+)', name)
+                    if session_match and topic_name:
+                        # Create display name: "#07 - Topic Name"
+                        session_num = session_match.group(1)
+                        display_name = f"#{session_num} - {topic_name}"
+                    else:
+                        # Fallback to original name if no session number or topic
+                        display_name = name
+                    
+                    quizzes.append((display_name, m.group(1)))
     
     return quizzes
 

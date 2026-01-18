@@ -248,21 +248,16 @@ def render_evaluation_tab(course, meta):
             due_date = dates_info['due_date']
             deadline_str = f" | **Deadline:** {due_date.strftime('%A, %d %B %Y, %I:%M %p')}"
             
-            # Check if submitted on time
+            # Check if submitted on time using shared utility
             last_modified = row.get('Last Modified', '')
             if last_modified:
-                from datetime import datetime
-                try:
-                    # Parse the Last Modified timestamp (format: "Monday, 15 December 2025, 3:35 PM")
-                    sub_time = datetime.strptime(last_modified, "%A, %d %B %Y, %I:%M %p")
-                    is_on_time = sub_time <= due_date
-                    if is_on_time:
-                        on_time_str = " | ✅ **On Time**"
-                    else:
-                        on_time_str = " | ❌ **Late**"
-                except ValueError:
-                    # Try alternate format or skip
-                    pass
+                from core.api import check_submission_timeliness
+                timeliness = check_submission_timeliness(last_modified, due_date)
+                is_on_time = timeliness.get('is_on_time')
+                if is_on_time is True:
+                    on_time_str = " | ✅ **On Time**"
+                elif is_on_time is False:
+                    on_time_str = " | ❌ **Late**"
         elif dates_info:
             deadline_str = " | **Deadline:** Not set"
         

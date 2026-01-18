@@ -75,13 +75,20 @@ TAB_REGISTRY = {
         'module': 'streamlit_modules.pages',
         'function': 'render_ai_debug_tab',
     },
+    'skill_matrix': {
+        'id': 'skill_matrix',
+        'name': '🎯 Skill Matrix',
+        'description': 'Skill competency matrix from quiz scores',
+        'module': 'streamlit_modules.pages',
+        'function': 'render_skill_matrix_tab',
+    },
 }
 
 # Default tabs to enable on first run
 DEFAULT_ENABLED_TABS = ['tasks', 'quiz', 'submissions', 'evaluation']
 
 # Tab order (for consistent display)
-TAB_ORDER = ['tasks', 'quiz', 'submissions', 'evaluation', 'workshops', 'feedback', 'tryhackme', 'quizizz', 'video_importer', 'ai_debug']
+TAB_ORDER = ['tasks', 'quiz', 'submissions', 'evaluation', 'workshops', 'feedback', 'tryhackme', 'quizizz', 'skill_matrix', 'video_importer', 'ai_debug']
 
 
 def get_all_tab_ids():
