@@ -334,8 +334,7 @@ def render_submissions_tab(course, meta):
                         
                         # Calculate timeliness for each submission
                         try:
-                            from core.api import check_submission_timeliness, get_assignment_dates
-                            from datetime import datetime
+                            from core.api import check_submission_timeliness
                             session = setup_session(st.session_state.session_id)
                             dates_info = get_assignment_dates(session, module_id)
                             

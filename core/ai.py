@@ -1378,9 +1378,22 @@ def fetch_github_content(repo_url: str, pat: Optional[str] = None) -> Dict[str, 
                 fname = file_info.get("name", "")
                 download_url = file_info.get("download_url")
                 file_size = file_info.get("size", 0)
+                file_type = file_info.get("type", "")
+                
+                # Skip directories (they don't have download URLs anyway)
+                if file_type == "dir":
+                    continue
+                
+                # Skip README files (already fetched separately via GitHub API)
+                if fname.lower() in ['readme.md', 'readme.txt', 'readme']:
+                    logger.debug(f"[GitHub] Skipping {fname} - fetched via README API")
+                    continue
                 
                 if not download_url or file_size > 10 * 1024 * 1024:  # Skip files > 10MB
+                    logger.debug(f"[GitHub] Skipping {fname} - no URL or too large ({file_size} bytes)")
                     continue
+                
+                logger.debug(f"[GitHub] Processing {fname} ({file_size} bytes)")
                 
                 ext = Path(fname).suffix.lower()
                 
@@ -1428,10 +1441,14 @@ def fetch_github_content(repo_url: str, pat: Optional[str] = None) -> Dict[str, 
                              '.sql', '.xml', '.yaml', '.yml', '.toml', '.ini', '.cfg', '.conf',
                              '.r', '.scala', '.kt', '.swift', '.m', '.pl', '.lua', '.dart'] and file_size < 50000:
                     try:
+                        logger.debug(f"[GitHub] Downloading text file: {fname} from {download_url}")
                         txt_resp = requests.get(download_url, timeout=10)
                         if txt_resp.status_code == 200:
-                            text_content = txt_resp.text[:10000]
+                            text_content = txt_resp.text[:15000]  # Increased from 10K to 15K
                             result["file_contents"].append(f"--- {fname} ---\n{text_content}")
+                            logger.info(f"[GitHub] Downloaded {fname}: {len(text_content)} chars")
+                        else:
+                            logger.warning(f"[GitHub] Failed to download {fname}: HTTP {txt_resp.status_code}")
                     except Exception as e:
                         logger.debug(f"Failed to download text file {fname}: {e}")
                 
@@ -1499,10 +1516,27 @@ def fetch_github_content(repo_url: str, pat: Optional[str] = None) -> Dict[str, 
                                 try:
                                     sub_resp = requests.get(df_url, timeout=10)
                                     if sub_resp.status_code == 200:
-                                        text_content = sub_resp.text[:10000]
+                                        text_content = sub_resp.text[:15000]
                                         result["file_contents"].append(f"--- {df_path} ---\n{text_content}")
                                 except Exception as e:
                                     logger.debug(f"Failed to download {df_path}: {e}")
+                            
+                            # Also download images from subdirectories for multimodal AI
+                            elif df_url and df_ext in ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp'] and df_size < 5 * 1024 * 1024:
+                                try:
+                                    img_resp = requests.get(df_url, timeout=15)
+                                    if img_resp.status_code == 200:
+                                        # Resize image to save tokens
+                                        try:
+                                            max_dim = int(get_config("max_image_dimension") or "800")
+                                        except (ValueError, TypeError):
+                                            max_dim = 800
+                                        resized_bytes = resize_image_bytes(img_resp.content, max_dim)
+                                        result["images"].append(resized_bytes)
+                                        result["file_contents"].append(f"--- {df_path} ---\n(Screenshot/Image, {len(resized_bytes) / 1024:.1f} KB - sent as visual for AI)")
+                                        logger.debug(f"[GitHub] Downloaded image from subdir: {df_path}")
+                                except Exception as e:
+                                    logger.debug(f"Failed to download image {df_path}: {e}")
                         
                         elif df_type == "dir":
                             # Recursively fetch subdirectory
@@ -1743,11 +1777,11 @@ def fetch_submission_content(row: Dict, course_id: int = None) -> Dict[str, Any]
 ## Files in Repository:
 {files_list or "(empty)"}
 
-## README:
-{github_content.get('readme', '(No README)')}
-
 ## Extracted File Contents:
 {file_contents_text or "(No downloadable content extracted)"}
+
+## README (summary):
+{github_content.get('readme', '(No README)')[:5000]}
 """
                     # Transfer images for multimodal scoring
                     result["images"].extend(github_content.get("images", []))
@@ -1885,7 +1919,7 @@ Deadline: {submission_content.get('deadline', 'Not specified')}
 Submitted on Time: {'Yes' if submission_content.get('on_time') else 'No' if submission_content.get('on_time') is False else 'Unknown'}
 
 Content:
-{submission_content.get('content', '(No content available)')[:8000]}
+{submission_content.get('content', '(No content available)')[:30000]}
 
 ## Instructions:
 1. Evaluate the submission against EACH criterion in the rubric

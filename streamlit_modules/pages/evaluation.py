@@ -1007,8 +1007,8 @@ def _render_ai_scoring_section(course, row, idx, data):
                     else:
                         st.markdown(f"**AI:** {msg['content']}")
         
-        # Action buttons: Restore, Re-Score, Discuss, and Submit to Moodle
-        col1, col2, col3, col4 = st.columns([1, 1, 1, 1])
+        # Action buttons: Restore, Clear, Discuss, Re-Score, and Submit to Moodle
+        col1, col2, col3, col4, col5 = st.columns([1, 1, 1, 1, 1])
         moodle_score, moodle_max = _parse_moodle_grade(moodle_grade)
         
         with col1:
@@ -1019,14 +1019,24 @@ def _render_ai_scoring_section(course, row, idx, data):
                 help="Load the existing grade and feedback from Moodle"
             )
         with col2:
-            rescore = st.button("🔄 Re-Score", key=f"rescore_{idx}")
+            clear_btn = st.button("🗑️ Clear Score", key=f"clear_score_{idx}", help="Delete the AI score for this student")
         with col3:
             discuss = st.button("💬 Discuss", key=f"discuss_{idx}")
         with col4:
+            rescore = st.button("🔄 Re-Score", key=f"rescore_{idx}")
+        with col5:
             submit_btn = st.button("📤 Submit to Moodle", key=f"submit_moodle_{idx}", type="primary")
         
         if rescore:
             _perform_scoring(course, row, rubric, module_id, selected_group_id, data, is_rescore=True)
+        
+        if clear_btn:
+            from core.ai import delete_evaluation
+            if delete_evaluation(course['id'], module_id, student_name, selected_group_id):
+                st.success(f"✓ Cleared AI score for {student_name}")
+                st.rerun()
+            else:
+                st.warning("No AI score to clear")
         
         if restore_btn and moodle_score is not None:
             # Convert Moodle grade to percentage
@@ -1124,17 +1134,41 @@ def _perform_batch_scoring(course, data, rubric, module_id, group_id):
         st.warning("⚠️ Task description not available. Fetch tasks in Submissions tab first.")
         return
     
-    # Filter to students without AI evaluation
+    # Filter to students without AI evaluation AND who have actually submitted something
     pending = []
+    skipped_no_submission = 0
     for i, row in enumerate(data):
         student_name = row.get('Name', 'Unknown')
+        
+        # Skip students who haven't submitted anything
+        submission_type = row.get('Submission_Type', '')
+        submission_content = row.get('Submission', '')
+        submission_files = row.get('Submission_Files', [])
+        
+        # Check if there's no actual submission
+        has_no_submission = (
+            submission_type == 'empty' or 
+            (not submission_content.strip() and not submission_files)
+        )
+        
+        if has_no_submission:
+            skipped_no_submission += 1
+            continue
+        
         existing_eval = load_evaluation(course['id'], module_id, student_name, group_id)
         if not existing_eval or existing_eval.get('total_score') is None:
             pending.append((i, row))
     
     if not pending:
-        st.info("✅ All submissions already have AI scores.")
+        if skipped_no_submission > 0:
+            st.info(f"✅ All submissions already have AI scores. ({skipped_no_submission} students with no submission were skipped)")
+        else:
+            st.info("✅ All submissions already have AI scores.")
         return
+    
+    # Show info about skipped entries at the start
+    if skipped_no_submission > 0:
+        st.caption(f"ℹ️ Skipping {skipped_no_submission} students with no submission")
     
     # Progress tracking (full-width since function is called outside column blocks)
     progress_bar = st.progress(0, text=f"Scoring 0/{len(pending)} submissions...")
@@ -1223,13 +1257,17 @@ def _perform_batch_scoring(course, data, rubric, module_id, group_id):
     progress_bar.progress(1.0, text="Batch scoring complete!")
     
     # Show completion notification (toast)
-    st.toast(f"🎯 Batch scoring complete: {results['scored']} scored, {results['failed']} failed", icon="✅")
+    toast_msg = f"🎯 Batch scoring complete: {results['scored']} scored, {results['failed']} failed"
+    if skipped_no_submission > 0:
+        toast_msg += f", {skipped_no_submission} skipped (no submission)"
+    st.toast(toast_msg, icon="✅")
     
     # Show summary
+    skip_note = f" ({skipped_no_submission} students with no submission were skipped)" if skipped_no_submission > 0 else ""
     if results['failed'] == 0:
-        st.success(f"✅ Batch scoring complete! Scored {results['scored']} submissions.")
+        st.success(f"✅ Batch scoring complete! Scored {results['scored']} submissions.{skip_note}")
     else:
-        st.warning(f"⚠️ Batch scoring complete: {results['scored']} scored, {results['failed']} failed.")
+        st.warning(f"⚠️ Batch scoring complete: {results['scored']} scored, {results['failed']} failed.{skip_note}")
     
     # Trigger rerun to refresh the UI with new scores
     st.rerun()
