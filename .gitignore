@@ -1,5 +1,6 @@
 venv/
 .venv/
+php/
 __pycache__/
 output/
 *.pyc

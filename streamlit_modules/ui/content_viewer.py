@@ -548,7 +548,7 @@ def render_pdf_content(
                         mat = fitz.Matrix(1.5, 1.5)
                         pix = page.get_pixmap(matrix=mat)
                         img_bytes = pix.tobytes("png")
-                        st.image(img_bytes, caption=f"Page {page_num + 1}", use_container_width=True)
+                        st.image(img_bytes, caption=f"Page {page_num + 1}", width='stretch')
                 else:
                     # Use slider for longer documents
                     page_num = st.slider(
@@ -560,7 +560,7 @@ def render_pdf_content(
                     mat = fitz.Matrix(1.5, 1.5)
                     pix = page.get_pixmap(matrix=mat)
                     img_bytes = pix.tobytes("png")
-                    st.image(img_bytes, caption=f"Page {page_num + 1} of {num_pages}", use_container_width=True)
+                    st.image(img_bytes, caption=f"Page {page_num + 1} of {num_pages}", width='stretch')
                 
                 doc.close()
             finally:

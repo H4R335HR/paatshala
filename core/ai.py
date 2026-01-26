@@ -1821,10 +1821,24 @@ def fetch_submission_content(row: Dict, course_id: int = None) -> Dict[str, Any]
                                 # Also extract images for multimodal scoring
                                 pdf_images = extract_pdf_images(str(local_path), max_pages=5)
                                 result["images"].extend(pdf_images)
-                            # Handle DOCX files
+                            # Handle DOCX files - validate first
                             elif local_path.suffix.lower() in ['.docx', '.doc']:
-                                docx_text = extract_docx_text(str(local_path))
-                                file_contents.append(f"--- Content of {fname} (Word Document) ---\n{docx_text}")
+                                # Read first 2 bytes to check if it's actually a DOCX (ZIP format)
+                                with open(local_path, 'rb') as docx_f:
+                                    magic_bytes = docx_f.read(2)
+                                
+                                if magic_bytes == b'PK':
+                                    # Valid DOCX (ZIP format)
+                                    docx_text = extract_docx_text(str(local_path))
+                                    file_contents.append(f"--- Content of {fname} (Word Document) ---\n{docx_text}")
+                                else:
+                                    # Not actually a DOCX - treat as text file
+                                    try:
+                                        with open(local_path, 'r', encoding='utf-8', errors='ignore') as fp:
+                                            content = fp.read()
+                                        file_contents.append(f"--- Content of {fname} (misnamed as .docx, actually text) ---\n{content}")
+                                    except Exception:
+                                        file_contents.append(f"(File {fname} has .docx extension but is not a valid Word document)")
                             # Handle ZIP archives - extract listing AND images
                             elif local_path.suffix.lower() == '.zip':
                                 zip_listing = extract_zip_listing(str(local_path))

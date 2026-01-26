@@ -53,6 +53,45 @@ def _parse_submission_files(submission_files):
     return submission_files if isinstance(submission_files, list) else []
 
 
+def _check_unfetched_files(course_id, data):
+    """
+    Check which file submissions have unfetched files.
+    
+    Args:
+        course_id: Course ID for path construction
+        data: List of submission rows
+    
+    Returns:
+        List of (row_index, row, unfetched_files) tuples for submissions with missing files
+    """
+    unfetched_submissions = []
+    
+    for i, row in enumerate(data):
+        submission_type = row.get('Submission_Type', '')
+        submission_files = _parse_submission_files(row.get('Submission_Files', []))
+        
+        if submission_type != 'file' or not submission_files:
+            continue
+        
+        student_name = row.get('Name', 'Unknown')
+        safe_student = "".join([c for c in student_name if c.isalnum() or c in (' ', '-', '_')]).strip()
+        
+        missing_files = []
+        for f in submission_files:
+            fname = f[0] if isinstance(f, (list, tuple)) else str(f)
+            furl = f[1] if isinstance(f, (list, tuple)) and len(f) > 1 else None
+            safe_filename = "".join([c for c in fname if c.isalnum() or c in (' ', '-', '_', '.')]).strip()
+            local_path = Path(f"output/course_{course_id}/downloads/{safe_student}/{safe_filename}")
+            
+            if not local_path.exists():
+                missing_files.append((fname, furl))
+        
+        if missing_files:
+            unfetched_submissions.append((i, row, missing_files))
+    
+    return unfetched_submissions
+
+
 def render_evaluation_tab(course, meta):
     """Render the Evaluation tab content"""
     st.subheader("Submission Evaluation")
@@ -397,7 +436,7 @@ def _render_file_submission(course, row, idx):
         
         with nav_col1:
             prev_disabled = selected_file_idx == 0
-            if st.button("◀ Previous", key=f"prev_file_{idx}", disabled=prev_disabled, use_container_width=True):
+            if st.button("◀ Previous", key=f"prev_file_{idx}", disabled=prev_disabled, width='stretch'):
                 new_idx = selected_file_idx - 1
                 st.session_state[selected_key] = new_idx
                 st.session_state[nav_flag_key] = True
@@ -420,7 +459,7 @@ def _render_file_submission(course, row, idx):
         
         with nav_col3:
             next_disabled = selected_file_idx == num_files - 1
-            if st.button("Next ▶", key=f"next_file_{idx}", disabled=next_disabled, use_container_width=True):
+            if st.button("Next ▶", key=f"next_file_{idx}", disabled=next_disabled, width='stretch'):
                 new_idx = selected_file_idx + 1
                 st.session_state[selected_key] = new_idx
                 st.session_state[nav_flag_key] = True
@@ -502,7 +541,26 @@ def _render_file_submission(course, row, idx):
                 # Use shared DOCX viewer from content_viewer
                 with open(path, "rb") as f:
                     docx_bytes = f.read()
-                render_docx_viewer(docx_bytes, fname, unique_key=f"eval_{idx}")
+                
+                # Validate that it's actually a DOCX (ZIP format with 'PK' magic bytes)
+                if len(docx_bytes) >= 2 and docx_bytes[:2] == b'PK':
+                    render_docx_viewer(docx_bytes, fname, unique_key=f"eval_{idx}")
+                else:
+                    # File has .docx extension but isn't actually a DOCX
+                    # Try magic byte detection to identify the real type
+                    detected_type = detect_file_type(docx_bytes)
+                    if detected_type == '.txt':
+                        st.warning(f"⚠️ This file has a `.docx` extension but contains plain text, not a Word document.")
+                        text_content = docx_bytes.decode('utf-8', errors='ignore')
+                        render_code_content(text_content, fname)
+                    elif detected_type == '.pdf':
+                        st.warning(f"⚠️ This file has a `.docx` extension but is actually a PDF.")
+                        render_pdf_content(docx_bytes, fname, unique_key=f"eval_magic_{idx}")
+                    elif detected_type in IMAGE_EXTENSIONS:
+                        st.warning(f"⚠️ This file has a `.docx` extension but is actually an image.")
+                        render_image_content(docx_bytes, caption=fname)
+                    else:
+                        st.error(f"❌ This file has a `.docx` extension but is not a valid Word document. It may be corrupted or password-protected.")
             
             elif ext in HTML_EXTENSIONS:
                 # HTML file - render with HTML viewer
@@ -802,19 +860,45 @@ def _render_rubric_section(course, data):
             if refine_btn:
                 _show_refine_dialog(rubric_key, edited_df.to_dict('records'), task_description, module_id)
             
+            # Check for unfetched file submissions before showing batch buttons
+            unfetched_file_subs = _check_unfetched_files(course['id'], data)
+            
             # Batch Score button
             st.divider()
-            col_batch1, col_batch2, col_batch3 = st.columns(3)
+            
+            # Show warning if there are file submissions with unfetched files
+            if unfetched_file_subs:
+                total_files = sum(len(files) for _, _, files in unfetched_file_subs)
+                st.warning(
+                    f"⚠️ **{len(unfetched_file_subs)} file submission(s)** have files not yet fetched "
+                    f"({total_files} file(s) total). Scoring these without fetching may produce inaccurate results."
+                )
+            
+            col_batch1, col_batch2, col_batch3, col_batch4 = st.columns(4)
             with col_batch1:
-                do_batch_score = st.button("🎯 Batch Score with AI", width="stretch", help="Score all pending submissions with AI using this rubric")
+                do_batch_score = st.button(
+                    "🎯 Batch Score", 
+                    width="stretch", 
+                    help="Score all pending submissions with AI (skips file submissions with unfetched files)"
+                )
             with col_batch2:
-                do_batch_submit = st.button("📤 Batch Submit to Moodle", width="stretch", help="Submit all AI-scored evaluations to Moodle")
+                # Only show Fetch & Score button if there are unfetched files
+                do_fetch_and_score = st.button(
+                    "⬇️ Fetch & Score", 
+                    width="stretch", 
+                    help="Fetch missing files then score all pending submissions",
+                    disabled=(len(unfetched_file_subs) == 0)
+                ) if unfetched_file_subs else False
             with col_batch3:
-                do_clear_scores = st.button("🗑️ Clear AI Scores", width="stretch", help="Delete all saved AI scores for this assignment")
+                do_batch_submit = st.button("📤 Batch Submit", width="stretch", help="Submit all AI-scored evaluations to Moodle")
+            with col_batch4:
+                do_clear_scores = st.button("🗑️ Clear Scores", width="stretch", help="Delete all saved AI scores for this assignment")
             
             # Execute batch operations OUTSIDE column blocks for full-width progress bars
             if do_batch_score:
-                _perform_batch_scoring(course, data, edited_df.to_dict('records'), module_id, selected_group_id)
+                _perform_batch_scoring(course, data, edited_df.to_dict('records'), module_id, selected_group_id, auto_fetch=False)
+            if do_fetch_and_score:
+                _perform_batch_scoring(course, data, edited_df.to_dict('records'), module_id, selected_group_id, auto_fetch=True)
             if do_batch_submit:
                 _perform_batch_submit_to_moodle(course, data, module_id, selected_group_id)
             if do_clear_scores:
@@ -1117,7 +1201,7 @@ def _render_ai_scoring_section(course, row, idx, data):
                 st.caption(f"Using {len(rubric)} criteria")
 
 
-def _perform_batch_scoring(course, data, rubric, module_id, group_id):
+def _perform_batch_scoring(course, data, rubric, module_id, group_id, auto_fetch=False):
     """Perform AI scoring on all pending submissions sequentially.
     
     Args:
@@ -1126,6 +1210,7 @@ def _perform_batch_scoring(course, data, rubric, module_id, group_id):
         rubric: List of rubric criteria dicts
         module_id: Module ID for the assignment
         group_id: Optional group ID for batch-specific rubrics
+        auto_fetch: If True, fetch missing files before scoring file submissions
     """
     # Get task description for scoring context
     task_description = _get_task_description(module_id)
@@ -1137,6 +1222,8 @@ def _perform_batch_scoring(course, data, rubric, module_id, group_id):
     # Filter to students without AI evaluation AND who have actually submitted something
     pending = []
     skipped_no_submission = 0
+    skipped_unfetched = 0
+    
     for i, row in enumerate(data):
         student_name = row.get('Name', 'Unknown')
         
@@ -1173,16 +1260,54 @@ def _perform_batch_scoring(course, data, rubric, module_id, group_id):
     # Progress tracking (full-width since function is called outside column blocks)
     progress_bar = st.progress(0, text=f"Scoring 0/{len(pending)} submissions...")
     status_text = st.empty()
-    results = {'scored': 0, 'failed': 0, 'skipped': 0}
+    results = {'scored': 0, 'failed': 0, 'skipped': 0, 'fetched': 0}
+    
+    # Setup session for file downloads if auto_fetch is enabled
+    session = None
+    if auto_fetch:
+        session = setup_session(st.session_state.session_id)
     
     for idx, (i, row) in enumerate(pending):
         student_name = row.get('Name', 'Unknown')
+        submission_type = row.get('Submission_Type', '')
         
         # Update progress
         progress_bar.progress((idx) / len(pending), 
                              text=f"Scoring {idx + 1}/{len(pending)}: {student_name}...")
         
         try:
+            # For file submissions, check if files need to be fetched
+            if submission_type == 'file':
+                submission_files = _parse_submission_files(row.get('Submission_Files', []))
+                safe_student = "".join([c for c in student_name if c.isalnum() or c in (' ', '-', '_')]).strip()
+                
+                has_unfetched = False
+                for f in submission_files:
+                    fname = f[0] if isinstance(f, (list, tuple)) else str(f)
+                    furl = f[1] if isinstance(f, (list, tuple)) and len(f) > 1 else None
+                    safe_filename = "".join([c for c in fname if c.isalnum() or c in (' ', '-', '_', '.')]).strip()
+                    local_path = Path(f"output/course_{course['id']}/downloads/{safe_student}/{safe_filename}")
+                    
+                    if not local_path.exists():
+                        if auto_fetch and furl and session:
+                            # Fetch the file
+                            status_text.caption(f"⬇️ {student_name}: Fetching {fname}...")
+                            saved_path = download_file(session, furl, course['id'], student_name, fname)
+                            if saved_path:
+                                results['fetched'] += 1
+                            else:
+                                status_text.caption(f"❌ {student_name}: Failed to fetch {fname}")
+                                has_unfetched = True
+                        else:
+                            has_unfetched = True
+                
+                # Skip this submission if files are still missing and auto_fetch is disabled
+                if has_unfetched and not auto_fetch:
+                    status_text.caption(f"⏭️ {student_name}: Skipped (files not fetched)")
+                    results['skipped'] += 1
+                    skipped_unfetched += 1
+                    continue
+            
             # Fetch submission content (same as individual scoring)
             submission_content = fetch_submission_content(row, course['id'])
             
@@ -1256,16 +1381,32 @@ def _perform_batch_scoring(course, data, rubric, module_id, group_id):
     # Complete progress bar
     progress_bar.progress(1.0, text="Batch scoring complete!")
     
-    # Show completion notification (toast)
-    toast_msg = f"🎯 Batch scoring complete: {results['scored']} scored, {results['failed']} failed"
+    # Build completion notification message
+    toast_msg = f"🎯 Batch scoring complete: {results['scored']} scored"
+    if results['failed'] > 0:
+        toast_msg += f", {results['failed']} failed"
+    if results['fetched'] > 0:
+        toast_msg += f", {results['fetched']} files fetched"
+    if results['skipped'] > 0:
+        toast_msg += f", {results['skipped']} skipped (unfetched files)"
     if skipped_no_submission > 0:
         toast_msg += f", {skipped_no_submission} skipped (no submission)"
     st.toast(toast_msg, icon="✅")
     
-    # Show summary
-    skip_note = f" ({skipped_no_submission} students with no submission were skipped)" if skipped_no_submission > 0 else ""
-    if results['failed'] == 0:
+    # Build detailed summary notes
+    notes = []
+    if skipped_no_submission > 0:
+        notes.append(f"{skipped_no_submission} students with no submission skipped")
+    if results['skipped'] > 0:
+        notes.append(f"{results['skipped']} file submissions skipped (files not fetched)")
+    if results['fetched'] > 0:
+        notes.append(f"{results['fetched']} files auto-fetched")
+    skip_note = f" ({'; '.join(notes)})" if notes else ""
+    
+    if results['failed'] == 0 and results['skipped'] == 0:
         st.success(f"✅ Batch scoring complete! Scored {results['scored']} submissions.{skip_note}")
+    elif results['skipped'] > 0 and results['failed'] == 0:
+        st.warning(f"⚠️ Batch scoring complete: {results['scored']} scored, {results['skipped']} skipped.{skip_note}")
     else:
         st.warning(f"⚠️ Batch scoring complete: {results['scored']} scored, {results['failed']} failed.{skip_note}")
     

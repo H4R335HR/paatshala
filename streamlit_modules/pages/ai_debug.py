@@ -97,7 +97,7 @@ def render_ai_debug_tab(course=None, meta=None):
                     label_visibility="collapsed"
                 )
             with col2:
-                if st.button("🔄 Reset Key", key="reset_single_key_btn", use_container_width=True):
+                if st.button("🔄 Reset Key", key="reset_single_key_btn", width='stretch'):
                     # Extract key name from selection (before the first " (")
                     selected_key_name = selected.split(" (")[0] if selected else None
                     if selected_key_name and reset_single_key_daily_stats(selected_key_name):
