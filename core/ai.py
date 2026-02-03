@@ -100,9 +100,10 @@ def log_ai_call(
             except (json.JSONDecodeError, IOError):
                 logs = []
         
-        # Create log entry
+        # Create log entry - use max ID to avoid duplicates after truncation
+        next_id = max((log.get("id", 0) for log in logs), default=0) + 1
         entry = {
-            "id": len(logs) + 1,
+            "id": next_id,
             "timestamp": datetime.now().isoformat(),
             "function": function_name,
             "model": model,

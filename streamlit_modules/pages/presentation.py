@@ -6,7 +6,14 @@ Manages presentation sessions with student voting and instructor scoring.
 import streamlit as st
 import requests
 import json
+import io
 from datetime import datetime, timedelta
+
+try:
+    import qrcode
+    HAS_QRCODE = True
+except ImportError:
+    HAS_QRCODE = False
 
 from core.persistence import get_config, get_output_dir
 
@@ -27,6 +34,12 @@ def get_admin_auth():
     return {
         get_config('thm_auth_param', 'auth0r1ty'): get_config('thm_auth_value', 'l3tm3in')
     }
+
+
+def get_student_registration_url(batch):
+    """Get the student registration URL for a given batch."""
+    base_url = get_presentation_url()
+    return f"{base_url}?b={batch}"
 
 
 def api_call(action, batch, data=None, admin=False):
@@ -111,12 +124,16 @@ def render_presentation_tab(course, meta):
                 with col2:
                     voting_duration = st.number_input("Voting Duration (min)", 5, 30, 15)
                 
+                volunteer_bonus = st.slider("Volunteer Bonus Points", 0.0, 5.0, 2.0, 0.5, 
+                    help="Extra points awarded to presenters who volunteered for their slot")
+                
                 if st.form_submit_button("✨ Create Session", type="primary"):
                     result = api_call('create_session', batch, {
                         'title': title,
                         'instructor_weight': instructor_weight,
                         'audience_weight': 1 - instructor_weight,
-                        'voting_duration': voting_duration
+                        'voting_duration': voting_duration,
+                        'volunteer_bonus': volunteer_bonus
                     }, admin=True)
                     
                     if result.get('success'):
@@ -128,13 +145,45 @@ def render_presentation_tab(course, meta):
         else:
             st.markdown(f"#### {session.get('title', 'Session')}")
             
-            col1, col2, col3 = st.columns(3)
+            col1, col2, col3, col4 = st.columns(4)
             with col1:
                 st.metric("Status", session.get('status', 'unknown').title())
             with col2:
                 st.metric("Instructor Weight", f"{session.get('instructor_weight', 0.6):.0%}")
             with col3:
                 st.metric("Voting Duration", f"{session.get('voting_duration', 15)} min")
+            with col4:
+                st.metric("Volunteer Bonus", f"+{session.get('volunteer_bonus', 2)} pts")
+            
+            # Student registration link and QR code
+            st.divider()
+            st.markdown("#### 🔗 Student Registration Link")
+            
+            registration_url = get_student_registration_url(batch)
+            
+            col_link, col_qr = st.columns([2, 1])
+            with col_link:
+                st.code(registration_url, language=None)
+                st.caption("Share this link with students to register for presentations")
+            
+            with col_qr:
+                if HAS_QRCODE:
+                    # Generate QR code
+                    qr = qrcode.QRCode(version=1, box_size=10, border=2)
+                    qr.add_data(registration_url)
+                    qr.make(fit=True)
+                    qr_img = qr.make_image(fill_color="black", back_color="white")
+                    
+                    # Convert to bytes for display
+                    img_buffer = io.BytesIO()
+                    qr_img.save(img_buffer, format="PNG")
+                    img_buffer.seek(0)
+                    
+                    st.image(img_buffer, caption="Scan to register", width=150)
+                else:
+                    st.info("Install `qrcode` package for QR code display: `pip install qrcode[pil]`")
+            
+            st.divider()
             
             # Registrations summary
             presenters = st.session_state.pres_presenters
@@ -225,20 +274,49 @@ def render_presentation_tab(course, meta):
                 status_colors = {'open': '🟢', 'locked': '🟡', 'presenting': '🔴', 'completed': '⚪'}
                 
                 with st.container():
-                    col1, col2, col3, col4 = st.columns([2, 2, 1, 0.5])
+                    col1, col2, col3, col4 = st.columns([2, 2, 1.5, 0.5])
                     with col1:
                         st.markdown(f"{status_colors.get(status, '⚪')} **{dt_display}**")
                         if slot.get('presenter_name'):
-                            st.caption(f"{slot.get('presenter_name')} - {slot.get('topic', '')}")
+                            # Show volunteer indicator
+                            vol_icon = '🙋' if slot.get('is_volunteer') else '🎲'
+                            st.caption(f"{vol_icon} {slot.get('presenter_name')} - {slot.get('topic', '')}")
                     with col2:
                         st.caption(f"Status: {status.title()}")
+                        if slot.get('presenter_name'):
+                            if slot.get('is_volunteer'):
+                                st.caption("✅ Volunteered")
+                            else:
+                                st.caption("🎲 Random")
                     with col3:
                         if status == 'open':
-                            # Show assign button
+                            # Check for volunteers
+                            volunteers_result = api_call('get_volunteers', batch, {'slot_id': slot['id']}, admin=True)
+                            slot_volunteers = volunteers_result.get('volunteers', []) if volunteers_result.get('success') else []
+                            
                             presenters = st.session_state.pres_presenters
                             available = [p for p in presenters if p.get('status') == 'registered']
-                            if available and st.button("Assign", key=f"assign_{slot['id']}"):
-                                st.session_state[f"show_assign_{slot['id']}"] = True
+                            
+                            if slot_volunteers:
+                                # Show Assign button if there are volunteers
+                                if st.button(f"Assign ({len(slot_volunteers)})", key=f"assign_{slot['id']}"):
+                                    st.session_state[f"show_assign_{slot['id']}"] = True
+                            elif available:
+                                # No volunteers - show random assign button
+                                if st.button("🎲 Random", key=f"random_{slot['id']}", help="No volunteers - assign randomly"):
+                                    result = api_call('random_assign', batch, {'slot_id': slot['id']}, admin=True)
+                                    if result.get('success'):
+                                        st.success(f"Assigned: {result.get('assigned')}")
+                                        # Refresh
+                                        refresh = api_call('session_info', batch)
+                                        if refresh.get('success'):
+                                            st.session_state.pres_slots = refresh.get('slots', [])
+                                            st.session_state.pres_presenters = refresh.get('presenters', [])
+                                        st.rerun()
+                                    else:
+                                        st.error(result.get('error', 'Failed'))
+                            else:
+                                st.caption("No presenters")
                         elif status == 'locked':
                             if st.button("▶️ Start", key=f"start_{slot['id']}"):
                                 result = api_call('start_slot', batch, {'slot_id': slot['id']}, admin=True)
@@ -266,28 +344,29 @@ def render_presentation_tab(course, meta):
                                 else:
                                     st.error(result.get('error', 'Failed'))
                     
-                    # Assignment dialog
+                    # Assignment dialog (for volunteers)
                     if st.session_state.get(f"show_assign_{slot['id']}"):
-                        presenters = st.session_state.pres_presenters
-                        available = [p for p in presenters if p.get('status') == 'registered']
-                        options = {f"{p['name']} - {p['topic']}": p['id'] for p in available}
+                        volunteers_result = api_call('get_volunteers', batch, {'slot_id': slot['id']}, admin=True)
+                        slot_volunteers = volunteers_result.get('volunteers', []) if volunteers_result.get('success') else []
                         
-                        selected = st.selectbox("Select presenter", list(options.keys()), key=f"sel_{slot['id']}")
-                        col_a, col_b = st.columns(2)
-                        with col_a:
-                            if st.button("Confirm", key=f"confirm_{slot['id']}"):
-                                result = api_call('assign_slot', batch, {
-                                    'slot_id': slot['id'],
-                                    'presenter_id': options[selected]
-                                }, admin=True)
-                                if result.get('success'):
-                                    st.success("Assigned!")
+                        if slot_volunteers:
+                            options = {f"{v['name']} - {v['topic']}": v['presenter_id'] for v in slot_volunteers}
+                            selected = st.selectbox("Select from volunteers", list(options.keys()), key=f"sel_{slot['id']}")
+                            col_a, col_b = st.columns(2)
+                            with col_a:
+                                if st.button("Confirm", key=f"confirm_{slot['id']}"):
+                                    result = api_call('assign_slot', batch, {
+                                        'slot_id': slot['id'],
+                                        'presenter_id': options[selected]
+                                    }, admin=True)
+                                    if result.get('success'):
+                                        st.success(f"Assigned! (Volunteer: {result.get('is_volunteer', True)})")
+                                        st.session_state[f"show_assign_{slot['id']}"] = False
+                                        st.rerun()
+                            with col_b:
+                                if st.button("Cancel", key=f"cancel_{slot['id']}"):
                                     st.session_state[f"show_assign_{slot['id']}"] = False
                                     st.rerun()
-                        with col_b:
-                            if st.button("Cancel", key=f"cancel_{slot['id']}"):
-                                st.session_state[f"show_assign_{slot['id']}"] = False
-                                st.rerun()
                     
                     st.divider()
     
@@ -307,39 +386,43 @@ def render_presentation_tab(course, meta):
             st.markdown(f"### 🎤 Now Presenting: {active_slot.get('presenter_name', 'Unknown')}")
             st.markdown(f"**Topic:** {active_slot.get('topic', 'N/A')}")
             
-            # Timer
+            # Show volunteer indicator
+            if active_slot.get('is_volunteer'):
+                st.success("🙋 Volunteered for this slot (+bonus)")
+            else:
+                st.info("🎲 Randomly assigned")
+            
+            # Timer - shows elapsed time
             started_at = active_slot.get('started_at')
-            timer_expired = False
             if started_at:
                 session = st.session_state.pres_session_data or {}
-                duration = session.get('voting_duration', 15) * 60
+                target_duration = session.get('voting_duration', 15) * 60
                 try:
                     started = datetime.fromisoformat(started_at.replace('Z', '+00:00'))
                     elapsed = (datetime.now(started.tzinfo) - started).total_seconds()
                 except:
                     started = datetime.fromisoformat(started_at[:19])
                     elapsed = (datetime.now() - started).total_seconds()
-                remaining = max(0, duration - elapsed)
-                timer_expired = remaining <= 0
                 
-                mins, secs = divmod(int(remaining), 60)
-                if timer_expired:
-                    st.warning("⏰ **Timer Expired!** Click 'End Presentation' below to finalize.")
+                mins, secs = divmod(int(elapsed), 60)
+                if elapsed >= target_duration:
+                    st.metric("⏱️ Elapsed Time", f"{mins:02d}:{secs:02d}", delta="Over target", delta_color="off")
                 else:
-                    st.metric("⏱️ Time Remaining", f"{mins:02d}:{secs:02d}")
+                    st.metric("⏱️ Elapsed Time", f"{mins:02d}:{secs:02d}")
             
-            # Show End button prominently if timer expired
-            if timer_expired:
-                if st.button("⏹ End Presentation & Calculate Results", type="primary", key="end_expired"):
-                    result = api_call('end_slot', batch, {'slot_id': active_slot['id']}, admin=True)
-                    if result.get('success'):
-                        st.success("✅ Presentation ended! Check Results tab.")
-                        # Refresh
-                        refresh = api_call('session_info', batch)
-                        if refresh.get('success'):
-                            st.session_state.pres_slots = refresh.get('slots', [])
-                            st.session_state.pres_presenters = refresh.get('presenters', [])
-                        st.rerun()
+            st.divider()
+            
+            # End Presentation button - always visible
+            if st.button("⏹ End Presentation & Calculate Results", type="primary", key="end_presentation"):
+                result = api_call('end_slot', batch, {'slot_id': active_slot['id']}, admin=True)
+                if result.get('success'):
+                    st.success("✅ Presentation ended! Check Results tab.")
+                    # Refresh
+                    refresh = api_call('session_info', batch)
+                    if refresh.get('success'):
+                        st.session_state.pres_slots = refresh.get('slots', [])
+                        st.session_state.pres_presenters = refresh.get('presenters', [])
+                    st.rerun()
             
             st.divider()
             

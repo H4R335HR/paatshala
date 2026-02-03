@@ -174,7 +174,7 @@ def render_ai_debug_tab(course=None, meta=None):
     st.divider()
     
     # Display logs
-    for log in logs:
+    for log_idx, log in enumerate(logs):
         # Status indicator
         status_icon = "✅" if log.get("success") else "❌"
         
@@ -216,7 +216,7 @@ def render_ai_debug_tab(course=None, meta=None):
                     value=log.get("prompt_preview", ""),
                     height=150,
                     disabled=True,
-                    key=f"prompt_preview_{log.get('id')}"
+                    key=f"prompt_preview_{log_idx}_{log.get('id')}"
                 )
                 
                 if len(log.get("prompt_full", "")) > len(log.get("prompt_preview", "")):
@@ -229,7 +229,7 @@ def render_ai_debug_tab(course=None, meta=None):
                     value=log.get("response_preview", ""),
                     height=150,
                     disabled=True,
-                    key=f"response_preview_{log.get('id')}"
+                    key=f"response_preview_{log_idx}_{log.get('id')}"
                 )
                 
                 if len(log.get("response_full", "")) > len(log.get("response_preview", "")):

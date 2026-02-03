@@ -1068,6 +1068,31 @@ def fetch_task_details(session_id, name, mid, url):
     except Exception:
         return name, mid, url, {}
 
+
+def fetch_task_description(session, module_id):
+    """
+    Fetch only the task description from an assignment page.
+    
+    Args:
+        session: Moodle session object
+        module_id: Assignment module ID
+    
+    Returns:
+        str: The task description HTML, or None on error
+    """
+    url = f"{BASE}/mod/assign/view.php?id={module_id}"
+    
+    try:
+        resp = session.get(url, timeout=30)
+        if not resp.ok:
+            return None
+        
+        info = parse_assign_view(resp.text)
+        return info.get('description')
+    except Exception as e:
+        logger.error(f"Error fetching task description: {e}")
+        return None
+
 def fetch_tasks_list(session_id, course_id, progress_callback=None):
     """Fetch all tasks for a course with details"""
     logger.info(f"Fetching full task list for course {course_id}")
