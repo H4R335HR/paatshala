@@ -1023,6 +1023,15 @@ def _render_ai_scoring_section(course, row, idx, data):
                     max_grade_source = 'submission_data'
                     break
     
+    # NEW FALLBACK: Calculate max from rubric total (sum of all criteria max_score)
+    # This is often the most accurate source as the rubric defines the actual grading scale
+    if max_grade is None and rubric:
+        rubric_total = sum(c.get('max_score', 0) for c in rubric if isinstance(c, dict))
+        if rubric_total > 0:
+            max_grade = rubric_total
+            max_grade_source = 'rubric'
+            logger.info(f"Using rubric total as max_grade={max_grade} for module {module_id}")
+    
     # Final fallback with warning
     if max_grade is None:
         max_grade = 15
@@ -1425,9 +1434,16 @@ def _perform_batch_submit_to_moodle(course, data, module_id, group_id):
     """
     from core.api import submit_grade, get_fresh_sesskey, setup_session
     
-    # Get max grade for this task
-    max_grade = 15  # Default
-    if st.session_state.tasks_data:
+    # Get max grade for this task - use same priority as individual scoring
+    max_grade = None
+    
+    # Priority 1: session state (from grading page)
+    session_state_key = f"max_grade_{module_id}"
+    if session_state_key in st.session_state and st.session_state[session_state_key]:
+        max_grade = st.session_state[session_state_key]
+    
+    # Priority 2: tasks_data
+    if max_grade is None and st.session_state.tasks_data:
         for task in st.session_state.tasks_data:
             if str(task.get('Module ID')) == str(module_id):
                 max_grade_str = task.get('Max Grade', '')
@@ -1437,6 +1453,33 @@ def _perform_batch_submit_to_moodle(course, data, module_id, group_id):
                     except:
                         pass
                 break
+    
+    # Priority 3: Extract from student grades
+    if max_grade is None:
+        for row in data:
+            grade_str = row.get('Final Grade', '')
+            if grade_str:
+                _, student_max = _parse_moodle_grade(grade_str)
+                if student_max:
+                    max_grade = student_max
+                    break
+    
+    # Priority 4: rubric total
+    if max_grade is None:
+        rubric_key = f"rubric_{module_id}"
+        if group_id:
+            rubric_key += f"_grp{group_id}"
+        rubric = st.session_state.get(rubric_key)
+        if rubric:
+            rubric_total = sum(c.get('max_score', 0) for c in rubric if isinstance(c, dict))
+            if rubric_total > 0:
+                max_grade = rubric_total
+                logger.info(f"Batch submit using rubric total as max_grade={max_grade}")
+    
+    # Final fallback
+    if max_grade is None:
+        max_grade = 15
+        logger.warning(f"Batch submit using default max_grade=15 for module {module_id}")
     
     # Get assignment ID
     assignment_id = st.session_state.get(f"assignment_id_{module_id}")

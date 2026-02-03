@@ -12,7 +12,7 @@ import time
 logger = logging.getLogger(__name__)
 
 from .auth import setup_session, PAATSHALA_HOST, BASE
-from .parser import parse_assign_view, parse_grading_table, extract_assignment_id
+from .parser import parse_assign_view, parse_grading_table, extract_assignment_id, extract_max_grade_from_grader
 from .persistence import get_config
 
 DEFAULT_THREADS = 4
@@ -1182,10 +1182,36 @@ def get_assignment_dates(session, module_id):
         # So we search by class "mform" and method "post"
         form = soup.find("form", class_="mform", method="post")
         if not form:
-            # Fallback: try finding any form with action containing modedit.php
+            # Fallback 1: try finding any form with action containing modedit.php
             form = soup.find("form", action=lambda a: a and "modedit.php" in a and "?" not in a)
         if not form:
+            # Fallback 2: try finding form by id pattern (mform1_*)
+            form = soup.find("form", id=lambda i: i and i.startswith("mform"))
+        if not form:
+            # Fallback 3: try finding any form on the page with method="post"
+            all_forms = soup.find_all("form", method="post")
+            if all_forms:
+                form = all_forms[0]
+                logger.info(f"Using first POST form: id={form.get('id')}, action={form.get('action')[:50] if form.get('action') else 'N/A'}")
+        if not form:
             logger.error("Could not find modedit form")
+            # Save the response HTML for debugging
+            try:
+                from pathlib import Path
+                debug_dir = Path("output") / "debug"
+                debug_dir.mkdir(parents=True, exist_ok=True)
+                debug_file = debug_dir / f"modedit_form_error_{module_id}.html"
+                with open(debug_file, 'w', encoding='utf-8') as f:
+                    f.write(resp.text)
+                logger.error(f"Saved response HTML for debugging: {debug_file}")
+                
+                # Log what forms ARE on the page
+                all_forms = soup.find_all("form")
+                logger.error(f"Found {len(all_forms)} form(s) on page:")
+                for i, f in enumerate(all_forms):
+                    logger.error(f"  Form {i}: id={f.get('id')}, class={f.get('class')}, action={str(f.get('action'))[:60]}")
+            except Exception as e:
+                logger.warning(f"Could not save debug HTML: {e}")
             return None
         
         # Helper function to extract date from Moodle's multi-field date selector
@@ -1699,16 +1725,22 @@ def fetch_submissions(session_id, module_id, group_id=None):
         assignment_id = extract_assignment_id(resp.text)
         
         # If not found and we have submissions, fetch the grader page for the first student
-        if not assignment_id and submissions:
+        # The grader page contains both assignment_id and max_grade ("Grade out of X")
+        if (not assignment_id or not max_grade) and submissions:
             first_user_id = submissions[0].get('User_ID')
             if first_user_id:
                 grader_url = f"{BASE}/mod/assign/view.php?id={module_id}&action=grader&userid={first_user_id}"
                 try:
                     grader_resp = session.get(grader_url, timeout=15)
                     if grader_resp.ok:
-                        assignment_id = extract_assignment_id(grader_resp.text)
+                        if not assignment_id:
+                            assignment_id = extract_assignment_id(grader_resp.text)
+                        # Extract max_grade from grader page - this is the reliable source
+                        # It shows "Grade out of X" even when no students have been graded
+                        if not max_grade:
+                            max_grade = extract_max_grade_from_grader(grader_resp.text)
                 except:
-                    pass  # Failed to get grader page, assignment_id remains None
+                    pass  # Failed to get grader page
         
         return submissions, assignment_id, max_grade
     except:

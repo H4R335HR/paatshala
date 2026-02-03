@@ -7,6 +7,33 @@ logger = logging.getLogger(__name__)
 def text_or_none(node):
     return node.get_text(" ", strip=True) if node else ""
 
+def extract_max_grade_from_grader(html):
+    """
+    Extract max_grade from the individual grader page.
+    Looks for "Grade out of X" text which is always visible.
+    
+    Args:
+        html: HTML content of the grader page
+        
+    Returns:
+        float: The max grade value, or None if not found
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    
+    # Look for "Grade out of X" text anywhere in the page
+    # It appears in the grade section as "Grade out of 100"
+    text = soup.get_text()
+    match = re.search(r'Grade out of\s*(\d+(?:\.\d+)?)', text, re.I)
+    if match:
+        try:
+            max_grade = float(match.group(1))
+            logger.info(f"[extract_max_grade_from_grader] Found max_grade={max_grade}")
+            return max_grade
+        except ValueError:
+            pass
+    
+    return None
+
 def clean_grade_value(text):
     """
     Extract the grade value from a cell text.
@@ -198,32 +225,7 @@ def parse_grading_table(html):
             # Match "grade" but not "final grade" - the "grade" column has the editable score
             if h.strip().startswith("grade") and "final" not in h:
                 grade_col_idx = i
-                
-                # Try to extract max grade from header text (format: "Grade / 15.00" or "Grade / 100.00")
-                header_text = text_or_none(header_ths[i])
-                grade_match = re.search(r'/\s*(\d+(?:\.\d+)?)', header_text)
-                if grade_match:
-                    try:
-                        max_grade = float(grade_match.group(1))
-                        logger.info(f"[parse_grading_table] Extracted max_grade={max_grade} from header: '{header_text}'")
-                    except ValueError:
-                        pass
                 break
-    
-    # Alternative: Try to find max_grade from grade input fields (data-gradedesc attribute)
-    # Format: "Grade out of 15.00" or similar
-    if max_grade is None:
-        grade_input = soup.find("input", attrs={"data-gradedesc": True})
-        if grade_input:
-            grade_desc = grade_input.get("data-gradedesc", "")
-            # Look for "Grade out of XX" or "XX.XX" at the end
-            out_of_match = re.search(r'out of\s*(\d+(?:\.\d+)?)', grade_desc, re.I)
-            if out_of_match:
-                try:
-                    max_grade = float(out_of_match.group(1))
-                    logger.info(f"[parse_grading_table] Extracted max_grade={max_grade} from input data-gradedesc: '{grade_desc}'")
-                except ValueError:
-                    pass
     
     tbody = table.find("tbody")
     if not tbody:
@@ -280,7 +282,19 @@ def parse_grading_table(html):
                 submissions = text_or_none(submission_cell)
         
         feedback = text_or_none(cells[11])
-        final_grade = clean_grade_value(text_or_none(cells[grade_col_idx]))
+        grade_cell_text = text_or_none(cells[grade_col_idx])
+        final_grade = clean_grade_value(grade_cell_text)
+        
+        # Extract max_grade from the first row with a valid "X / Y" format
+        # This is the simplest and most reliable source - straight from the grade cell
+        if max_grade is None and grade_cell_text:
+            grade_match = re.search(r'\d+(?:\.\d+)?\s*/\s*(\d+(?:\.\d+)?)', grade_cell_text)
+            if grade_match:
+                try:
+                    max_grade = float(grade_match.group(1))
+                    logger.info(f"[parse_grading_table] Extracted max_grade={max_grade} from grade cell: '{grade_cell_text}'")
+                except ValueError:
+                    pass
         
         rows.append({
             "Name": name,
