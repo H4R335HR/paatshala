@@ -10,7 +10,7 @@ def text_or_none(node):
 def extract_max_grade_from_grader(html):
     """
     Extract max_grade from the individual grader page.
-    Looks for "Grade out of X" text which is always visible.
+    Tries multiple patterns to find the max grade.
     
     Args:
         html: HTML content of the grader page
@@ -19,19 +19,64 @@ def extract_max_grade_from_grader(html):
         float: The max grade value, or None if not found
     """
     soup = BeautifulSoup(html, "html.parser")
-    
-    # Look for "Grade out of X" text anywhere in the page
-    # It appears in the grade section as "Grade out of 100"
     text = soup.get_text()
+    
+    # Pattern 1: "Grade out of X" text (most common)
     match = re.search(r'Grade out of\s*(\d+(?:\.\d+)?)', text, re.I)
     if match:
         try:
             max_grade = float(match.group(1))
-            logger.info(f"[extract_max_grade_from_grader] Found max_grade={max_grade}")
+            logger.info(f"[extract_max_grade_from_grader] Found max_grade={max_grade} via 'Grade out of X'")
             return max_grade
         except ValueError:
             pass
     
+    # Pattern 2: Look for grade input with max attribute
+    # <input type="text" ... data-max-grade="100" ... />
+    grade_input = soup.find('input', attrs={'data-max-grade': True})
+    if grade_input:
+        try:
+            max_grade = float(grade_input.get('data-max-grade'))
+            logger.info(f"[extract_max_grade_from_grader] Found max_grade={max_grade} via data-max-grade attribute")
+            return max_grade
+        except (ValueError, TypeError):
+            pass
+    
+    # Pattern 3: "Maximum grade: X" or similar labels
+    match = re.search(r'Maximum\s+grade[:\s]*(\d+(?:\.\d+)?)', text, re.I)
+    if match:
+        try:
+            max_grade = float(match.group(1))
+            logger.info(f"[extract_max_grade_from_grader] Found max_grade={max_grade} via 'Maximum grade'")
+            return max_grade
+        except ValueError:
+            pass
+    
+    # Pattern 4: "/ X" at the end of a grade display (e.g., "Grade 15.00 / 100.00")
+    match = re.search(r'/\s*(\d+(?:\.\d+)?)(?!.*/)\s*$', text, re.MULTILINE)
+    if match:
+        try:
+            max_grade = float(match.group(1))
+            # Only use if it looks like a valid max (>=1)
+            if max_grade >= 1:
+                logger.info(f"[extract_max_grade_from_grader] Found max_grade={max_grade} via '/ X' pattern")
+                return max_grade
+        except ValueError:
+            pass
+    
+    # Pattern 5: Look in form action or hidden inputs
+    for inp in soup.find_all('input', {'type': 'hidden'}):
+        name = inp.get('name', '').lower()
+        if 'maxgrade' in name or 'max_grade' in name:
+            try:
+                max_grade = float(inp.get('value', 0))
+                if max_grade >= 1:
+                    logger.info(f"[extract_max_grade_from_grader] Found max_grade={max_grade} via hidden input")
+                    return max_grade
+            except (ValueError, TypeError):
+                pass
+    
+    logger.debug(f"[extract_max_grade_from_grader] Could not find max_grade in grader page")
     return None
 
 def clean_grade_value(text):
@@ -212,6 +257,7 @@ def parse_grading_table(html):
     if thead:
         header_ths = thead.find_all("th")
         headers = [text_or_none(th).lower() for th in header_ths]
+        headers_raw = [text_or_none(th) for th in header_ths]  # Keep raw for max_grade extraction
         
         # Detect assignment type
         if any("file submissions" in h for h in headers):
@@ -225,11 +271,27 @@ def parse_grading_table(html):
             # Match "grade" but not "final grade" - the "grade" column has the editable score
             if h.strip().startswith("grade") and "final" not in h:
                 grade_col_idx = i
+                
+                # NEW: Try to extract max_grade from the header itself
+                # Headers like "Grade / 100.00" or "Grade / 15" contain the max
+                raw_header = headers_raw[i]
+                header_match = re.search(r'/\s*(\d+(?:\.\d+)?)', raw_header)
+                if header_match:
+                    try:
+                        max_grade = float(header_match.group(1))
+                        logger.info(f"[parse_grading_table] Extracted max_grade={max_grade} from header: '{raw_header}'")
+                    except ValueError:
+                        pass
                 break
     
     tbody = table.find("tbody")
     if not tbody:
+        logger.debug(f"[parse_grading_table] No tbody found, returning max_grade={max_grade}")
         return [], max_grade
+    
+    # Debug: Log what we found in headers
+    if thead:
+        logger.debug(f"[parse_grading_table] Headers found: {headers[:10]}... (grade_col_idx={grade_col_idx}, max_grade from header={max_grade})")
 
     for tr in tbody.find_all("tr"):
         if "emptyrow" in tr.get("class", []):

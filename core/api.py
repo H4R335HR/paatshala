@@ -1691,8 +1691,77 @@ def get_available_groups(session, module_id, activity_type='assign'):
                 groups.append((group_id, group_name, member_count))
         
         return groups
-    except:
+    except Exception:
         return []
+
+def _extract_max_grade_from_edit_page(html):
+    """
+    Extract max_grade from the assignment edit/settings page.
+    
+    The edit page (modedit.php) has a form field for grade with the max value.
+    Look for input fields like:
+    - <input ... name="grade[modgrade_point]" ... value="100" />
+    - <select ... name="grade[modgrade_type]" ...>  with <option value="point">Point</option>
+    - Text patterns like "Maximum grade" or grade configuration
+    
+    Args:
+        html: HTML content of the assignment edit page
+        
+    Returns:
+        float: The max grade value, or None if not found
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    
+    # Pattern 1: Look for grade point input
+    # <input type="text" name="grade[modgrade_point]" id="id_grade_modgrade_point" value="100" ...>
+    grade_input = soup.find('input', {'name': re.compile(r'grade\[modgrade_point\]', re.I)})
+    if grade_input:
+        try:
+            max_grade = float(grade_input.get('value', 0))
+            if max_grade >= 1:
+                logger.info(f"[_extract_max_grade_from_edit_page] Found max_grade={max_grade} via grade[modgrade_point]")
+                return max_grade
+        except (ValueError, TypeError):
+            pass
+    
+    # Pattern 2: Look for any input with "grade" and "point" in the name/id
+    for inp in soup.find_all('input', {'type': 'text'}):
+        name = inp.get('name', '').lower()
+        inp_id = inp.get('id', '').lower()
+        if ('grade' in name or 'grade' in inp_id) and ('point' in name or 'point' in inp_id):
+            try:
+                max_grade = float(inp.get('value', 0))
+                if max_grade >= 1:
+                    logger.info(f"[_extract_max_grade_from_edit_page] Found max_grade={max_grade} via input {inp.get('name')}")
+                    return max_grade
+            except (ValueError, TypeError):
+                pass
+    
+    # Pattern 3: Look for "Maximum grade" label with value
+    text = soup.get_text()
+    match = re.search(r'Maximum\s+grade[:\s]*(\d+(?:\\.\d+)?)', text, re.I)
+    if match:
+        try:
+            max_grade = float(match.group(1))
+            if max_grade >= 1:
+                logger.info(f"[_extract_max_grade_from_edit_page] Found max_grade={max_grade} via 'Maximum grade' text")
+                return max_grade
+        except ValueError:
+            pass
+    
+    # Pattern 4: Look for "Grade" section with "out of" pattern
+    match = re.search(r'(?:Grade|Points?)\s+out\s+of\s*(\d+(?:\\.\d+)?)', text, re.I)
+    if match:
+        try:
+            max_grade = float(match.group(1))
+            if max_grade >= 1:
+                logger.info(f"[_extract_max_grade_from_edit_page] Found max_grade={max_grade} via 'out of' text")
+                return max_grade
+        except ValueError:
+            pass
+    
+    logger.debug("[_extract_max_grade_from_edit_page] Could not find max_grade in edit page")
+    return None
 
 def fetch_submissions(session_id, module_id, group_id=None):
     """
@@ -1739,11 +1808,27 @@ def fetch_submissions(session_id, module_id, group_id=None):
                         # It shows "Grade out of X" even when no students have been graded
                         if not max_grade:
                             max_grade = extract_max_grade_from_grader(grader_resp.text)
-                except:
-                    pass  # Failed to get grader page
+                            if max_grade:
+                                logger.info(f"Extracted max_grade={max_grade} from grader page")
+                except Exception as e:
+                    logger.debug(f"Failed to get grader page: {e}")
+        
+        # ADDITIONAL FALLBACK: Try to get max_grade from assignment edit/settings page
+        # This is the most reliable source as it directly shows the configured grade
+        if not max_grade:
+            try:
+                edit_url = f"{BASE}/course/modedit.php?update={module_id}&return=1"
+                edit_resp = session.get(edit_url, timeout=15)
+                if edit_resp.ok:
+                    max_grade = _extract_max_grade_from_edit_page(edit_resp.text)
+                    if max_grade:
+                        logger.info(f"Extracted max_grade={max_grade} from assignment edit page")
+            except Exception as e:
+                logger.debug(f"Failed to get assignment edit page: {e}")
         
         return submissions, assignment_id, max_grade
-    except:
+    except Exception as e:
+        logger.error(f"Error in fetch_submissions: {e}")
         return [], None, None
 
 
