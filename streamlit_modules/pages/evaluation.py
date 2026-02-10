@@ -701,7 +701,100 @@ def _render_link_submission(row, sub_type):
             st.warning("Analysis not run yet. Click 'Refresh Analysis'.")
     
     elif sub_type == 'text':
+        submission_text = row.get('Submission', '')
         st.info("ℹ️ Text-only submission (No link detected)")
+        
+        # Check if submission looks like it could be a GitHub owner/repo format
+        # Pattern: word/word (e.g., "Jiya1922/NetworkSimLab-jiyanna")
+        import re
+        github_like_match = re.search(r'^([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)$', submission_text.strip())
+        
+        if github_like_match:
+            potential_repo = github_like_match.group(1)
+            student_name = row.get('Name', 'Unknown')
+            module_id = row.get('Module ID')
+            github_url = f"https://github.com/{potential_repo}"
+            
+            st.warning(f"⚠️ This looks like it might be a GitHub repo path: **{potential_repo}**")
+            st.caption(f"Student submitted: `{submission_text.strip()}` → Will interpret as: `{github_url}`")
+            
+            # Show a button to score directly with this interpreted URL
+            if st.button("🎯 Score as GitHub Repo", key=f"score_github_{hash(student_name + potential_repo)}", 
+                        help=f"Run AI scoring treating this as {github_url}"):
+                from core.ai import fetch_github_content, score_submission, save_evaluation, load_rubric
+                
+                # Get course and rubric info
+                course = st.session_state.selected_course
+                selected_group_id = st.session_state.selected_group['id'] if st.session_state.selected_group else None
+                
+                rubric_key = f"rubric_{module_id}"
+                if selected_group_id:
+                    rubric_key += f"_grp{selected_group_id}"
+                rubric = st.session_state.get(rubric_key)
+                
+                if not rubric:
+                    existing = load_rubric(course['id'], module_id, selected_group_id)
+                    if existing and 'criteria' in existing:
+                        rubric = existing['criteria']
+                
+                if not rubric:
+                    st.error("❌ No rubric found. Please generate a rubric first.")
+                else:
+                    with st.spinner(f"Fetching {github_url} and scoring..."):
+                        # Fetch GitHub content with interpreted URL
+                        pat = get_config("github_pat")
+                        github_data = fetch_github_content(github_url, pat)
+                        
+                        if github_data.get('error'):
+                            st.error(f"❌ Failed to fetch GitHub: {github_data['error']}")
+                        else:
+                            # Build content dict manually
+                            files_list = "\n".join([f"- {f['name']} ({f['type']})" for f in github_data.get("files", [])])
+                            file_contents_text = "\n\n".join(github_data.get("file_contents", []))
+                            
+                            submission_content = {
+                                "type": "link",
+                                "content": f"""GitHub Repository: {github_url}
+
+## Files in Repository:
+{files_list or "(empty)"}
+
+## Extracted File Contents:
+{file_contents_text or "(No downloadable content extracted)"}
+
+## README (summary):
+{github_data.get('readme', '(No README)')[:5000]}
+""",
+                                "summary": f"GitHub repo: {potential_repo}",
+                                "images": github_data.get("images", []),
+                                "error": None
+                            }
+                            
+                            # Get task description
+                            task_description = ""
+                            if st.session_state.tasks_data:
+                                for task in st.session_state.tasks_data:
+                                    if str(task.get('Module ID')) == str(module_id):
+                                        task_description = task.get('description', '')
+                                        break
+                            
+                            # Get timeliness info
+                            is_on_time = row.get('Is_On_Time', 'unknown')
+                            if is_on_time == True or str(is_on_time).lower() in ['true', 'yes', 'on time', '1']:
+                                submission_content["is_on_time"] = True
+                            elif is_on_time == False or str(is_on_time).lower() in ['false', 'no', 'late', '0']:
+                                submission_content["is_on_time"] = False
+                            
+                            # Score with AI
+                            result = score_submission(submission_content, rubric, task_description, student_name)
+                            
+                            if result.get('error'):
+                                st.error(f"❌ Scoring error: {result['error']}")
+                            else:
+                                # Save evaluation
+                                save_evaluation(course['id'], module_id, student_name, result, selected_group_id)
+                                st.success(f"✅ Scored: {result.get('total_score', 0)}/100")
+                                st.rerun()
     
     elif sub_type == 'empty':
         st.warning("⚠️ No submission found")
@@ -1032,11 +1125,26 @@ def _render_ai_scoring_section(course, row, idx, data):
             max_grade_source = 'rubric'
             logger.info(f"Using rubric total as max_grade={max_grade} for module {module_id}")
     
-    # Final fallback with warning
+    # NEW FALLBACK: Auto-fetch max_grade from Moodle grading page
+    # This makes an API call but eliminates the need to fetch submissions first
+    if max_grade is None:
+        try:
+            from core.api import fetch_max_grade
+            fetched_grade = fetch_max_grade(st.session_state.session_id, module_id)
+            if fetched_grade:
+                max_grade = fetched_grade
+                max_grade_source = 'api_fetch'
+                # Cache it in session state for future use
+                st.session_state[session_state_key] = max_grade
+                logger.debug(f"Auto-fetched max_grade={max_grade} for module {module_id}")
+        except Exception as e:
+            logger.debug(f"Failed to auto-fetch max_grade: {e}")
+    
+    # Final fallback with warning (should rarely happen now)
     if max_grade is None:
         max_grade = 15
         max_grade_source = 'default'
-        logger.warning(f"Using default max_grade=15 for module {module_id}. Fetch submissions first to auto-detect max grade.")
+        logger.warning(f"Using default max_grade=15 for module {module_id}. Could not auto-detect.")
     
     # Get Moodle grade and feedback from row data
     moodle_grade = row.get('Final Grade', '')

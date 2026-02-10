@@ -9,6 +9,7 @@ from core.persistence import (
     SENSITIVE_KEYS, CONFIG_FILE
 )
 import os
+import logging
 
 # Define all configurable settings with their metadata
 CONFIG_SCHEMA = {
@@ -150,6 +151,20 @@ CONFIG_SCHEMA = {
             "default": "512",
             "type": "text"
         }
+    },
+    "Application": {
+        "default_volunteer_bonus": {
+            "label": "Default Volunteer Bonus",
+            "help": "Default bonus points for volunteers in presentation sessions (0-5). Default: 5",
+            "default": "5",
+            "type": "text"
+        },
+        "debug_logging": {
+            "label": "Enable Debug Logging",
+            "help": "Show detailed debug logs in the console. Useful for troubleshooting ZIP/PDF extraction, API calls, etc.",
+            "default": "false",
+            "type": "boolean"
+        }
     }
 }
 
@@ -283,8 +298,37 @@ def render_config_page():
                 with cols[col_idx % 2]:
                     current_value = current_config.get(key, "") or current_config.get(key.lower(), "")
                     
+                    # Boolean type - render as checkbox
+                    if meta["type"] == "boolean":
+                        # Parse current value as boolean
+                        if isinstance(current_value, bool):
+                            is_checked = current_value
+                        else:
+                            is_checked = str(current_value).lower() in ['true', '1', 'yes', 'on']
+                        
+                        new_value = st.checkbox(
+                            meta["label"],
+                            value=is_checked,
+                            help=meta["help"],
+                            key=f"config_{key}"
+                        )
+                        
+                        # Apply debug logging change immediately
+                        if key == "debug_logging":
+                            root_logger = logging.getLogger()
+                            if new_value:
+                                root_logger.setLevel(logging.DEBUG)
+                            else:
+                                root_logger.setLevel(logging.INFO)
+                        
+                        # Track as change if different from saved value
+                        new_value_str = "true" if new_value else "false"
+                        saved_value_str = str(current_value).lower() if current_value else meta["default"]
+                        if new_value_str != saved_value_str:
+                            changes[key] = new_value_str
+                    
                     # For sensitive fields, show placeholder
-                    if meta["type"] == "password":
+                    elif meta["type"] == "password":
                         # If there's an existing value, show a helper message
                         if current_value:
                             st.caption(f"🔒 {meta['label']} is set")

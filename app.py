@@ -14,6 +14,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Apply saved debug logging setting from config
+from core.persistence import get_config
+debug_logging = get_config("debug_logging")
+if debug_logging and str(debug_logging).lower() in ['true', '1', 'yes', 'on']:
+    logging.getLogger().setLevel(logging.DEBUG)
+    logger.debug("Debug logging enabled from config")
+
 from core.auth import (
     login_and_get_cookie, validate_session, setup_session, attempt_auto_login
 )

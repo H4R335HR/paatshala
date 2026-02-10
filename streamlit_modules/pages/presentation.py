@@ -124,7 +124,8 @@ def render_presentation_tab(course, meta):
                 with col2:
                     voting_duration = st.number_input("Voting Duration (min)", 5, 30, 15)
                 
-                volunteer_bonus = st.slider("Volunteer Bonus Points", 0.0, 5.0, 2.0, 0.5, 
+                configured_default = min(5.0, max(0.0, float(get_config('default_volunteer_bonus', '5'))))
+                volunteer_bonus = st.slider("Volunteer Bonus Points", 0.0, 5.0, configured_default, 0.5, 
                     help="Extra points awarded to presenters who volunteered for their slot")
                 
                 if st.form_submit_button("✨ Create Session", type="primary"):
@@ -303,18 +304,38 @@ def render_presentation_tab(course, meta):
                                     st.session_state[f"show_assign_{slot['id']}"] = True
                             elif available:
                                 # No volunteers - show random assign button
-                                if st.button("🎲 Random", key=f"random_{slot['id']}", help="No volunteers - assign randomly"):
-                                    result = api_call('random_assign', batch, {'slot_id': slot['id']}, admin=True)
-                                    if result.get('success'):
-                                        st.success(f"Assigned: {result.get('assigned')}")
-                                        # Refresh
-                                        refresh = api_call('session_info', batch)
-                                        if refresh.get('success'):
-                                            st.session_state.pres_slots = refresh.get('slots', [])
-                                            st.session_state.pres_presenters = refresh.get('presenters', [])
+                                if st.button("🎲 Random", key=f"random_{slot['id']}", help="No volunteers - pick randomly from registered presenters"):
+                                    import random
+                                    picked = random.choice(available)
+                                    st.session_state[f"random_pick_{slot['id']}"] = picked
+                            
+                            # Show random pick result (persists after button click)
+                            if st.session_state.get(f"random_pick_{slot['id']}") and not slot.get('presenter_name'):
+                                picked = st.session_state[f"random_pick_{slot['id']}"]
+                                st.info(f"🎲 Picked: **{picked.get('name')}** — {picked.get('topic', 'No topic')}")
+                                col_ok, col_re = st.columns(2)
+                                with col_ok:
+                                    if st.button("✅ Confirm", key=f"confirm_random_{slot['id']}"):
+                                        result = api_call('assign_slot', batch, {
+                                            'slot_id': slot['id'],
+                                            'presenter_id': picked.get('id')
+                                        }, admin=True)
+                                        if result.get('success'):
+                                            st.success(f"Assigned: {picked.get('name')}")
+                                            del st.session_state[f"random_pick_{slot['id']}"]
+                                            refresh = api_call('session_info', batch)
+                                            if refresh.get('success'):
+                                                st.session_state.pres_slots = refresh.get('slots', [])
+                                                st.session_state.pres_presenters = refresh.get('presenters', [])
+                                            st.rerun()
+                                        else:
+                                            st.error(result.get('error', 'Failed'))
+                                with col_re:
+                                    if st.button("🔄 Re-roll", key=f"reroll_{slot['id']}"):
+                                        import random
+                                        picked = random.choice(available)
+                                        st.session_state[f"random_pick_{slot['id']}"] = picked
                                         st.rerun()
-                                    else:
-                                        st.error(result.get('error', 'Failed'))
                             else:
                                 st.caption("No presenters")
                         elif status == 'locked':
@@ -496,11 +517,32 @@ def render_presentation_tab(course, meta):
         else:
             import pandas as pd
             df = pd.DataFrame(leaderboard)
+            
+            # Override volunteer_bonus with configured default and recalculate final
+            configured_bonus = min(5.0, max(0.0, float(get_config('default_volunteer_bonus', '5'))))
+            session = st.session_state.pres_session_data or {}
+            instr_w = float(session.get('instructor_weight', 0.6))
+            aud_w = float(session.get('audience_weight', 1 - instr_w))
+            
+            if 'volunteer_bonus' in df.columns:
+                df['volunteer_bonus'] = df.apply(
+                    lambda r: configured_bonus if r.get('is_volunteer') else 0, axis=1)
+            if 'final' in df.columns and 'instructor' in df.columns and 'audience_avg' in df.columns:
+                df['final'] = df.apply(
+                    lambda r: round(
+                        float(r.get('instructor') or 0) * instr_w +
+                        float(r.get('audience_avg') or 0) * aud_w +
+                        float(r.get('volunteer_bonus') or 0), 1
+                    ), axis=1)
+                # Re-sort by final score descending
+                df = df.sort_values('final', ascending=False).reset_index(drop=True)
+            
             df.insert(0, 'Rank', range(1, len(df) + 1))
             
             # Add medal emojis
             df['Rank'] = df['Rank'].apply(lambda x: {1: '🥇', 2: '🥈', 3: '🥉'}.get(x, str(x)))
             
+            st.caption(f"📌 Using configured volunteer bonus: **{configured_bonus}** pts")
             st.dataframe(df, hide_index=True, width='stretch')
             
             # Export

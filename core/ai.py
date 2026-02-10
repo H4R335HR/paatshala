@@ -1330,15 +1330,49 @@ def fetch_github_content(repo_url: str, pat: Optional[str] = None) -> Dict[str, 
         "error": None
     }
     
+    # Normalize the URL first - handle common student input errors
+    # 1. Remove surrounding brackets: [https://...] -> https://...
+    cleaned_url = repo_url.strip()
+    if cleaned_url.startswith('[') and ']' in cleaned_url:
+        cleaned_url = cleaned_url.lstrip('[').split(']')[0]
+    if cleaned_url.startswith('(') and ')' in cleaned_url:
+        cleaned_url = cleaned_url.lstrip('(').split(')')[0]
+    
+    # 2. Strip trailing punctuation that might be part of surrounding text
+    cleaned_url = cleaned_url.rstrip('.,;:!?')
+    
     # Extract owner/repo from URL
     # Handles: github.com/owner/repo, github.com/owner/repo.git, etc.
-    match = re.search(r'github\.com/([^/]+)/([^/\s]+)', repo_url)
+    match = re.search(r'github\.com/([^/]+)/([^/\s\]\)]+)', cleaned_url)
     if not match:
         result["error"] = "Could not parse GitHub URL"
         return result
     
     owner = match.group(1)
-    repo = match.group(2).removesuffix('.git').rstrip('/')
+    repo = match.group(2)
+    
+    # Clean up repo name - handle common typos and suffixes
+    # Remove .git suffix (handles .git, ..git, ...git, etc.)
+    repo = repo.removesuffix('.git')  # Only strip exactly .git, preserve trailing dots in repo names
+    # Only strip trailing slashes (dots are valid in repo names like OSI_Wireshark.)
+    repo = repo.rstrip('/')
+    
+    # Check if URL points to a specific directory (e.g., /tree/branch/path/to/folder)
+    # Pattern: /tree/<branch>/<path> or /blob/<branch>/<path>
+    # Also extract the branch/commit ref for the API query
+    subpath = ""
+    ref = ""  # Branch or commit SHA
+    tree_match = re.search(r'/(?:tree|blob)/([^/]+)(?:/(.+?))?(?:\?|$)', cleaned_url)
+    if tree_match:
+        ref = tree_match.group(1)  # The branch name or commit SHA
+        if tree_match.group(2):
+            subpath = tree_match.group(2).rstrip('/')
+        logger.info(f"[GitHub] Detected ref={ref}, subpath={subpath or '(root)'} in URL")
+    
+    logger.info(f"[GitHub] Parsed URL: owner={owner}, repo={repo}, ref={ref or '(default)'}, subpath={subpath or '(root)'} from: {repo_url[:100]}")
+    
+    # Build query string for ref parameter (for specific branches/commits)
+    ref_query = f"?ref={ref}" if ref else ""
     
     # Set up headers
     headers = {"Accept": "application/vnd.github.v3+json"}
@@ -1346,9 +1380,14 @@ def fetch_github_content(repo_url: str, pat: Optional[str] = None) -> Dict[str, 
         headers["Authorization"] = f"token {pat}"
     
     try:
-        # Fetch README
-        readme_url = f"https://api.github.com/repos/{owner}/{repo}/readme"
+        # Fetch README (from root or subpath, with ref if specified)
+        if subpath:
+            readme_url = f"https://api.github.com/repos/{owner}/{repo}/readme/{subpath}{ref_query}"
+        else:
+            readme_url = f"https://api.github.com/repos/{owner}/{repo}/readme{ref_query}"
+        logger.info(f"[GitHub] Fetching README from: {readme_url}")
         readme_resp = requests.get(readme_url, headers=headers, timeout=10)
+        logger.info(f"[GitHub] README response: {readme_resp.status_code}")
         
         if readme_resp.status_code == 200:
             readme_data = readme_resp.json()
@@ -1357,22 +1396,33 @@ def fetch_github_content(repo_url: str, pat: Optional[str] = None) -> Dict[str, 
                 result["readme"] = base64.b64decode(readme_data.get("content", "")).decode("utf-8", errors="ignore")
             else:
                 result["readme"] = readme_data.get("content", "")
+            logger.info(f"[GitHub] README fetched: {len(result['readme'])} chars")
         elif readme_resp.status_code == 404:
             result["readme"] = "(No README found)"
+            logger.info("[GitHub] No README found")
         elif readme_resp.status_code == 403:
             result["error"] = "GitHub API rate limit reached"
+            logger.warning("[GitHub] Rate limit reached")
             return result
         
-        # Fetch file listing
-        contents_url = f"https://api.github.com/repos/{owner}/{repo}/contents"
+        # Fetch file listing (from root or subpath, with ref if specified)
+        if subpath:
+            contents_url = f"https://api.github.com/repos/{owner}/{repo}/contents/{subpath}{ref_query}"
+        else:
+            contents_url = f"https://api.github.com/repos/{owner}/{repo}/contents{ref_query}"
+        logger.info(f"[GitHub] Fetching contents from: {contents_url}")
         contents_resp = requests.get(contents_url, headers=headers, timeout=10)
+        logger.info(f"[GitHub] Contents response: {contents_resp.status_code}")
         
         if contents_resp.status_code == 200:
             files = contents_resp.json()
+            location_desc = f"'{subpath}'" if subpath else "repo root"
+            logger.info(f"[GitHub] Found {len(files)} items in {location_desc}")
             result["files"] = [
                 {"name": f.get("name"), "type": f.get("type"), "size": f.get("size", 0), "download_url": f.get("download_url")}
                 for f in files if isinstance(f, dict)
             ]
+            logger.info(f"[GitHub] Files: {[f.get('name') for f in result['files'][:10]]}")
             
             # Download and extract important files for AI scoring
             for file_info in result["files"]:
@@ -1401,22 +1451,28 @@ def fetch_github_content(repo_url: str, pat: Optional[str] = None) -> Dict[str, 
                 # Download ZIP files and extract contents
                 if ext == '.zip':
                     try:
+                        logger.debug(f"[ZIP DEBUG] Downloading ZIP from GitHub: {fname} ({file_size} bytes)")
                         zip_resp = requests.get(download_url, timeout=30)
                         if zip_resp.status_code == 200:
                             import io
                             import zipfile
                             
                             zip_bytes = zip_resp.content
+                            logger.debug(f"[ZIP DEBUG] Downloaded ZIP: {fname} ({len(zip_bytes)} bytes)")
                             
                             # Extract listing and text content
                             zip_listing = extract_zip_listing_from_bytes(zip_bytes)
                             result["file_contents"].append(f"--- {fname} (ZIP Archive) ---\n{zip_listing}")
+                            logger.debug(f"[ZIP DEBUG] ZIP listing added to file_contents ({len(zip_listing)} chars)")
                             
                             # Extract images for multimodal
                             zip_images = extract_zip_images_from_bytes(zip_bytes)
+                            logger.debug(f"[ZIP DEBUG] Extracted {len(zip_images)} images from ZIP")
                             result["images"].extend(zip_images[:5])
+                        else:
+                            logger.warning(f"[ZIP DEBUG] Failed to download ZIP: HTTP {zip_resp.status_code}")
                     except Exception as e:
-                        logger.debug(f"Failed to download ZIP {fname}: {e}")
+                        logger.error(f"[ZIP DEBUG] Failed to download ZIP {fname}: {e}")
                 
                 # Download PDF files and extract text/images
                 elif ext == '.pdf':
@@ -1434,6 +1490,31 @@ def fetch_github_content(repo_url: str, pat: Optional[str] = None) -> Dict[str, 
                             result["images"].extend(pdf_images)
                     except Exception as e:
                         logger.debug(f"Failed to download PDF {fname}: {e}")
+                
+                # Download DOCX files and extract text/images
+                elif ext in ['.docx', '.doc'] and file_size < 10 * 1024 * 1024:  # Up to 10MB
+                    try:
+                        logger.debug(f"[GitHub] Downloading DOCX: {fname} from {download_url}")
+                        docx_resp = requests.get(download_url, timeout=30)
+                        if docx_resp.status_code == 200:
+                            docx_bytes = docx_resp.content
+                            
+                            # Validate that it's actually a DOCX (ZIP format with 'PK' magic bytes)
+                            if len(docx_bytes) >= 2 and docx_bytes[:2] == b'PK':
+                                # Extract text content
+                                docx_text = extract_docx_text(docx_bytes, max_chars=15000)
+                                result["file_contents"].append(f"--- {fname} (Word Document) ---\n{docx_text}")
+                                
+                                # Convert DOCX pages to images for multimodal AI scoring
+                                _, docx_images = convert_docx_to_pdf_images(docx_bytes, max_pages=10)
+                                result["images"].extend(docx_images)
+                                logger.info(f"[GitHub] Processed DOCX {fname}: {len(docx_text)} chars, {len(docx_images)} page images")
+                            else:
+                                # Not a valid DOCX - try as plain text
+                                text_content = docx_bytes.decode('utf-8', errors='ignore')[:15000]
+                                result["file_contents"].append(f"--- {fname} (misnamed as .docx, actually text) ---\n{text_content}")
+                    except Exception as e:
+                        logger.debug(f"Failed to download DOCX {fname}: {e}")
                 
                 # Download text/code files
                 elif ext in ['.txt', '.md', '.py', '.js', '.html', '.css', '.json', '.csv', 
@@ -1488,6 +1569,21 @@ def fetch_github_content(repo_url: str, pat: Optional[str] = None) -> Dict[str, 
                 '.r', '.scala', '.kt', '.swift', '.m', '.pl', '.lua', '.dart'
             ]
             
+            # Project/binary files that should be tracked (AI should know they exist)
+            PROJECT_EXTENSIONS = [
+                '.gns3project', '.gns3',  # GNS3 network simulation
+                '.pkt', '.pka',           # Cisco Packet Tracer
+                '.ova', '.ovf', '.vmdk',  # Virtual machine files
+                '.iso',                   # Disk images
+                '.exe', '.msi',           # Windows executables
+                '.deb', '.rpm',           # Linux packages
+                '.apk',                   # Android packages
+                '.ipa',                   # iOS packages
+            ]
+            
+            # Track all subdirectory files for the AI to see
+            subdirectory_files = []
+            
             def fetch_directory_recursive(dir_path, depth=0, max_depth=5):
                 """Recursively fetch directory contents up to max_depth."""
                 if depth >= max_depth:
@@ -1507,13 +1603,22 @@ def fetch_github_content(repo_url: str, pat: Optional[str] = None) -> Dict[str, 
                         df_name = df.get("name", "")
                         df_type = df.get("type", "")
                         df_path = f"{dir_path}/{df_name}"
+                        df_size = df.get("size", 0)
                         
                         if df_type == "file":
+                            # Track ALL files in subdirectories for the AI to see
+                            size_str = f"{df_size / 1024:.1f} KB" if df_size > 1024 else f"{df_size} bytes"
+                            subdirectory_files.append(f"- {df_path} ({size_str})")
+                            
                             df_url = df.get("download_url")
-                            df_size = df.get("size", 0)
                             df_ext = Path(df_name).suffix.lower()
                             
-                            if df_url and df_size < 50000 and df_ext in CODE_EXTENSIONS:
+                            # Note project files explicitly for the AI
+                            if df_ext in PROJECT_EXTENSIONS:
+                                result["file_contents"].append(f"--- {df_path} ---\n(Project file: {df_ext} format, {size_str})")
+                                logger.debug(f"[GitHub] Found project file: {df_path}")
+                            
+                            elif df_url and df_size < 50000 and df_ext in CODE_EXTENSIONS:
                                 try:
                                     sub_resp = requests.get(df_url, timeout=10)
                                     if sub_resp.status_code == 200:
@@ -1538,6 +1643,35 @@ def fetch_github_content(repo_url: str, pat: Optional[str] = None) -> Dict[str, 
                                         logger.debug(f"[GitHub] Downloaded image from subdir: {df_path}")
                                 except Exception as e:
                                     logger.debug(f"Failed to download image {df_path}: {e}")
+                            
+                            # Download DOCX files from subdirectories
+                            elif df_url and df_ext in ['.docx', '.doc'] and df_size < 10 * 1024 * 1024:
+                                try:
+                                    docx_resp = requests.get(df_url, timeout=30)
+                                    if docx_resp.status_code == 200:
+                                        docx_bytes = docx_resp.content
+                                        if len(docx_bytes) >= 2 and docx_bytes[:2] == b'PK':
+                                            docx_text = extract_docx_text(docx_bytes, max_chars=15000)
+                                            result["file_contents"].append(f"--- {df_path} (Word Document) ---\n{docx_text}")
+                                            _, docx_images = convert_docx_to_pdf_images(docx_bytes, max_pages=10)
+                                            result["images"].extend(docx_images)
+                                            logger.debug(f"[GitHub] Processed DOCX from subdir: {df_path}")
+                                except Exception as e:
+                                    logger.debug(f"Failed to download DOCX {df_path}: {e}")
+                            
+                            # Download PDF files from subdirectories
+                            elif df_url and df_ext == '.pdf' and df_size < 10 * 1024 * 1024:
+                                try:
+                                    pdf_resp = requests.get(df_url, timeout=30)
+                                    if pdf_resp.status_code == 200:
+                                        pdf_bytes = pdf_resp.content
+                                        pdf_text = extract_pdf_text(pdf_bytes, max_chars=15000)
+                                        result["file_contents"].append(f"--- {df_path} (PDF) ---\n{pdf_text}")
+                                        pdf_images = extract_pdf_images(pdf_bytes, max_pages=3)
+                                        result["images"].extend(pdf_images)
+                                        logger.debug(f"[GitHub] Processed PDF from subdir: {df_path}")
+                                except Exception as e:
+                                    logger.debug(f"Failed to download PDF {df_path}: {e}")
                         
                         elif df_type == "dir":
                             # Recursively fetch subdirectory
@@ -1557,7 +1691,22 @@ def fetch_github_content(repo_url: str, pat: Optional[str] = None) -> Dict[str, 
                 if isinstance(file_info, dict) and file_info.get("type") == "dir":
                     dir_name = file_info.get("name", "")
                     fetch_directory_recursive(dir_name, depth=0, max_depth=max_recursive_depth)
+            
+            # Add subdirectory file tree to the files list
+            if subdirectory_files:
+                # Add a special entry that lists all subdirectory files
+                result["file_contents"].insert(0, f"## Complete Repository File Structure (Subdirectories):\n" + "\n".join(subdirectory_files[:200]))
                         
+        elif contents_resp.status_code == 404:
+            try:
+                error_json = contents_resp.json()
+                msg = error_json.get('message', 'Not Found')
+                result["error"] = f"Repository not found or private: {msg}"
+                logger.warning(f"[GitHub] Contents 404: {msg} - URL was {contents_url}")
+            except:
+                result["error"] = "Repository not found or private"
+                logger.warning(f"[GitHub] Contents 404 - URL was {contents_url}")
+                         
         elif contents_resp.status_code == 403:
             result["error"] = "GitHub API rate limit reached"
             
@@ -1573,6 +1722,8 @@ def extract_zip_listing_from_bytes(zip_bytes: bytes, password: str = "ictkerala.
     """Extract file listing and content from ZIP bytes (for GitHub downloads)."""
     import zipfile
     import io
+    
+    logger.debug(f"[ZIP DEBUG] Extracting from ZIP bytes ({len(zip_bytes)} bytes)")
     
     try:
         with zipfile.ZipFile(io.BytesIO(zip_bytes), 'r') as zf:
@@ -1612,9 +1763,10 @@ def extract_zip_listing_from_bytes(zip_bytes: bytes, password: str = "ictkerala.
                             if text_content:
                                 content_sections.append(f"\n--- Content of {info.filename} (Word Document, {len(docx_images)} pages rendered as images for AI) ---\n{text_content[:15000]}")
                         
-                        # PDF files
                         elif ext == '.pdf':
+                            logger.debug(f"[ZIP DEBUG] Extracting PDF: {info.filename} ({len(file_bytes)} bytes)")
                             pdf_text = extract_pdf_text(file_bytes, max_chars=15000)
+                            logger.debug(f"[ZIP DEBUG] PDF text extracted: {len(pdf_text)} chars, preview: {pdf_text[:200]}...")
                             content_sections.append(f"\n--- Content of {info.filename} (PDF) ---\n{pdf_text}")
                         
                         # Image files - note their presence for AI context
@@ -1635,11 +1787,13 @@ def extract_zip_listing_from_bytes(zip_bytes: bytes, password: str = "ictkerala.
                 listing += "\n".join(file_list[:50])
                 if content_sections:
                     listing += "\n\n" + "\n".join(content_sections)
+                logger.debug(f"[ZIP DEBUG] Total listing length: {len(listing)} chars, {len(content_sections)} content sections")
                 return listing
             else:
                 return "(Empty ZIP archive)"
                 
     except Exception as e:
+        logger.error(f"[ZIP DEBUG] Error reading ZIP: {e}")
         return f"(Error reading ZIP: {e})"
 
 
@@ -1648,6 +1802,7 @@ def extract_zip_images_from_bytes(zip_bytes: bytes, password: str = "ictkerala.o
     import zipfile
     import io
     
+    logger.debug(f"[ZIP DEBUG] extract_zip_images_from_bytes: starting, max_images={max_images}")
     images = []
     
     try:
@@ -1664,6 +1819,7 @@ def extract_zip_images_from_bytes(zip_bytes: bytes, password: str = "ictkerala.o
             
             for info in zf.infolist():
                 if len(images) >= max_images:
+                    logger.debug(f"[ZIP DEBUG] Reached max_images limit ({max_images}), stopping extraction")
                     break
                     
                 if info.is_dir():
@@ -1676,28 +1832,34 @@ def extract_zip_images_from_bytes(zip_bytes: bytes, password: str = "ictkerala.o
                     
                     # Direct image files
                     if ext in ['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.webp']:
+                        logger.debug(f"[ZIP DEBUG] Found image file: {info.filename} ({len(file_bytes)} bytes)")
                         images.append(file_bytes)
                     
                     # PDF files - render pages as images
                     elif ext == '.pdf':
+                        logger.debug(f"[ZIP DEBUG] Rendering PDF as images: {info.filename} ({len(file_bytes)} bytes)")
                         pdf_images = extract_pdf_images(file_bytes, max_pages=3)
+                        logger.debug(f"[ZIP DEBUG] PDF rendered to {len(pdf_images)} page images")
                         for img in pdf_images:
                             if len(images) < max_images:
                                 images.append(img)
                     
                     # DOCX files - convert to PDF and render pages as images
                     elif ext == '.docx':
+                        logger.debug(f"[ZIP DEBUG] Converting DOCX to images: {info.filename}")
                         _, docx_images = convert_docx_to_pdf_images(file_bytes, max_pages=5)
+                        logger.debug(f"[ZIP DEBUG] DOCX rendered to {len(docx_images)} page images")
                         for img in docx_images:
                             if len(images) < max_images:
                                 images.append(img)
                                 
                 except Exception as e:
-                    logger.debug(f"Could not extract image from {info.filename}: {e}")
+                    logger.warning(f"[ZIP DEBUG] Could not extract image from {info.filename}: {e}")
     
     except Exception as e:
-        logger.debug(f"Failed to extract images from ZIP: {e}")
+        logger.error(f"[ZIP DEBUG] Failed to extract images from ZIP: {e}")
     
+    logger.debug(f"[ZIP DEBUG] extract_zip_images_from_bytes: returning {len(images)} images")
     return images
 
 
@@ -1753,20 +1915,49 @@ def fetch_submission_content(row: Dict, course_id: int = None) -> Dict[str, Any]
         return result
     
     if submission_type == "link":
-        # Extract URL
+        # Extract URL - first try full URL format
         url_match = re.search(r'(https?://[^\s]+)', submission_text)
+        url = None
+        
         if url_match:
             url = url_match.group(1)
+            
+            # Normalize URL - handle common student input errors
+            # 1. Remove trailing brackets and punctuation (but NOT dots - repo name might have trailing dot)
+            url = url.rstrip(']').rstrip(')').rstrip(',').rstrip(';')
+            # 2. Remove leading brackets if URL was wrapped like [url]
+            if url.startswith('['):
+                url = url.lstrip('[')
+            if url.startswith('('):
+                url = url.lstrip('(')
+            # 3. Fix double/triple dots before .git (common typo)
+            # Don't normalize ..git to .git - preserve original (repo name might have trailing dot)
+            # 4. Remove trailing slashes
+            url = url.rstrip('/')
+            
+            logger.info(f"[fetch_submission_content] Normalized URL: {url}")
+        else:
+            # Fallback: Only if "github.com" is explicitly present but missing protocol
+            # Handles: "github.com/owner/repo" -> "https://github.com/owner/repo"
+            github_no_proto_match = re.search(r'github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)', submission_text)
+            if github_no_proto_match:
+                owner_repo = github_no_proto_match.group(1)
+                url = f"https://github.com/{owner_repo}"
+                logger.info(f"Constructed GitHub URL (missing protocol): {url}")
+        
+        if url:
             result["summary"] = f"Link submission: {url}"
             
             if "github.com" in url:
                 # Fetch GitHub content
                 pat = get_config("github_pat")
+                logger.info(f"[fetch_submission_content] Calling fetch_github_content with URL: {url}")
                 github_content = fetch_github_content(url, pat)
                 
                 if github_content.get("error"):
                     result["error"] = github_content["error"]
                     result["content"] = f"GitHub URL: {url}\n\n(Could not fetch content: {github_content['error']})"
+                    logger.warning(f"[fetch_submission_content] GitHub error: {github_content['error']}")
                 else:
                     files_list = "\n".join([f"- {f['name']} ({f['type']})" for f in github_content.get("files", [])])
                     

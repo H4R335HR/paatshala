@@ -1763,6 +1763,66 @@ def _extract_max_grade_from_edit_page(html):
     logger.debug("[_extract_max_grade_from_edit_page] Could not find max_grade in edit page")
     return None
 
+
+def fetch_max_grade(session_id, module_id):
+    """
+    Quickly fetch just the max_grade for an assignment without parsing all submissions.
+    This is a lightweight API call used as a fallback when max_grade is not already cached.
+    
+    Args:
+        session_id: The Moodle session ID
+        module_id: The module/assignment ID
+        
+    Returns:
+        float: The max grade value, or None if not found
+    """
+    import re
+    session = setup_session(session_id)
+    
+    # Try the grading page first - it has the max grade in the header
+    url = f"{BASE}/mod/assign/view.php?id={module_id}&action=grading"
+    
+    try:
+        resp = session.get(url, timeout=10)
+        if not resp.ok:
+            return None
+        
+        html = resp.text
+        
+        # Quick extraction from header: "Grade / 15.00" or similar
+        match = re.search(r'Grade\s*/\s*(\d+(?:\.\d+)?)', html, re.I)
+        if match:
+            max_grade = float(match.group(1))
+            logger.debug(f"[fetch_max_grade] Found max_grade={max_grade} from grading page header")
+            return max_grade
+        
+        # Fallback: look for "Grade out of X"
+        match = re.search(r'Grade out of\s*(\d+(?:\.\d+)?)', html, re.I)
+        if match:
+            max_grade = float(match.group(1))
+            logger.debug(f"[fetch_max_grade] Found max_grade={max_grade} from 'Grade out of' pattern")
+            return max_grade
+        
+        # Fallback: data-max-grade attribute
+        match = re.search(r'data-max-grade="(\d+(?:\.\d+)?)"', html)
+        if match:
+            max_grade = float(match.group(1))
+            logger.debug(f"[fetch_max_grade] Found max_grade={max_grade} from data-max-grade attribute")
+            return max_grade
+        
+        # Fallback: extract from any "X / Y" grade cell
+        match = re.search(r'(\d+(?:\.\d+)?)\s*/\s*(\d+(?:\.\d+)?)', html)
+        if match:
+            max_grade = float(match.group(2))
+            if max_grade >= 1:
+                logger.debug(f"[fetch_max_grade] Found max_grade={max_grade} from grade cell pattern")
+                return max_grade
+                
+    except Exception as e:
+        logger.debug(f"[fetch_max_grade] Error fetching max_grade: {e}")
+    
+    return None
+
 def fetch_submissions(session_id, module_id, group_id=None):
     """
     Fetch submissions for a specific task/module.
@@ -2323,6 +2383,19 @@ def evaluate_submission(row):
         return row
         
     url = url_match.group(1)
+    
+    # Normalize URL - handle common student input errors EARLY (affects all downstream uses)
+    # 1. Remove trailing brackets and punctuation (but preserve dots before .git - repo might have trailing dot)
+    url = url.rstrip(']').rstrip(')').rstrip(',').rstrip(';')  # Don't strip dots!
+    # 2. Remove leading brackets if URL was wrapped like [url]
+    if url.startswith('['):
+        url = url.lstrip('[')
+    if url.startswith('('):
+        url = url.lstrip('(')
+    # 3. Don't normalize ..git - repo name might have trailing dot (e.g., OSI_Wireshark. + .git = OSI_Wireshark..git)
+    # 4. Remove trailing slashes
+    url = url.rstrip('/')
+    
     row['Eval_Link'] = url
     
     # 1. Verify Link
@@ -2334,10 +2407,13 @@ def evaluate_submission(row):
     
     # 2. GitHub Checks (using PAT for better rate limits and reliability)
     if "github.com" in url:
-        parts = url.rstrip('/').split('/')
+        parts = url.split('/')
         if len(parts) >= 5:
             owner = parts[-2]
-            repo = parts[-1].removesuffix('.git')  # Strip .git suffix for API compatibility
+            # Handle repo name - remove only .git suffix (preserve trailing dots in repo name)
+            repo = parts[-1].removesuffix('.git')
+            # Only strip slashes, not dots (dots are valid in repo names)
+            repo = repo.rstrip('/')
             api_url = f"https://api.github.com/repos/{owner}/{repo}"
             
             # Set up headers with PAT if available
