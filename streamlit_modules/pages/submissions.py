@@ -9,10 +9,11 @@ import streamlit as st
 
 from core.api import fetch_submissions, fetch_tasks_list, get_assignment_dates, update_assignment_dates, clean_name, fetch_full_feedback
 from core.auth import setup_session
+from core.ai import load_evaluation
 from core.persistence import (
     load_csv_from_disk, save_csv_to_disk, 
     load_last_session, save_last_session,
-    save_meta, dataframe_to_csv
+    save_meta
 )
 from streamlit_modules.ui.components import show_data_status
 
@@ -329,8 +330,12 @@ def render_submissions_tab(course, meta):
                         
                         # Store max_grade for evaluation tab (extracted from grading table)
                         if max_grade:
-                            st.session_state[f"max_grade_{module_id}"] = max_grade
-                            logger.info(f"Stored max_grade={max_grade} for module {module_id}")
+                            # Sanity check: Moodle max grades are typically 1-1000
+                            if isinstance(max_grade, (int, float)) and 1 <= max_grade <= 1000:
+                                st.session_state[f"max_grade_{module_id}"] = max_grade
+                                logger.info(f"Stored max_grade={max_grade} for module {module_id}")
+                            else:
+                                logger.warning(f"Rejected suspicious max_grade={max_grade} for module {module_id} (out of range 1-1000)")
                         
                         # Calculate timeliness for each submission
                         try:
@@ -419,6 +424,29 @@ def render_submissions_tab(course, meta):
                 if 'Name' in df.columns:
                     df['Name'] = df['Name'].apply(clean_name)
                 
+                # Add AI Score column from saved evaluations (same data shown in Evaluation tab)
+                ai_scores = []
+                for row in display_data:
+                    student_name = row.get('Name', 'Unknown')
+                    existing_eval = load_evaluation(course['id'], module_id, student_name, selected_group_id)
+                    if existing_eval and existing_eval.get('total_score') is not None:
+                        ai_scores.append(f"{existing_eval['total_score']}%")
+                    else:
+                        ai_scores.append("-")
+                
+                # Insert AI Score after Final Grade column (or at end)
+                if 'Final Grade' in df.columns:
+                    grade_idx = df.columns.get_loc('Final Grade') + 1
+                    df.insert(grade_idx, 'AI Score', ai_scores)
+                else:
+                    df['AI Score'] = ai_scores
+                
+                # Drop internal columns not useful for display (and Submission_Files
+                # contains Python lists which cause ArrowTypeError in st.dataframe)
+                internal_cols = [c for c in ['Submission_Files', 'Submission_Type', 'Assignment_Type', 'User_ID'] if c in df.columns]
+                if internal_cols:
+                    df = df.drop(columns=internal_cols)
+                
                 # Add selection capability to dataframe
                 selection = st.dataframe(
                     df,
@@ -440,6 +468,11 @@ def render_submissions_tab(course, meta):
                         st.markdown(f"**Email:** {row.get('Email', 'N/A')}")
                         st.markdown(f"**Status:** {row.get('Status', 'N/A')}")
                         st.markdown(f"**Final Grade:** {row.get('Final Grade', 'N/A')}")
+                        # Show AI Score if available
+                        student_name = row.get('Name', 'Unknown')
+                        ai_eval = load_evaluation(course['id'], mod_id, student_name, selected_group_id)
+                        if ai_eval and ai_eval.get('total_score') is not None:
+                            st.markdown(f"**AI Score:** {ai_eval['total_score']}%")
                         st.divider()
                         st.markdown("**Feedback Comments:**")
                         
@@ -514,12 +547,93 @@ def render_submissions_tab(course, meta):
                     
                     show_feedback_dialog(selected_row, module_id)
                 
-                csv_data = dataframe_to_csv(display_data)
-                st.download_button(
-                    label="📥 Download CSV",
-                    data=csv_data,
-                    file_name=f"submissions_{course['id']}_mod{module_id}.csv",
-                    mime="text/csv",
-                    key=f"download_submissions_{module_id}_{selected_group_id}"
-                )
+                # Download All Tasks as XLSX (each task = separate sheet)
+                import io
+                from pathlib import Path
+                
+                output_dir = Path(f"output/course_{course['id']}")
+                all_csv_files = sorted(output_dir.glob("submissions_*.csv")) if output_dir.exists() else []
+                # Filter files based on selected group
+                import re as _re_filter
+                if selected_group_id:
+                    # Only include files for the selected group
+                    grp_suffix = f"_grp{selected_group_id}"
+                    submission_files = [f for f in all_csv_files if grp_suffix in f.stem]
+                else:
+                    # No group selected: exclude group-specific files
+                    submission_files = [f for f in all_csv_files if not _re_filter.search(r'_grp\d+', f.stem)]
+                
+                if submission_files:
+                    # Build task name lookup from tasks_data
+                    task_name_map = {}
+                    if st.session_state.tasks_data:
+                        for t in st.session_state.tasks_data:
+                            task_name_map[str(t['Module ID'])] = t['Task Name']
+                    
+                    buffer = io.BytesIO()
+                    sheet_count = 0
+                    used_sheet_names = set()
+                    with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+                        for csv_path in submission_files:
+                            csv_rows = load_csv_from_disk(course['id'], csv_path.name)
+                            if not csv_rows:
+                                continue
+                            
+                            sheet_df = pd.DataFrame(csv_rows)
+                            
+                            # Clean names
+                            if 'Name' in sheet_df.columns:
+                                sheet_df['Name'] = sheet_df['Name'].apply(clean_name)
+                            
+                            # Extract module_id from filename pattern: submissions_{cid}_mod{mid}[_grp{gid}].csv
+                            import re as _re
+                            mid_match = _re.search(r'_mod(\d+)', csv_path.name)
+                            gid_match = _re.search(r'_grp(\d+)', csv_path.name)
+                            file_mod_id = mid_match.group(1) if mid_match else None
+                            file_grp_id = gid_match.group(1) if gid_match else None
+                            
+                            # Add AI scores
+                            if file_mod_id:
+                                ai_scores = []
+                                for r in csv_rows:
+                                    sname = r.get('Name', 'Unknown')
+                                    ev = load_evaluation(course['id'], file_mod_id, sname, file_grp_id)
+                                    if ev and ev.get('total_score') is not None:
+                                        ai_scores.append(f"{ev['total_score']}%")
+                                    else:
+                                        ai_scores.append("-")
+                                if 'Final Grade' in sheet_df.columns:
+                                    gi = sheet_df.columns.get_loc('Final Grade') + 1
+                                    sheet_df.insert(gi, 'AI Score', ai_scores)
+                                else:
+                                    sheet_df['AI Score'] = ai_scores
+                            
+                            # Drop internal columns not useful in export
+                            drop_cols = [c for c in ['Submission_Files', 'Submission_Type', 'Assignment_Type'] if c in sheet_df.columns]
+                            if drop_cols:
+                                sheet_df = sheet_df.drop(columns=drop_cols)
+                            
+                            # Build sheet name from task name (Excel max 31 chars)
+                            task_name = task_name_map.get(file_mod_id, f"Module {file_mod_id or 'Unknown'}")
+                            # Sanitize: Excel forbids \ / * ? : [ ] in sheet names
+                            safe_name = _re.sub(r'[\\/\*\?\:\[\]]', '', task_name)[:31]
+                            # Ensure unique sheet names
+                            if safe_name in used_sheet_names:
+                                safe_name = safe_name[:27] + f"_{file_mod_id}"[:4]
+                            used_sheet_names.add(safe_name)
+                            
+                            sheet_df.to_excel(writer, sheet_name=safe_name, index=False)
+                            sheet_count += 1
+                    
+                    buffer.seek(0)
+                    group_label = f"_grp{selected_group_id}" if selected_group_id else ""
+                    st.download_button(
+                        label=f"📥 Download All Tasks ({sheet_count} sheets)",
+                        data=buffer,
+                        file_name=f"submissions_{course['id']}{group_label}_all.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key=f"download_all_xlsx_{course['id']}_{selected_group_id}"
+                    )
+                else:
+                    st.caption("No saved submission data found for export.")
 

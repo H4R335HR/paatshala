@@ -1416,6 +1416,10 @@ def fetch_github_content(repo_url: str, pat: Optional[str] = None) -> Dict[str, 
         
         if contents_resp.status_code == 200:
             files = contents_resp.json()
+            # GitHub Contents API returns a single object (dict) when URL points to a file,
+            # but an array when pointing to a directory. Normalize to list.
+            if isinstance(files, dict):
+                files = [files]
             location_desc = f"'{subpath}'" if subpath else "repo root"
             logger.info(f"[GitHub] Found {len(files)} items in {location_desc}")
             result["files"] = [
@@ -2278,6 +2282,10 @@ def save_evaluation(course_id: int, module_id: int, student_name: str, evaluatio
     """
     Save an evaluation result to disk.
     
+    When group_id is provided, saves to BOTH the group-specific path and the
+    base (non-group) path. This ensures load_evaluation always finds the latest
+    score regardless of which group context is active when reading.
+    
     Args:
         course_id: Course ID
         module_id: Assignment module ID
@@ -2289,15 +2297,11 @@ def save_evaluation(course_id: int, module_id: int, student_name: str, evaluatio
         True if saved successfully
     """
     try:
-        eval_dir = Path("output") / f"course_{course_id}" / EVALUATIONS_DIR / f"mod{module_id}"
-        if group_id:
-            eval_dir = eval_dir / f"grp{group_id}"
-        eval_dir.mkdir(parents=True, exist_ok=True)
+        base_dir = Path("output") / f"course_{course_id}" / EVALUATIONS_DIR / f"mod{module_id}"
         
         # Sanitize student name for filename
         safe_name = "".join([c for c in student_name if c.isalnum() or c in (' ', '-', '_')]).strip().replace(' ', '_')
         filename = f"eval_{safe_name}.json"
-        filepath = eval_dir / filename
         
         doc = {
             "student_name": student_name,
@@ -2307,10 +2311,22 @@ def save_evaluation(course_id: int, module_id: int, student_name: str, evaluatio
             **evaluation
         }
         
-        with open(filepath, "w", encoding="utf-8") as f:
+        # Always save to the base (non-group) path
+        base_dir.mkdir(parents=True, exist_ok=True)
+        base_filepath = base_dir / filename
+        with open(base_filepath, "w", encoding="utf-8") as f:
             json.dump(doc, f, indent=2, ensure_ascii=False)
+        logger.info(f"Saved evaluation to {base_filepath}")
         
-        logger.info(f"Saved evaluation to {filepath}")
+        # Also save to group-specific path if group_id is provided
+        if group_id:
+            group_dir = base_dir / f"grp{group_id}"
+            group_dir.mkdir(parents=True, exist_ok=True)
+            group_filepath = group_dir / filename
+            with open(group_filepath, "w", encoding="utf-8") as f:
+                json.dump(doc, f, indent=2, ensure_ascii=False)
+            logger.info(f"Saved evaluation to {group_filepath} (group copy)")
+        
         return True
         
     except Exception as e:
@@ -2322,6 +2338,10 @@ def load_evaluation(course_id: int, module_id: int, student_name: str, group_id:
     """
     Load an evaluation result from disk.
     
+    When group_id is provided, checks both the group-specific path and the base
+    (non-group) path, returning whichever has a more recent evaluated_at timestamp.
+    This handles legacy data where scores may exist at only one of the two paths.
+    
     Args:
         course_id: Course ID
         module_id: Assignment module ID
@@ -2331,27 +2351,44 @@ def load_evaluation(course_id: int, module_id: int, student_name: str, group_id:
     Returns:
         Evaluation dict or None if not found
     """
-    eval_dir = Path("output") / f"course_{course_id}" / EVALUATIONS_DIR / f"mod{module_id}"
-    if group_id:
-        eval_dir = eval_dir / f"grp{group_id}"
-    
+    base_dir = Path("output") / f"course_{course_id}" / EVALUATIONS_DIR / f"mod{module_id}"
     safe_name = "".join([c for c in student_name if c.isalnum() or c in (' ', '-', '_')]).strip().replace(' ', '_')
     filename = f"eval_{safe_name}.json"
-    filepath = eval_dir / filename
     
-    if filepath.exists():
-        try:
-            with open(filepath, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception as e:
-            logger.error(f"Failed to load evaluation: {e}")
+    def _load_json(filepath):
+        if filepath.exists():
+            try:
+                with open(filepath, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except Exception as e:
+                logger.error(f"Failed to load evaluation from {filepath}: {e}")
+        return None
     
-    return None
+    if group_id:
+        # Check both paths and return the most recently evaluated one
+        group_path = base_dir / f"grp{group_id}" / filename
+        base_path = base_dir / filename
+        
+        group_eval = _load_json(group_path)
+        base_eval = _load_json(base_path)
+        
+        if group_eval and base_eval:
+            # Return whichever was evaluated more recently
+            group_time = group_eval.get('evaluated_at', '')
+            base_time = base_eval.get('evaluated_at', '')
+            return group_eval if group_time >= base_time else base_eval
+        return group_eval or base_eval
+    else:
+        # No group - just check the base path
+        return _load_json(base_dir / filename)
 
 
 def delete_evaluation(course_id: int, module_id: int, student_name: str, group_id: Optional[int] = None) -> bool:
     """
     Delete an evaluation result from disk.
+    
+    When group_id is provided, deletes from both the group-specific path and the
+    base (non-group) path to avoid orphaned stale files.
     
     Args:
         course_id: Course ID
@@ -2360,26 +2397,36 @@ def delete_evaluation(course_id: int, module_id: int, student_name: str, group_i
         group_id: Optional group ID
     
     Returns:
-        True if deleted successfully, False otherwise
+        True if at least one file was deleted, False otherwise
     """
-    eval_dir = Path("output") / f"course_{course_id}" / EVALUATIONS_DIR / f"mod{module_id}"
-    if group_id:
-        eval_dir = eval_dir / f"grp{group_id}"
-    
+    base_dir = Path("output") / f"course_{course_id}" / EVALUATIONS_DIR / f"mod{module_id}"
     safe_name = "".join([c for c in student_name if c.isalnum() or c in (' ', '-', '_')]).strip().replace(' ', '_')
     filename = f"eval_{safe_name}.json"
-    filepath = eval_dir / filename
     
-    if filepath.exists():
+    deleted_any = False
+    
+    # Delete from base (non-group) path
+    base_filepath = base_dir / filename
+    if base_filepath.exists():
         try:
-            filepath.unlink()
-            logger.info(f"Deleted evaluation: {filepath}")
-            return True
+            base_filepath.unlink()
+            logger.info(f"Deleted evaluation: {base_filepath}")
+            deleted_any = True
         except Exception as e:
-            logger.error(f"Failed to delete evaluation: {e}")
-            return False
+            logger.error(f"Failed to delete evaluation {base_filepath}: {e}")
     
-    return False
+    # Also delete from group-specific path if group_id is provided
+    if group_id:
+        group_filepath = base_dir / f"grp{group_id}" / filename
+        if group_filepath.exists():
+            try:
+                group_filepath.unlink()
+                logger.info(f"Deleted evaluation: {group_filepath} (group copy)")
+                deleted_any = True
+            except Exception as e:
+                logger.error(f"Failed to delete evaluation {group_filepath}: {e}")
+    
+    return deleted_any
 
 
 def refine_evaluation(

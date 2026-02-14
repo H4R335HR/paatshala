@@ -24,7 +24,124 @@ from streamlit_modules.ui.content_viewer import (
 logger = logging.getLogger(__name__)
 
 
-@st.cache_data
+def _get_override_key(module_id, student_name):
+    """Get session state key for a submission override."""
+    return f"submission_override_{module_id}_{student_name}"
+
+
+def _apply_submission_override(row, course_id):
+    """Apply submission override to a row if one exists.
+    
+    Modifies the row in-place before fetch_submission_content is called
+    so the AI scoring pipeline uses the corrected data.
+    
+    Returns:
+        The override dict if applied, None otherwise.
+    """
+    module_id = row.get('Module ID')
+    student_name = row.get('Name', 'Unknown')
+    if not module_id:
+        return None
+    
+    override_key = _get_override_key(module_id, student_name)
+    override = st.session_state.get(override_key)
+    
+    if not override:
+        return None
+    
+    if override['type'] == 'link':
+        # Override the submission URL
+        row['Submission'] = override['url']
+        row['Submission_Type'] = 'link'
+        logger.info(f"[Override] Applied link override for {student_name}: {override['url']}")
+    elif override['type'] == 'file':
+        # Override as a file submission
+        file_path = override['file_path']
+        file_name = override['file_name']
+        row['Submission_Type'] = 'file'
+        # Set Submission_Files as list of tuples [(filename, url_or_path)]
+        row['Submission_Files'] = [(file_name, f'file://{file_path}')]
+        row['Submission'] = f'Uploaded file: {file_name}'
+        logger.info(f"[Override] Applied file override for {student_name}: {file_name}")
+    
+    return override
+
+
+def _render_submission_override(row, course):
+    """Render submission override controls (corrected link / file upload).
+    
+    Called from _render_link_submission when the link is invalid.
+    """
+    module_id = row.get('Module ID')
+    student_name = row.get('Name', 'Unknown')
+    if not module_id:
+        return
+    
+    override_key = _get_override_key(module_id, student_name)
+    existing_override = st.session_state.get(override_key)
+    
+    # Show active override indicator
+    if existing_override:
+        ov_type = existing_override['type']
+        if ov_type == 'link':
+            st.success(f"✅ **Override Active:** Using corrected link: {existing_override['url']}")
+        elif ov_type == 'file':
+            st.success(f"✅ **Override Active:** Using uploaded file: {existing_override['file_name']}")
+        
+        if st.button("🗑️ Clear Override", key=f"clear_override_{module_id}_{hash(student_name)}"):
+            del st.session_state[override_key]
+            st.rerun()
+        return
+    
+    # Show override options
+    with st.expander("🔧 Override Submission", expanded=False):
+        tab1, tab2 = st.tabs(["🔗 Corrected Link", "📁 Upload File"])
+        
+        with tab1:
+            corrected_url = st.text_input(
+                "Enter the correct URL",
+                placeholder="https://github.com/student/repo",
+                key=f"override_url_{module_id}_{hash(student_name)}"
+            )
+            if st.button("✅ Apply Link", key=f"apply_link_override_{module_id}_{hash(student_name)}",
+                        disabled=not corrected_url):
+                st.session_state[override_key] = {
+                    'type': 'link',
+                    'url': corrected_url.strip(),
+                    'original_submission': row.get('Submission', ''),
+                }
+                st.rerun()
+        
+        with tab2:
+            uploaded_file = st.file_uploader(
+                "Upload file on behalf of student",
+                type=['pdf', 'zip', 'docx', 'doc', 'txt', 'png', 'jpg', 'jpeg'],
+                key=f"override_file_{module_id}_{hash(student_name)}"
+            )
+            if uploaded_file and st.button("✅ Apply Upload", 
+                                           key=f"apply_file_override_{module_id}_{hash(student_name)}"):
+                # Save the file to disk
+                safe_student = "".join([c for c in student_name if c.isalnum() or c in (' ', '-', '_')]).strip()
+                download_dir = Path(f"output/course_{course['id']}/downloads/{safe_student}")
+                download_dir.mkdir(parents=True, exist_ok=True)
+                
+                safe_filename = "".join([c for c in uploaded_file.name if c.isalnum() or c in (' ', '-', '_', '.')]).strip()
+                file_path = download_dir / safe_filename
+                
+                with open(file_path, 'wb') as f:
+                    f.write(uploaded_file.getbuffer())
+                
+                st.session_state[override_key] = {
+                    'type': 'file',
+                    'file_path': str(file_path),
+                    'file_name': uploaded_file.name,
+                    'original_submission': row.get('Submission', ''),
+                }
+                st.success(f"✅ File saved: {uploaded_file.name}")
+                st.rerun()
+
+
+
 def get_display_dataframe(data):
     """Create a display-friendly dataframe for the Evaluation tab"""
     display_data = []
@@ -327,12 +444,18 @@ def render_evaluation_tab(course, meta):
         else:
             sub_type = 'empty'
 
+    # Check for active submission override and apply it
+    module_id_for_override = row.get('Module ID')
+    student_name_for_override = row.get('Name', 'Unknown')
+    override_key = _get_override_key(module_id_for_override, student_name_for_override) if module_id_for_override else None
+    active_override = st.session_state.get(override_key) if override_key else None
+    
     # Render based on ASSIGNMENT type (overrides individual submission type for UI structure)
     if assignment_type == 'file':
         _render_file_submission(course, row, idx)
         # Preview is now integrated into _render_file_submission (file explorer pattern)
     else:
-        _render_link_submission(row, sub_type)
+        _render_link_submission(row, sub_type, course)
     
     # =========================================================================
     # AI SCORING SECTION
@@ -670,7 +793,7 @@ def _render_file_submission(course, row, idx):
         st.caption("👆 Click a row above to select a file for preview")
 
 
-def _render_link_submission(row, sub_type):
+def _render_link_submission(row, sub_type, course=None):
     """Render link/text submission view"""
     if sub_type == 'link' or (sub_type == 'empty' and row.get('Eval_Last_Checked')):
         # Show analysis if it's a link OR if we have checked it
@@ -691,12 +814,36 @@ def _render_link_submission(row, sub_type):
                 if row.get('Eval_Is_Fork') == 'Yes':
                     st.caption(f"Fork of: {row.get('Eval_Parent')}")
             
-            # For GitHub URLs, show interactive browser
-            if link and 'github.com' in link:
+            # Check for active override
+            module_id = row.get('Module ID')
+            student_name = row.get('Name', 'Unknown')
+            override_key = _get_override_key(module_id, student_name) if module_id else None
+            active_override = st.session_state.get(override_key) if override_key else None
+            
+            # Determine effective link (use override if active)
+            effective_link = link
+            if active_override and active_override['type'] == 'link':
+                effective_link = active_override['url']
+            
+            # Show override UI when link is invalid or empty
+            is_link_invalid = '✅' not in str(valid)
+            if (is_link_invalid or not link) and course:
+                _render_submission_override(row, course)
+            elif active_override and course:
+                # Even if link is valid, show override indicator if one is active
+                _render_submission_override(row, course)
+            
+            # Show original submission link for reference
+            original_link = link
+            if active_override:
+                st.caption(f"Original submission: [{original_link}]({original_link})")
+            
+            # For GitHub URLs, show interactive browser (use effective link)
+            if effective_link and 'github.com' in effective_link:
                 from streamlit_modules.ui.content_viewer import render_github_viewer
-                render_github_viewer(link, get_config('github_pat'))
+                render_github_viewer(effective_link, get_config('github_pat'))
             else:
-                st.markdown(f"**Submission Link:** [{link}]({link})")
+                st.markdown(f"**Submission Link:** [{effective_link}]({effective_link})")
         else:
             st.warning("Analysis not run yet. Click 'Refresh Analysis'.")
     
@@ -1089,8 +1236,14 @@ def _render_ai_scoring_section(course, row, idx, data):
     # This is the most reliable source as it comes directly from the grading table header/input
     session_state_key = f"max_grade_{module_id}"
     if session_state_key in st.session_state and st.session_state[session_state_key]:
-        max_grade = st.session_state[session_state_key]
-        max_grade_source = 'grading_page'
+        cached_val = st.session_state[session_state_key]
+        # Sanity check: reject obviously invalid values (timestamps, etc.)
+        if isinstance(cached_val, (int, float)) and 1 <= cached_val <= 1000:
+            max_grade = cached_val
+            max_grade_source = 'grading_page'
+        else:
+            logger.warning(f"Rejected cached max_grade={cached_val} for module {module_id} (out of range)")
+            del st.session_state[session_state_key]  # Clear the bad value
     
     # Second: try to get from tasks_data (from assignment view page)
     if max_grade is None and st.session_state.tasks_data:
@@ -1425,6 +1578,11 @@ def _perform_batch_scoring(course, data, rubric, module_id, group_id, auto_fetch
                     skipped_unfetched += 1
                     continue
             
+            # Apply submission override if one exists
+            override = _apply_submission_override(row, course['id'])
+            if override:
+                status_text.caption(f"ℹ️ {student_name}: Using override ({override['type']})")
+            
             # Fetch submission content (same as individual scoring)
             submission_content = fetch_submission_content(row, course['id'])
             
@@ -1548,7 +1706,14 @@ def _perform_batch_submit_to_moodle(course, data, module_id, group_id):
     # Priority 1: session state (from grading page)
     session_state_key = f"max_grade_{module_id}"
     if session_state_key in st.session_state and st.session_state[session_state_key]:
-        max_grade = st.session_state[session_state_key]
+        cached_val = st.session_state[session_state_key]
+        # Sanity check: reject obviously invalid values (timestamps, etc.)
+        if isinstance(cached_val, (int, float)) and 1 <= cached_val <= 1000:
+            max_grade = cached_val
+            max_grade_source = 'grading_page'
+        else:
+            logger.warning(f"Rejected cached max_grade={cached_val} for module {module_id} (out of range)")
+            del st.session_state[session_state_key]  # Clear the bad value
     
     # Priority 2: tasks_data
     if max_grade is None and st.session_state.tasks_data:
@@ -1647,6 +1812,8 @@ def _perform_batch_submit_to_moodle(course, data, module_id, group_id):
             # Calculate scaled grade
             total_score = evaluation.get('total_score', 0)
             scaled_grade = round((total_score / 100) * max_grade)
+            logger.info(f"[batch_submit] {student_name}: total_score={total_score}, "
+                        f"max_grade={max_grade}, scaled_grade={scaled_grade}")
             
             # Format feedback as HTML
             feedback_html = _format_feedback_html(evaluation)
@@ -1741,6 +1908,11 @@ def _perform_scoring(course, row, rubric, module_id, group_id, data, is_rescore=
     Args:
         is_rescore: If True, stores result as pending for Accept/Reject. If False, saves immediately.
     """
+    # Apply submission override if one exists (modifies row in-place)
+    override = _apply_submission_override(row, course['id'])
+    if override:
+        st.info(f"ℹ️ Using override: {override['type']} — {override.get('url') or override.get('file_name')}")
+    
     with st.spinner("Fetching submission content..."):
         submission_content = fetch_submission_content(row, course['id'])
     
@@ -1956,6 +2128,8 @@ def _submit_to_moodle(course, row, evaluation, max_grade, max_grade_source='unkn
     total_score = evaluation.get('total_score', 0)
     scaled_grade = (total_score / 100) * max_grade
     scaled_grade = round(scaled_grade)  # Round to nearest whole number
+    logger.info(f"[individual_submit] total_score={total_score}, max_grade={max_grade}, "
+                f"scaled_grade={scaled_grade}, eval_keys={list(evaluation.keys())}")
     
     # Format feedback as HTML
     feedback_html = _format_feedback_html(evaluation)

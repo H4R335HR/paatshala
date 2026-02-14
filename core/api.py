@@ -1789,32 +1789,42 @@ def fetch_max_grade(session_id, module_id):
         
         html = resp.text
         
+        # Sanity check helper: Moodle max grades are typically 1-1000
+        def _valid_grade(val):
+            return 1 <= val <= 1000
+        
         # Quick extraction from header: "Grade / 15.00" or similar
         match = re.search(r'Grade\s*/\s*(\d+(?:\.\d+)?)', html, re.I)
         if match:
             max_grade = float(match.group(1))
-            logger.debug(f"[fetch_max_grade] Found max_grade={max_grade} from grading page header")
-            return max_grade
+            if _valid_grade(max_grade):
+                logger.debug(f"[fetch_max_grade] Found max_grade={max_grade} from grading page header")
+                return max_grade
+            logger.debug(f"[fetch_max_grade] Rejected max_grade={max_grade} from header (out of range)")
         
         # Fallback: look for "Grade out of X"
         match = re.search(r'Grade out of\s*(\d+(?:\.\d+)?)', html, re.I)
         if match:
             max_grade = float(match.group(1))
-            logger.debug(f"[fetch_max_grade] Found max_grade={max_grade} from 'Grade out of' pattern")
-            return max_grade
+            if _valid_grade(max_grade):
+                logger.debug(f"[fetch_max_grade] Found max_grade={max_grade} from 'Grade out of' pattern")
+                return max_grade
+            logger.debug(f"[fetch_max_grade] Rejected max_grade={max_grade} from 'Grade out of' (out of range)")
         
         # Fallback: data-max-grade attribute
         match = re.search(r'data-max-grade="(\d+(?:\.\d+)?)"', html)
         if match:
             max_grade = float(match.group(1))
-            logger.debug(f"[fetch_max_grade] Found max_grade={max_grade} from data-max-grade attribute")
-            return max_grade
+            if _valid_grade(max_grade):
+                logger.debug(f"[fetch_max_grade] Found max_grade={max_grade} from data-max-grade attribute")
+                return max_grade
+            logger.debug(f"[fetch_max_grade] Rejected max_grade={max_grade} from data-max-grade (out of range)")
         
         # Fallback: extract from any "X / Y" grade cell
-        match = re.search(r'(\d+(?:\.\d+)?)\s*/\s*(\d+(?:\.\d+)?)', html)
-        if match:
+        # Search narrowly: look for grade-like patterns (small numbers)
+        for match in re.finditer(r'(\d+(?:\.\d+)?)\s*/\s*(\d+(?:\.\d+)?)', html):
             max_grade = float(match.group(2))
-            if max_grade >= 1:
+            if _valid_grade(max_grade):
                 logger.debug(f"[fetch_max_grade] Found max_grade={max_grade} from grade cell pattern")
                 return max_grade
                 
@@ -1962,6 +1972,21 @@ def submit_grade(session, assignment_id, user_id, module_id, grade, feedback_htm
         dict: {'success': bool, 'error': str or None}
     """
     import urllib.parse
+    import json as _json
+    from datetime import datetime as _dt
+    
+    logger.info(f"[submit_grade] assignment_id={assignment_id}, user_id={user_id}, "
+                f"module_id={module_id}, grade={grade}, sesskey={sesskey[:6]}...")
+    
+    # Safeguard: reject clearly invalid grade values
+    try:
+        grade_num = float(grade)
+        if grade_num > 1000 or grade_num < -1:
+            logger.error(f"[submit_grade] REJECTED: grade={grade} is out of bounds (>1000 or <-1). "
+                         f"This indicates a bug in grade calculation upstream.")
+            return {"success": False, "error": f"Grade value {grade} is invalid (exceeds 1000). Check total_score and max_grade calculation."}
+    except (ValueError, TypeError):
+        pass  # Let Moodle handle non-numeric grades
     
     url = f"{BASE}/lib/ajax/service.php"
     params = {
@@ -2008,6 +2033,21 @@ def submit_grade(session, assignment_id, user_id, module_id, grade, feedback_htm
         resp = session.post(url, params=params, json=payload, timeout=30)
         logger.info(f"Submit grade response status: {resp.status_code}")
         
+        # Log full request/response to file for debugging
+        try:
+            debug_log_path = Path("output") / "debug_grade_submissions.log"
+            debug_log_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(debug_log_path, "a", encoding="utf-8") as dbg:
+                dbg.write(f"\n{'='*80}\n")
+                dbg.write(f"Timestamp: {_dt.now().isoformat()}\n")
+                dbg.write(f"assignment_id={assignment_id}, user_id={user_id}, module_id={module_id}, grade={grade}\n")
+                dbg.write(f"URL: {url}?{urllib.parse.urlencode(params)}\n")
+                dbg.write(f"Payload: {_json.dumps(payload, indent=2)[:2000]}\n")
+                dbg.write(f"Response status: {resp.status_code}\n")
+                dbg.write(f"Response body: {resp.text[:1000]}\n")
+        except Exception as dbg_err:
+            logger.debug(f"Could not write debug log: {dbg_err}")
+        
         if resp.ok:
             try:
                 data = resp.json()
@@ -2019,7 +2059,17 @@ def submit_grade(session, assignment_id, user_id, module_id, grade, feedback_htm
                         error_msg = result.get("exception", {}).get("message", "Unknown error")
                         logger.error(f"Moodle returned error: {error_msg}")
                         return {"success": False, "error": error_msg}
-                    # Success - data should contain the result
+                    
+                    # Check for warnings in data array (e.g. couldnotsavegrade)
+                    warnings = result.get("data", [])
+                    if isinstance(warnings, list) and warnings:
+                        for w in warnings:
+                            if isinstance(w, dict) and w.get("warningcode"):
+                                warn_msg = w.get("message", w.get("item", "Unknown warning"))
+                                logger.error(f"Moodle grade warning: {w.get('warningcode')} - {warn_msg}")
+                                return {"success": False, "error": f"{w.get('warningcode')}: {warn_msg}"}
+                    
+                    # Success - no errors or warnings
                     return {"success": True, "error": None}
                 else:
                     return {"success": False, "error": "Unexpected response format"}
