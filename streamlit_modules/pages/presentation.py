@@ -553,3 +553,92 @@ def render_presentation_tab(course, meta):
                 file_name=f"presentation_results_{batch}.csv",
                 mime="text/csv"
             )
+        
+        # -----------------------------------------------------------------
+        # Edit Instructor Scores (for completed slots)
+        # -----------------------------------------------------------------
+        completed_slots = [s for s in st.session_state.pres_slots if s.get('status') == 'completed' and s.get('presenter_name')]
+        
+        if completed_slots:
+            with st.expander("✏️ Edit Instructor Scores", expanded=False):
+                st.caption("Select a completed presentation to update your instructor score.")
+                
+                # Build options for selectbox
+                slot_options = {
+                    f"{s.get('presenter_name', 'Unknown')} — {s.get('topic', 'No topic')}": s
+                    for s in completed_slots
+                }
+                
+                selected_label = st.selectbox(
+                    "Select Presenter",
+                    list(slot_options.keys()),
+                    key="edit_score_select"
+                )
+                
+                selected_slot = slot_options[selected_label]
+                
+                # Fetch existing votes for this slot
+                votes_result = api_call('get_votes', batch, {'slot_id': selected_slot['id']}, admin=True)
+                existing_scores = {}
+                existing_comment = ""
+                if votes_result.get('success'):
+                    for v in votes_result.get('votes', []):
+                        if v.get('type') == 'instructor':
+                            existing_scores = v.get('scores', {})
+                            existing_comment = v.get('comment', '')
+                            st.info(f"Current instructor total: **{v.get('total', 'N/A')}**")
+                            break
+                
+                if not existing_scores:
+                    st.warning("No instructor score found for this slot. You can submit one now.")
+                
+                # Rubric (same as Live Dashboard)
+                rubric = (st.session_state.pres_session_data or {}).get('rubric', [
+                    {'id': 1, 'name': 'Content Knowledge'},
+                    {'id': 2, 'name': 'Clarity & Delivery'},
+                    {'id': 3, 'name': 'Visual Quality'},
+                    {'id': 4, 'name': 'Engagement'},
+                    {'id': 5, 'name': 'Time Management'}
+                ])
+                
+                edit_scores = {}
+                for criterion in rubric:
+                    cid = str(criterion['id'])
+                    # Pre-fill with existing score or default to 1
+                    default_val = int(existing_scores.get(cid, 1))
+                    default_val = max(1, min(3, default_val))  # Clamp to 1-3
+                    
+                    st.markdown(f"**{criterion['name']}**")
+                    score = st.radio(
+                        f"Score for {criterion['name']}",
+                        options=[1, 2, 3],
+                        index=default_val - 1,
+                        format_func=lambda x: {1: '👍 OK', 2: '⭐ Good', 3: '🌟 Brilliant'}[x],
+                        horizontal=True,
+                        key=f"edit_score_{selected_slot['id']}_{cid}",
+                        label_visibility="collapsed"
+                    )
+                    edit_scores[cid] = score
+                
+                edit_comment = st.text_area(
+                    "Comments",
+                    value=existing_comment,
+                    key=f"edit_comment_{selected_slot['id']}"
+                )
+                
+                if st.button("💾 Update Instructor Score", type="primary", key="edit_score_submit"):
+                    result = api_call('instructor_score', batch, {
+                        'slot_id': selected_slot['id'],
+                        'scores': json.dumps(edit_scores),
+                        'comment': edit_comment
+                    }, admin=True)
+                    
+                    if result.get('success'):
+                        st.success(f"✅ Score updated! New total: {result.get('total')}")
+                        # Refresh leaderboard
+                        lb_result = api_call('leaderboard', batch)
+                        if lb_result.get('success'):
+                            st.session_state.pres_leaderboard = lb_result.get('leaderboard', [])
+                        st.rerun()
+                    else:
+                        st.error(f"Error: {result.get('error', 'Unknown error')}")

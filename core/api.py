@@ -404,6 +404,7 @@ def add_topic(session, course_id, sesskey, count=1):
 def delete_topic(session, db_id, sesskey):
     """Delete a topic"""
     logger.info(f"Deleting topic {db_id}")
+    # Step 1: Request delete confirmation page
     # course/editsection.php?id=5431&sr&delete=1&sesskey=...
     url = f"{BASE}/course/editsection.php"
     params = {
@@ -413,7 +414,25 @@ def delete_topic(session, db_id, sesskey):
         "sesskey": sesskey
     }
     resp = session.get(url, params=params)
-    return resp.ok
+    if not resp.ok:
+        logger.error(f"Delete step 1 failed for topic {db_id}: {resp.status_code}")
+        return False
+
+    # Step 2: Confirm the deletion
+    # course/editsection.php?id=5431&sr&delete=1&confirm=1&sesskey=...
+    confirm_params = {
+        "id": db_id,
+        "sr": "",
+        "delete": 1,
+        "confirm": 1,
+        "sesskey": sesskey
+    }
+    resp = session.get(url, params=confirm_params)
+    if not resp.ok:
+        logger.error(f"Delete confirmation failed for topic {db_id}: {resp.status_code}")
+        return False
+    logger.info(f"Topic {db_id} deleted successfully")
+    return True
 
 def enable_edit_mode(session, course_id, sesskey):
     """

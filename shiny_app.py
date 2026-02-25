@@ -13,7 +13,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 from shiny_modules.ui import get_custom_css, get_custom_js
-from shiny_modules.server import register_auth_handlers, register_restriction_handlers, register_activity_handlers, register_course_handlers
+from shiny_modules.server import register_auth_handlers, register_restriction_handlers, register_activity_handlers, register_course_handlers, register_import_handlers
 
 # CSS & JS from modules
 custom_css = get_custom_css()
@@ -105,6 +105,17 @@ def server(input, output, session):
         course_grade_items_cache,
         is_edit_mode_on,
         selected_indices
+    )
+
+    # -------------------------------------------------------------------------
+    # IMPORT - Course content import handlers
+    # -------------------------------------------------------------------------
+    register_import_handlers(
+        input,
+        user_session_id,
+        topics_list,
+        trigger_background_refresh,
+        do_background_refresh
     )
 
     @output
@@ -424,6 +435,15 @@ def server(input, output, session):
                 icon=icon_svg("arrow-rotate-right"),
                 class_="toolbar-icon-btn",
                 title="Refresh topics from server"
+            ),
+
+            # Import
+            ui.input_action_button(
+                "act_import",
+                "",
+                icon=icon_svg("file-import"),
+                class_="toolbar-icon-btn",
+                title="Import content from another course"
             ),
 
             # Divider
@@ -1134,9 +1154,6 @@ def server(input, output, session):
         
         s = setup_session(user_session_id())
         cid = input.course_id()
-        ensure_edit_mode(s, cid, row.get('Sesskey'))
-        delete_topic(s, row['DB ID'], row.get('Sesskey'))
-
         ensure_edit_mode(s, cid, row.get('Sesskey'))
         delete_topic(s, row['DB ID'], row.get('Sesskey'))
 

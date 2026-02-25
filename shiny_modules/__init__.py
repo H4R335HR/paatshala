@@ -5,6 +5,7 @@ from shiny_modules.server import (
     register_restriction_handlers,
     register_activity_handlers,
     register_course_handlers,
+    register_import_handlers,
     SessionManager,
     TopicsStateManager
 )

@@ -825,12 +825,8 @@ def _render_link_submission(row, sub_type, course=None):
             if active_override and active_override['type'] == 'link':
                 effective_link = active_override['url']
             
-            # Show override UI when link is invalid or empty
-            is_link_invalid = '✅' not in str(valid)
-            if (is_link_invalid or not link) and course:
-                _render_submission_override(row, course)
-            elif active_override and course:
-                # Even if link is valid, show override indicator if one is active
+            # Show override UI for all submissions (valid or invalid)
+            if course:
                 _render_submission_override(row, course)
             
             # Show original submission link for reference
