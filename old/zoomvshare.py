@@ -8,6 +8,7 @@ Usage:
   2. Or export cookies and CSRF from an existing Zoom browser session
   3. Run: python3 zoomvshare.py --username "you@example.com" --download
 
+Author: Hareesh (ICT Academy of Kerala)
 """
 
 import argparse
@@ -23,6 +24,7 @@ from http.cookiejar import MozillaCookieJar
 from pathlib import Path
 
 import requests
+from paatshala import CONFIG_FILE
 
 try:
     from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
@@ -712,6 +714,50 @@ def save_links(entries: list, output_file: str):
     print(f"[+] Links saved to {output_file}")
 
 
+def save_zoom_credentials(config_path: str, username: str, password: str) -> bool:
+    """Persist Zoom credentials without overwriting unrelated config entries."""
+    try:
+        path = Path(config_path)
+        lines = []
+        found_zoom_username = False
+        found_zoom_password = False
+
+        if path.exists():
+            with path.open("r", encoding="utf-8") as f:
+                for line in f:
+                    stripped = line.strip()
+                    if not stripped or stripped.startswith("#") or "=" not in stripped:
+                        lines.append(line)
+                        continue
+
+                    key, _ = stripped.split("=", 1)
+                    normalized_key = key.strip().lower()
+
+                    if normalized_key == "zoom_username":
+                        lines.append(f"zoom_username={username}\n")
+                        found_zoom_username = True
+                        continue
+
+                    if normalized_key == "zoom_password":
+                        lines.append(f"zoom_password={password}\n")
+                        found_zoom_password = True
+                        continue
+
+                    lines.append(line)
+
+        if not found_zoom_username:
+            lines.append(f"zoom_username={username}\n")
+        if not found_zoom_password:
+            lines.append(f"zoom_password={password}\n")
+
+        with path.open("w", encoding="utf-8") as f:
+            f.writelines(lines)
+        return True
+    except Exception as e:
+        print(f"[!] Failed to save Zoom credentials to {config_path}: {e}")
+        return False
+
+
 def _extract_csrf_from_page(page) -> str:
     """Best-effort extraction of Zoom's CSRF token from page state."""
     js = """
@@ -1245,6 +1291,11 @@ def build_downloader(args):
             print("[!] Auth handoff failed after browser login.")
             print("    The browser may still need MFA/SSO approval, or Zoom changed its session cookies.")
             sys.exit(1)
+        if args.save_creds:
+            if save_zoom_credentials(CONFIG_FILE, args.username, password):
+                print(f"[+] Saved Zoom credentials to {CONFIG_FILE}")
+            else:
+                print(f"[!] Failed to save Zoom credentials to {CONFIG_FILE}")
         return downloader
 
     return ZoomRecordingDownloader(
@@ -1284,6 +1335,9 @@ Examples:
   # Download recordings after logging in with Zoom credentials
   python3 zoomvshare.py --username "user@example.com" --download
 
+  # Save Zoom credentials to ../.config after a successful browser login
+  python3 zoomvshare.py --username "user@example.com" --save-creds --download
+
   # Download recordings for a specific batch
   python3 zoomvshare.py --cookies cookies.txt --csrf "TOKEN" --download --search "CSA SGOU"
 
@@ -1307,6 +1361,8 @@ Examples:
                       help="Zoom username/email for browser-assisted login")
     auth.add_argument("--password",
                       help="Zoom password for browser-assisted login; omit to prompt securely")
+    auth.add_argument("--save-creds", action="store_true",
+                      help=f"Save --username and password to {CONFIG_FILE} after a successful browser login")
     auth.add_argument("--headless", action="store_true",
                       help="Run browser login headlessly (less reliable if MFA/CAPTCHA is involved)")
     auth.add_argument("--manual-login", action="store_true",
@@ -1354,6 +1410,9 @@ Examples:
 
     if using_browser_login and (args.cookies or args.csrf):
         parser.error("use either browser login (--username/--password) or manual auth (--cookies/--csrf), not both")
+
+    if args.save_creds and not using_browser_login:
+        parser.error("--save-creds requires --username")
 
     downloader = build_downloader(args)
 
