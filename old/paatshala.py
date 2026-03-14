@@ -41,7 +41,8 @@ from bs4 import BeautifulSoup
 
 BASE = "https://paatshala.ictkerala.org"
 PAATSHALA_HOST = "paatshala.ictkerala.org"
-CONFIG_FILE = ".config"
+SCRIPT_DIR = Path(__file__).resolve().parent
+CONFIG_FILE = str(SCRIPT_DIR.parent / ".config")
 LAST_SESSION_FILE = ".last_session"
 OUTPUT_DIR = "output"
 DEFAULT_THREADS = 4
