@@ -220,6 +220,7 @@ def get_thread_session(session_id):
 def authenticate(config_path=CONFIG_FILE):
     """Complete authentication flow, returns session_id or exits"""
     SESSION_ID = None
+    cookie = username = password = None
     
     # 1. Environment variable
     if os.environ.get("MOODLE_SESSION_ID"):
@@ -264,21 +265,30 @@ def authenticate(config_path=CONFIG_FILE):
         print("[Auth] Validating session...")
         if not validate_session(SESSION_ID):
             print("[Auth] ✗ Cookie is invalid or expired")
-            username, password, should_save = prompt_for_credentials()
-            
             if username and password:
+                print("[Auth] Using saved credentials from config to refresh the session")
                 SESSION_ID = login_and_get_cookie(username, password)
                 if SESSION_ID:
-                    if should_save:
-                        write_config(config_path, cookie=SESSION_ID, username=username, password=password)
-                    else:
-                        write_config(config_path, cookie=SESSION_ID)
+                    write_config(config_path, cookie=SESSION_ID)
                 else:
-                    print("\n[Auth] ✗ Login failed.")
+                    print("\n[Auth] ✗ Auto-login with saved credentials failed.")
                     sys.exit(1)
             else:
-                print("\n[Auth] ✗ No credentials provided.")
-                sys.exit(1)
+                username, password, should_save = prompt_for_credentials()
+
+                if username and password:
+                    SESSION_ID = login_and_get_cookie(username, password)
+                    if SESSION_ID:
+                        if should_save:
+                            write_config(config_path, cookie=SESSION_ID, username=username, password=password)
+                        else:
+                            write_config(config_path, cookie=SESSION_ID)
+                    else:
+                        print("\n[Auth] ✗ Login failed.")
+                        sys.exit(1)
+                else:
+                    print("\n[Auth] ✗ No credentials provided.")
+                    sys.exit(1)
         else:
             print("[Auth] ✓ Session is valid")
     
