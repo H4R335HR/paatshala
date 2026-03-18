@@ -1867,6 +1867,238 @@ def extract_zip_images_from_bytes(zip_bytes: bytes, password: str = "ictkerala.o
     return images
 
 
+def is_gdrive_url(url: str) -> bool:
+    """Check if a URL is a Google Drive or Google Docs/Sheets/Slides URL."""
+    if not url:
+        return False
+    return any(domain in url.lower() for domain in [
+        'drive.google.com', 'docs.google.com'
+    ])
+
+
+def _extract_gdrive_file_id(url: str) -> Optional[str]:
+    """
+    Extract the file/document ID from various Google Drive URL formats.
+    
+    Supported formats:
+        - drive.google.com/file/d/{id}/view
+        - drive.google.com/open?id={id}
+        - docs.google.com/document/d/{id}/edit
+        - docs.google.com/spreadsheets/d/{id}/edit
+        - docs.google.com/presentation/d/{id}/edit
+    """
+    import re
+    
+    # Pattern: /d/{id} (covers file/d/, document/d/, spreadsheets/d/, presentation/d/)
+    match = re.search(r'/d/([a-zA-Z0-9_-]+)', url)
+    if match:
+        return match.group(1)
+    
+    # Pattern: ?id={id} or &id={id}
+    match = re.search(r'[?&]id=([a-zA-Z0-9_-]+)', url)
+    if match:
+        return match.group(1)
+    
+    return None
+
+
+def _detect_gdrive_type(url: str) -> str:
+    """
+    Detect the type of Google Drive URL.
+    
+    Returns:
+        One of: 'document', 'spreadsheet', 'presentation', 'folder', 'file'
+    """
+    url_lower = url.lower()
+    if 'docs.google.com/document' in url_lower:
+        return 'document'
+    elif 'docs.google.com/spreadsheets' in url_lower:
+        return 'spreadsheet'
+    elif 'docs.google.com/presentation' in url_lower:
+        return 'presentation'
+    elif '/folders/' in url_lower:
+        return 'folder'
+    else:
+        return 'file'  # Generic Drive file (PDF, DOCX, image, etc.)
+
+
+def fetch_gdrive_content(url: str) -> Dict[str, Any]:
+    """
+    Fetch content from a Google Drive URL using public export URLs.
+    
+    Works for files shared with "Anyone with the link" — no API credentials needed.
+    Supports Google Docs, Sheets, Slides, and binary files (PDF, DOCX, images, etc.).
+    
+    Args:
+        url: Google Drive or Google Docs URL
+    
+    Returns:
+        Dict with 'content', 'summary', 'images', 'file_type', 'error' keys
+    """
+    import requests
+    
+    result = {
+        "content": "",
+        "summary": "",
+        "images": [],
+        "file_type": "unknown",
+        "error": None
+    }
+    
+    file_id = _extract_gdrive_file_id(url)
+    drive_type = _detect_gdrive_type(url)
+    
+    # Folder links cannot be evaluated
+    if drive_type == 'folder':
+        result["error"] = "Google Drive folder links cannot be evaluated. The student should share the specific file link instead."
+        result["summary"] = "Google Drive folder (cannot fetch)"
+        return result
+    
+    if not file_id:
+        result["error"] = f"Could not extract file ID from Google Drive URL: {url}"
+        return result
+    
+    logger.info(f"[fetch_gdrive_content] Type={drive_type}, ID={file_id}, URL={url}")
+    
+    MAX_DOWNLOAD_SIZE = 50 * 1024 * 1024  # 50MB
+    
+    try:
+        if drive_type == 'document':
+            # Google Doc → export as plain text
+            export_url = f"https://docs.google.com/document/d/{file_id}/export?format=txt"
+            resp = requests.get(export_url, timeout=30, allow_redirects=True)
+            
+            if resp.status_code == 200:
+                text_content = resp.text[:50000]  # Cap at 50K chars
+                result["content"] = f"Google Document: {url}\n\n## Document Content:\n{text_content}"
+                result["summary"] = f"Google Doc ({len(text_content)} chars)"
+                result["file_type"] = "document"
+            else:
+                result["error"] = f"Cannot access Google Doc (HTTP {resp.status_code}). The file may not be shared publicly."
+        
+        elif drive_type == 'spreadsheet':
+            # Google Sheet → export as CSV
+            export_url = f"https://docs.google.com/spreadsheets/d/{file_id}/export?format=csv"
+            resp = requests.get(export_url, timeout=30, allow_redirects=True)
+            
+            if resp.status_code == 200:
+                csv_content = resp.text[:50000]
+                result["content"] = f"Google Spreadsheet: {url}\n\n## Spreadsheet Data (CSV):\n{csv_content}"
+                result["summary"] = f"Google Sheet ({len(csv_content)} chars)"
+                result["file_type"] = "spreadsheet"
+            else:
+                result["error"] = f"Cannot access Google Sheet (HTTP {resp.status_code}). The file may not be shared publicly."
+        
+        elif drive_type == 'presentation':
+            # Google Slides → export as PDF, then extract text + images
+            export_url = f"https://docs.google.com/presentation/d/{file_id}/export/pdf"
+            resp = requests.get(export_url, timeout=60, allow_redirects=True, stream=True)
+            
+            if resp.status_code == 200:
+                pdf_bytes = resp.content
+                if len(pdf_bytes) > MAX_DOWNLOAD_SIZE:
+                    result["error"] = f"Presentation PDF too large ({len(pdf_bytes) / 1024 / 1024:.1f}MB)"
+                    return result
+                
+                pdf_text = extract_pdf_text(pdf_bytes, max_chars=30000)
+                pdf_images = extract_pdf_images(pdf_bytes, max_pages=10)
+                
+                result["content"] = f"Google Slides Presentation: {url}\n\n## Slide Content:\n{pdf_text}"
+                result["summary"] = f"Google Slides ({len(pdf_images)} slides)"
+                result["images"] = pdf_images
+                result["file_type"] = "presentation"
+            else:
+                result["error"] = f"Cannot access Google Slides (HTTP {resp.status_code}). The file may not be shared publicly."
+        
+        else:
+            # Generic Drive file — direct download
+            download_url = f"https://drive.usercontent.google.com/download?id={file_id}&export=download&confirm=t"
+            resp = requests.get(download_url, timeout=60, allow_redirects=True, stream=True)
+            
+            if resp.status_code == 200:
+                # Check content length before downloading fully
+                content_length = int(resp.headers.get('content-length', 0))
+                if content_length > MAX_DOWNLOAD_SIZE:
+                    result["error"] = f"File too large ({content_length / 1024 / 1024:.1f}MB, max {MAX_DOWNLOAD_SIZE / 1024 / 1024:.0f}MB)"
+                    return result
+                
+                file_bytes = resp.content
+                content_type = resp.headers.get('content-type', '')
+                
+                # Detect file type from content
+                detected_ext = detect_file_type(file_bytes) if file_bytes else None
+                
+                if detected_ext == '.pdf' or 'pdf' in content_type:
+                    pdf_text = extract_pdf_text(file_bytes, max_chars=30000)
+                    pdf_images = extract_pdf_images(file_bytes, max_pages=5)
+                    result["content"] = f"Google Drive PDF File: {url}\n\n## PDF Content:\n{pdf_text}"
+                    result["summary"] = f"PDF from Google Drive ({len(file_bytes) / 1024:.1f}KB)"
+                    result["images"] = pdf_images
+                    result["file_type"] = "pdf"
+                
+                elif detected_ext in ['.docx', '.doc'] or 'word' in content_type or 'officedocument' in content_type:
+                    if len(file_bytes) >= 2 and file_bytes[:2] == b'PK':
+                        docx_text = extract_docx_text(file_bytes, max_chars=30000)
+                        _, docx_images = convert_docx_to_pdf_images(file_bytes, max_pages=10)
+                        result["content"] = f"Google Drive Word Document: {url}\n\n## Document Content:\n{docx_text}"
+                        result["summary"] = f"DOCX from Google Drive ({len(file_bytes) / 1024:.1f}KB)"
+                        result["images"] = docx_images
+                        result["file_type"] = "docx"
+                    else:
+                        # Might be plain text misidentified
+                        text = file_bytes.decode('utf-8', errors='ignore')[:30000]
+                        result["content"] = f"Google Drive File: {url}\n\n## Content:\n{text}"
+                        result["summary"] = f"Text file from Google Drive"
+                        result["file_type"] = "text"
+                
+                elif detected_ext in ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp']:
+                    # Image file — pass to AI as image
+                    try:
+                        max_dim = int(get_config("max_image_dimension") or "800")
+                    except (ValueError, TypeError):
+                        max_dim = 800
+                    resized = resize_image_bytes(file_bytes, max_dim)
+                    result["images"].append(resized)
+                    result["content"] = f"Google Drive Image File: {url}\n\n(Image file, {len(file_bytes) / 1024:.1f}KB — sent as visual for AI)"
+                    result["summary"] = f"Image from Google Drive ({len(file_bytes) / 1024:.1f}KB)"
+                    result["file_type"] = "image"
+                
+                elif detected_ext == '.txt' or 'text' in content_type:
+                    text = file_bytes.decode('utf-8', errors='ignore')[:50000]
+                    result["content"] = f"Google Drive Text File: {url}\n\n## Content:\n{text}"
+                    result["summary"] = f"Text file from Google Drive ({len(text)} chars)"
+                    result["file_type"] = "text"
+                
+                else:
+                    # Unknown binary — try text decode as last resort
+                    try:
+                        text = file_bytes.decode('utf-8', errors='strict')[:30000]
+                        result["content"] = f"Google Drive File: {url}\n\n## Content:\n{text}"
+                        result["summary"] = f"File from Google Drive ({len(file_bytes) / 1024:.1f}KB)"
+                        result["file_type"] = "text"
+                    except UnicodeDecodeError:
+                        result["content"] = f"Google Drive File: {url}\n\n(Binary file, {len(file_bytes) / 1024:.1f}KB — content type: {content_type})"
+                        result["summary"] = f"Binary file from Google Drive ({len(file_bytes) / 1024:.1f}KB)"
+                        result["file_type"] = "binary"
+            
+            elif resp.status_code == 404:
+                result["error"] = "File not found on Google Drive. It may have been deleted or the link is incorrect."
+            elif resp.status_code in (401, 403):
+                result["error"] = "Access denied. The file may not be shared publicly (requires 'Anyone with the link' sharing)."
+            else:
+                result["error"] = f"Failed to download from Google Drive (HTTP {resp.status_code})"
+    
+    except requests.exceptions.Timeout:
+        result["error"] = "Google Drive request timed out. The file may be too large or Drive is slow."
+    except requests.exceptions.RequestException as e:
+        result["error"] = f"Network error accessing Google Drive: {str(e)}"
+    except Exception as e:
+        result["error"] = f"Error fetching Google Drive content: {str(e)}"
+        logger.error(f"[fetch_gdrive_content] Unexpected error: {e}", exc_info=True)
+    
+    return result
+
+
 def fetch_submission_content(row: Dict, course_id: int = None) -> Dict[str, Any]:
     """
     Extract evaluable content from a submission based on its type.
@@ -1982,8 +2214,21 @@ def fetch_submission_content(row: Dict, course_id: int = None) -> Dict[str, Any]
                     # Transfer images for multimodal scoring
                     result["images"].extend(github_content.get("images", []))
             else:
-                # Non-GitHub link - can't fetch content
-                result["content"] = f"Submitted URL: {url}\n\n(Cannot fetch content from non-GitHub URLs)"
+                # Non-GitHub link — check for Google Drive
+                if is_gdrive_url(url):
+                    logger.info(f"[fetch_submission_content] Detected Google Drive URL: {url}")
+                    gdrive_content = fetch_gdrive_content(url)
+                    
+                    if gdrive_content.get("error"):
+                        result["error"] = gdrive_content["error"]
+                        result["content"] = f"Google Drive URL: {url}\n\n(Could not fetch: {gdrive_content['error']})"
+                    else:
+                        result["content"] = gdrive_content["content"]
+                        result["summary"] = gdrive_content.get("summary", f"Google Drive file: {url}")
+                        result["images"].extend(gdrive_content.get("images", []))
+                else:
+                    # Non-GitHub, non-Drive link
+                    result["content"] = f"Submitted URL: {url}\n\n(Cannot fetch content from this URL type)"
         else:
             result["content"] = submission_text
             result["summary"] = "Text with no valid URL"

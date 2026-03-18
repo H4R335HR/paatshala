@@ -252,6 +252,10 @@ def parse_grading_table(html):
     # Detect assignment type and column indices from headers
     assignment_type = "link"  # Default
     grade_col_idx = 5  # Default grade column (fallback)
+    file_sub_col_idx = None  # Column index for "File submissions"
+    online_text_col_idx = None  # Column index for "Online text"
+    last_modified_col_idx = 7  # Default
+    feedback_col_idx = 11  # Default
     
     thead = table.find("thead")
     if thead:
@@ -259,21 +263,22 @@ def parse_grading_table(html):
         headers = [text_or_none(th).lower() for th in header_ths]
         headers_raw = [text_or_none(th) for th in header_ths]  # Keep raw for max_grade extraction
         
-        # Detect assignment type
-        if any("file submissions" in h for h in headers):
-            assignment_type = "file"
-        elif any("online text" in h for h in headers):
-            assignment_type = "link"
-        
-        # Find the grade column index dynamically
-        # Look for "grade" header (but not "final grade" which is calculated differently)
+        # Find column indices dynamically
         for i, h in enumerate(headers):
-            # Match "grade" but not "final grade" - the "grade" column has the editable score
-            if h.strip().startswith("grade") and "final" not in h:
+            h_stripped = h.strip()
+            if "file submissions" in h_stripped:
+                file_sub_col_idx = i
+            elif "online text" in h_stripped:
+                online_text_col_idx = i
+            elif h_stripped.startswith("last modified") and "grade" not in h_stripped:
+                last_modified_col_idx = i
+            elif "feedback comments" in h_stripped:
+                feedback_col_idx = i
+            # Match "grade" but not "final grade"
+            elif h_stripped.startswith("grade") and "final" not in h_stripped:
                 grade_col_idx = i
                 
-                # NEW: Try to extract max_grade from the header itself
-                # Headers like "Grade / 100.00" or "Grade / 15" contain the max
+                # Try to extract max_grade from the header itself
                 raw_header = headers_raw[i]
                 header_match = re.search(r'/\s*(\d+(?:\.\d+)?)', raw_header)
                 if header_match:
@@ -282,7 +287,20 @@ def parse_grading_table(html):
                         logger.info(f"[parse_grading_table] Extracted max_grade={max_grade} from header: '{raw_header}'")
                     except ValueError:
                         pass
-                break
+        
+        # Detect assignment type from which columns are present
+        if file_sub_col_idx is not None and online_text_col_idx is not None:
+            assignment_type = "dual"  # Both file and text submissions enabled
+        elif file_sub_col_idx is not None:
+            assignment_type = "file"
+        elif online_text_col_idx is not None:
+            assignment_type = "link"
+        
+        # Fallback: if neither column found, assume cell 8 is the submission column
+        if file_sub_col_idx is None and online_text_col_idx is None:
+            file_sub_col_idx = 8  # Legacy fallback
+        
+        logger.debug(f"[parse_grading_table] assignment_type={assignment_type}, file_col={file_sub_col_idx}, text_col={online_text_col_idx}, grade_col={grade_col_idx}")
     
     tbody = table.find("tbody")
     if not tbody:
@@ -291,14 +309,14 @@ def parse_grading_table(html):
     
     # Debug: Log what we found in headers
     if thead:
-        logger.debug(f"[parse_grading_table] Headers found: {headers[:10]}... (grade_col_idx={grade_col_idx}, max_grade from header={max_grade})")
+        logger.debug(f"[parse_grading_table] Headers found: {headers[:15]}... (grade_col_idx={grade_col_idx}, max_grade from header={max_grade})")
 
     for tr in tbody.find_all("tr"):
         if "emptyrow" in tr.get("class", []):
             continue
         
         cells = tr.find_all(["th", "td"])
-        if len(cells) < 14:
+        if len(cells) < 10:
             continue
         
         name_cell = cells[2]
@@ -320,31 +338,62 @@ def parse_grading_table(html):
         status_divs = status_cell.find_all("div")
         status = " | ".join([div.get_text(strip=True) for div in status_divs])
         
-        last_modified = text_or_none(cells[7])
+        last_modified = text_or_none(cells[last_modified_col_idx]) if last_modified_col_idx < len(cells) else ""
         
-        submission_cell = cells[8]
-        file_divs = submission_cell.find_all("div", class_="fileuploadsubmission")
-        if file_divs:
-            submissions = []
-            submission_files = []
-            for div in file_divs:
-                file_link = div.find("a", href=lambda h: h and "pluginfile.php" in h)
-                if file_link:
-                    fname = file_link.get_text(strip=True)
-                    furl = file_link.get("href", "")
-                    submissions.append(fname)
-                    submission_files.append((fname, furl))
-            submissions = ", ".join(submissions)
-        else:
-            submission_files = []
-            no_overflow_div = submission_cell.find("div", class_="no-overflow")
-            if no_overflow_div:
-                submissions = no_overflow_div.get_text(" ", strip=True)
+        # === Parse file submissions column ===
+        submission_files = []
+        file_submissions_text = ""
+        if file_sub_col_idx is not None and file_sub_col_idx < len(cells):
+            file_cell = cells[file_sub_col_idx]
+            file_divs = file_cell.find_all("div", class_="fileuploadsubmission")
+            if file_divs:
+                file_names = []
+                for div in file_divs:
+                    file_link = div.find("a", href=lambda h: h and "pluginfile.php" in h)
+                    if file_link:
+                        fname = file_link.get_text(strip=True)
+                        furl = file_link.get("href", "")
+                        file_names.append(fname)
+                        submission_files.append((fname, furl))
+                file_submissions_text = ", ".join(file_names)
             else:
-                submissions = text_or_none(submission_cell)
+                # Non-file content in the file column (edge case)
+                no_overflow_div = file_cell.find("div", class_="no-overflow")
+                if no_overflow_div:
+                    file_submissions_text = no_overflow_div.get_text(" ", strip=True)
+                else:
+                    file_submissions_text = text_or_none(file_cell)
         
-        feedback = text_or_none(cells[11])
-        grade_cell_text = text_or_none(cells[grade_col_idx])
+        # === Parse online text column ===
+        online_text = ""
+        if online_text_col_idx is not None and online_text_col_idx < len(cells):
+            text_cell = cells[online_text_col_idx]
+            no_overflow_div = text_cell.find("div", class_="no-overflow")
+            if no_overflow_div:
+                online_text = no_overflow_div.get_text(" ", strip=True)
+            else:
+                online_text = text_or_none(text_cell)
+        
+        # === Determine submission content and type ===
+        # Priority: files first, then online text
+        if submission_files:
+            submissions = file_submissions_text
+            sub_type = "file"
+            # If there's also online text, append it (some students do both)
+            if online_text and online_text.strip() and online_text.strip() != "-":
+                submissions = submissions + " | Online text: " + online_text
+        elif online_text and online_text.strip() and online_text.strip() != "-":
+            submissions = online_text
+            sub_type = "link" if "http" in online_text.lower() else "text"
+        elif file_submissions_text and file_submissions_text.strip() and file_submissions_text.strip() != "-":
+            submissions = file_submissions_text
+            sub_type = "link" if "http" in file_submissions_text.lower() else ("text" if file_submissions_text.strip() else "empty")
+        else:
+            submissions = ""
+            sub_type = "empty"
+        
+        feedback = text_or_none(cells[feedback_col_idx]) if feedback_col_idx < len(cells) else ""
+        grade_cell_text = text_or_none(cells[grade_col_idx]) if grade_col_idx < len(cells) else ""
         final_grade = clean_grade_value(grade_cell_text)
         
         # Extract max_grade from the first row with a valid "X / Y" format
@@ -366,8 +415,8 @@ def parse_grading_table(html):
             "Last Modified": last_modified,
             "Submission": submissions,
             "Submission_Files": submission_files,
-            "Submission_Type": "file" if submission_files else ("link" if "http" in submissions else ("text" if submissions else "empty")),
-            "Assignment_Type": assignment_type,
+            "Submission_Type": sub_type,
+            "Assignment_Type": assignment_type if assignment_type != "dual" else "file",  # UI treats dual as file-capable
             "Feedback Comments": feedback,
             "Final Grade": final_grade
         })

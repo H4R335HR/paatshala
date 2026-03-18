@@ -9,3 +9,4 @@ output/
 .debug*
 .git*
 .claude/
+.agent/

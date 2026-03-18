@@ -355,21 +355,40 @@ def render_evaluation_tab(course, meta):
     # Ensure index is valid
     if st.session_state.eval_selected_index >= len(data):
         st.session_state.eval_selected_index = 0
-        
-    # Ensure widget state is initialized
-    if 'eval_student_select' not in st.session_state:
-        st.session_state.eval_student_select = st.session_state.eval_selected_index
+
+    # Sync widget state from tracked index BEFORE the selectbox renders
+    # (This is the only safe place to set widget keys — before instantiation)
+    st.session_state.eval_student_select = st.session_state.eval_selected_index
 
     def on_change_selectbox():
         st.session_state.eval_selected_index = st.session_state.eval_student_select
     
-    selected_index = st.selectbox(
-        "Select Student for Details",
-        options=student_indices,
-        format_func=format_student_option,
-        key="eval_student_select",
-        on_change=on_change_selectbox
-    )
+    nav_prev_col, select_col, nav_next_col = st.columns([1, 6, 1])
+
+    with nav_prev_col:
+        st.markdown("<br>", unsafe_allow_html=True)  # align with selectbox
+        if st.button("◀ Prev", key="eval_prev_student",
+                     disabled=st.session_state.eval_selected_index <= 0,
+                     use_container_width=True):
+            st.session_state.eval_selected_index -= 1
+            st.rerun()
+
+    with select_col:
+        selected_index = st.selectbox(
+            "Select Student for Details",
+            options=student_indices,
+            format_func=format_student_option,
+            key="eval_student_select",
+            on_change=on_change_selectbox
+        )
+
+    with nav_next_col:
+        st.markdown("<br>", unsafe_allow_html=True)  # align with selectbox
+        if st.button("Next ▶", key="eval_next_student",
+                     disabled=st.session_state.eval_selected_index >= len(data) - 1,
+                     use_container_width=True):
+            st.session_state.eval_selected_index += 1
+            st.rerun()
     
     # Use the tracked index
     idx = st.session_state.eval_selected_index
@@ -450,10 +469,10 @@ def render_evaluation_tab(course, meta):
     override_key = _get_override_key(module_id_for_override, student_name_for_override) if module_id_for_override else None
     active_override = st.session_state.get(override_key) if override_key else None
     
-    # Render based on ASSIGNMENT type (overrides individual submission type for UI structure)
-    if assignment_type == 'file':
+    # Render based on STUDENT's actual submission type
+    # (A file-type assignment may have students who submitted links instead)
+    if sub_type == 'file':
         _render_file_submission(course, row, idx)
-        # Preview is now integrated into _render_file_submission (file explorer pattern)
     else:
         _render_link_submission(row, sub_type, course)
     
@@ -838,6 +857,34 @@ def _render_link_submission(row, sub_type, course=None):
             if effective_link and 'github.com' in effective_link:
                 from streamlit_modules.ui.content_viewer import render_github_viewer
                 render_github_viewer(effective_link, get_config('github_pat'))
+            elif effective_link and ('drive.google.com' in effective_link or 'docs.google.com' in effective_link):
+                # Google Drive / Docs — show embedded preview
+                import re
+                from core.ai import _extract_gdrive_file_id, _detect_gdrive_type
+                
+                gdrive_id = _extract_gdrive_file_id(effective_link)
+                gdrive_type = _detect_gdrive_type(effective_link)
+                
+                type_labels = {
+                    'document': '📄 Google Doc',
+                    'spreadsheet': '📊 Google Sheet',
+                    'presentation': '📽️ Google Slides',
+                    'file': '📁 Google Drive File'
+                }
+                st.markdown(f"**{type_labels.get(gdrive_type, '📁 Google Drive')}:** [{effective_link}]({effective_link})")
+                
+                if gdrive_id:
+                    # Build embed URL based on type
+                    if gdrive_type == 'document':
+                        embed_url = f"https://docs.google.com/document/d/{gdrive_id}/preview"
+                    elif gdrive_type == 'spreadsheet':
+                        embed_url = f"https://docs.google.com/spreadsheets/d/{gdrive_id}/preview"
+                    elif gdrive_type == 'presentation':
+                        embed_url = f"https://docs.google.com/presentation/d/{gdrive_id}/embed"
+                    else:
+                        embed_url = f"https://drive.google.com/file/d/{gdrive_id}/preview"
+                    
+                    st.components.v1.iframe(embed_url, height=600, scrolling=True)
             else:
                 st.markdown(f"**Submission Link:** [{effective_link}]({effective_link})")
         else:
