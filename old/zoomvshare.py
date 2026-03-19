@@ -714,6 +714,33 @@ def save_links(entries: list, output_file: str):
     print(f"[+] Links saved to {output_file}")
 
 
+def load_zoom_credentials(config_path: str) -> tuple[str | None, str | None]:
+    """Load zoom_username and zoom_password from the config file."""
+    path = Path(config_path)
+    if not path.exists():
+        return None, None
+        
+    username, password = None, None
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            for line in f:
+                stripped = line.strip()
+                if not stripped or stripped.startswith("#") or "=" not in stripped:
+                    continue
+                key, value = stripped.split("=", 1)
+                normalized_key = key.strip().lower()
+                value = value.strip().strip('"').strip("'")
+                
+                if normalized_key == "zoom_username":
+                    username = value
+                elif normalized_key == "zoom_password":
+                    password = value
+    except Exception as e:
+        print(f"[!] Failed to read Zoom credentials from {config_path}: {e}")
+        
+    return username, password
+
+
 def save_zoom_credentials(config_path: str, username: str, password: str) -> bool:
     """Persist Zoom credentials without overwriting unrelated config entries."""
     try:
@@ -1401,6 +1428,14 @@ Examples:
                         help="When used with --links, verify and apply the standard share settings before generating share URLs")
 
     args = parser.parse_args()
+
+    # Automatically load credentials from config if no auth arguments are provided
+    if not args.username and not (args.cookies and args.csrf):
+        config_user, config_pass = load_zoom_credentials(CONFIG_FILE)
+        if config_user and config_pass:
+            print(f"[*] Loaded Zoom credentials from {CONFIG_FILE}")
+            args.username = config_user
+            args.password = config_pass
 
     using_browser_login = bool(args.username)
     using_manual_auth = bool(args.cookies and args.csrf)
