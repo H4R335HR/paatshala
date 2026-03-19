@@ -22,3 +22,6 @@ moodle_modedit_debug_*.html
 zoom_links.json
 .zoom_links_run*.json
 recordings_metadata.json
+
+cron_trigger.sh
+zoom-moodle-dashboard.service
