@@ -1,0 +1,1015 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Zoom → Moodle Pipeline</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=DM+Sans:wght@400;500;600;700&display=swap');
+
+  :root {
+    --bg-0: #0a0c10;
+    --bg-1: #12151c;
+    --bg-2: #1a1e28;
+    --bg-3: #222733;
+    --border: #2a3040;
+    --border-hover: #3a4560;
+    --text-0: #e8ecf4;
+    --text-1: #a0aabe;
+    --text-2: #6a758a;
+    --accent: #3b82f6;
+    --accent-dim: #1e3a5f;
+    --green: #22c55e;
+    --green-dim: #0a3620;
+    --yellow: #eab308;
+    --yellow-dim: #3a2e08;
+    --red: #ef4444;
+    --red-dim: #3c1010;
+    --orange: #f97316;
+    --mono: 'JetBrains Mono', monospace;
+    --sans: 'DM Sans', system-ui, sans-serif;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: var(--sans);
+    background: var(--bg-0);
+    color: var(--text-0);
+    min-height: 100vh;
+    line-height: 1.5;
+  }
+
+  /* ---- Layout ---- */
+  .shell {
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 24px 20px;
+  }
+
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding-bottom: 20px;
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 24px;
+  }
+
+  header h1 {
+    font-family: var(--mono);
+    font-size: 18px;
+    font-weight: 700;
+    letter-spacing: -0.5px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  header h1 .arrow { color: var(--accent); }
+
+  .health-badges {
+    display: flex;
+    gap: 12px;
+    align-items: center;
+  }
+
+  .badge {
+    font-family: var(--mono);
+    font-size: 11px;
+    padding: 4px 10px;
+    border-radius: 4px;
+    border: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .badge .dot {
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    display: inline-block;
+  }
+
+  .dot-green { background: var(--green); box-shadow: 0 0 6px var(--green); }
+  .dot-red { background: var(--red); box-shadow: 0 0 6px var(--red); }
+  .dot-yellow { background: var(--yellow); box-shadow: 0 0 6px var(--yellow); }
+  .dot-blue { background: var(--accent); box-shadow: 0 0 6px var(--accent); }
+  .dot-gray { background: var(--text-2); }
+
+  /* ---- Tabs ---- */
+  .tabs {
+    display: flex;
+    gap: 2px;
+    margin-bottom: 20px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .tab {
+    font-family: var(--mono);
+    font-size: 13px;
+    padding: 10px 18px;
+    cursor: pointer;
+    color: var(--text-2);
+    border-bottom: 2px solid transparent;
+    transition: all 0.15s;
+    background: none;
+    border-top: none; border-left: none; border-right: none;
+  }
+
+  .tab:hover { color: var(--text-1); }
+  .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+  .tab-panel { display: none; }
+  .tab-panel.active { display: block; }
+
+  /* ---- Cards ---- */
+  .card {
+    background: var(--bg-1);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 20px;
+    margin-bottom: 16px;
+  }
+
+  .card-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 14px;
+  }
+
+  .card-header h2 {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text-1);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+
+  /* ---- Stats row ---- */
+  .stats-row {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: 12px;
+    margin-bottom: 20px;
+  }
+
+  .stat-card {
+    background: var(--bg-2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 14px 16px;
+  }
+
+  .stat-card .label {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text-2);
+    font-family: var(--mono);
+  }
+
+  .stat-card .value {
+    font-size: 28px;
+    font-weight: 700;
+    font-family: var(--mono);
+    margin-top: 4px;
+  }
+
+  /* ---- Tables ---- */
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+  }
+
+  th {
+    font-family: var(--mono);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text-2);
+    text-align: left;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border);
+    font-weight: 600;
+  }
+
+  td {
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--bg-3);
+    vertical-align: top;
+  }
+
+  tr:hover td { background: var(--bg-2); }
+
+  .status-pill {
+    font-family: var(--mono);
+    font-size: 11px;
+    font-weight: 600;
+    padding: 3px 10px;
+    border-radius: 3px;
+    display: inline-block;
+    text-transform: uppercase;
+  }
+
+  .status-completed { background: var(--green-dim); color: var(--green); }
+  .status-uploaded { background: var(--green-dim); color: var(--green); }
+  .status-failed { background: var(--red-dim); color: var(--red); }
+  .status-running { background: var(--accent-dim); color: var(--accent); }
+  .status-pending { background: var(--bg-3); color: var(--text-2); }
+  .status-skipped { background: var(--yellow-dim); color: var(--yellow); }
+
+  .mono { font-family: var(--mono); font-size: 12px; }
+  .dim { color: var(--text-2); }
+  .small { font-size: 12px; }
+
+  /* ---- Buttons ---- */
+  .btn {
+    font-family: var(--mono);
+    font-size: 12px;
+    font-weight: 600;
+    padding: 7px 16px;
+    border-radius: 5px;
+    border: 1px solid var(--border);
+    cursor: pointer;
+    transition: all 0.15s;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .btn-primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: white;
+  }
+  .btn-primary:hover { background: #2563eb; }
+  .btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  .btn-secondary {
+    background: var(--bg-2);
+    color: var(--text-1);
+  }
+  .btn-secondary:hover { border-color: var(--border-hover); background: var(--bg-3); }
+
+  .btn-danger {
+    background: var(--red-dim);
+    border-color: #5c1a1a;
+    color: var(--red);
+  }
+  .btn-danger:hover { background: #4c1414; }
+
+  .btn-sm { padding: 4px 10px; font-size: 11px; }
+
+  .btn-group { display: flex; gap: 8px; flex-wrap: wrap; }
+
+  /* ---- Forms ---- */
+  .form-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 14px;
+  }
+
+  .form-group { display: flex; flex-direction: column; gap: 4px; }
+  .form-group.full { grid-column: 1 / -1; }
+
+  .form-group label {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text-2);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+
+  .form-group input, .form-group select {
+    font-family: var(--sans);
+    font-size: 14px;
+    background: var(--bg-0);
+    border: 1px solid var(--border);
+    color: var(--text-0);
+    padding: 8px 12px;
+    border-radius: 5px;
+    outline: none;
+    transition: border-color 0.15s;
+  }
+
+  .form-group input:focus, .form-group select:focus {
+    border-color: var(--accent);
+  }
+
+  .form-group input::placeholder { color: var(--text-2); }
+
+  .toggle-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding-top: 6px;
+  }
+
+  .toggle {
+    width: 36px; height: 20px;
+    background: var(--bg-3);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    cursor: pointer;
+    position: relative;
+    transition: background 0.2s;
+    appearance: none;
+    -webkit-appearance: none;
+  }
+
+  .toggle::after {
+    content: '';
+    position: absolute;
+    top: 2px; left: 2px;
+    width: 14px; height: 14px;
+    border-radius: 50%;
+    background: var(--text-2);
+    transition: all 0.2s;
+  }
+
+  .toggle:checked { background: var(--accent-dim); border-color: var(--accent); }
+  .toggle:checked::after { left: 18px; background: var(--accent); }
+
+  /* ---- Log viewer ---- */
+  .log-viewer {
+    background: var(--bg-0);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 14px;
+    font-family: var(--mono);
+    font-size: 12px;
+    line-height: 1.6;
+    color: var(--text-1);
+    max-height: 350px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+    margin-top: 10px;
+  }
+
+  .log-tabs {
+    display: flex; gap: 2px; margin-top: 14px;
+  }
+
+  .log-tab {
+    font-family: var(--mono);
+    font-size: 11px;
+    padding: 6px 12px;
+    cursor: pointer;
+    color: var(--text-2);
+    background: var(--bg-2);
+    border: 1px solid var(--border);
+    border-bottom: none;
+    border-radius: 4px 4px 0 0;
+  }
+  .log-tab.active { color: var(--text-0); background: var(--bg-0); }
+
+  /* ---- Modal ---- */
+  .modal-overlay {
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,0.7);
+    display: flex; align-items: center; justify-content: center;
+    z-index: 1000;
+    opacity: 0; pointer-events: none;
+    transition: opacity 0.2s;
+  }
+  .modal-overlay.open { opacity: 1; pointer-events: all; }
+
+  .modal {
+    background: var(--bg-1);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    width: 90%; max-width: 600px;
+    padding: 24px;
+    max-height: 85vh; overflow-y: auto;
+  }
+
+  .modal h3 {
+    font-size: 16px;
+    margin-bottom: 18px;
+    font-weight: 600;
+  }
+
+  .modal-actions {
+    display: flex; justify-content: flex-end;
+    gap: 10px; margin-top: 20px;
+  }
+
+  /* ---- Misc ---- */
+  .empty-state {
+    text-align: center;
+    padding: 48px 20px;
+    color: var(--text-2);
+  }
+  .empty-state .icon { font-size: 36px; margin-bottom: 10px; }
+
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  .truncate {
+    max-width: 260px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .refresh-spin { animation: spin 1s linear infinite; display: inline-block; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  @media (max-width: 700px) {
+    .form-grid { grid-template-columns: 1fr; }
+    .stats-row { grid-template-columns: 1fr 1fr; }
+    .hide-mobile { display: none; }
+  }
+</style>
+</head>
+<body>
+<div class="shell">
+
+  <!-- Header -->
+  <header>
+    <h1>
+      <span>zoom</span><span class="arrow">→</span><span>moodle</span>
+    </h1>
+    <div class="health-badges">
+      <div class="badge" id="moodle-health">
+        <span class="dot dot-gray" id="moodle-dot"></span>
+        <span id="moodle-label">moodle: checking…</span>
+      </div>
+      <div class="badge" id="pipeline-badge">
+        <span class="dot dot-gray" id="pipeline-dot"></span>
+        <span id="pipeline-label">pipeline: idle</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- Stats -->
+  <div class="stats-row" id="stats-row">
+    <div class="stat-card">
+      <div class="label">Total Runs</div>
+      <div class="value" id="stat-runs">–</div>
+    </div>
+    <div class="stat-card">
+      <div class="label">Uploaded</div>
+      <div class="value" style="color: var(--green)" id="stat-uploaded">–</div>
+    </div>
+    <div class="stat-card">
+      <div class="label">Skipped</div>
+      <div class="value" style="color: var(--yellow)" id="stat-skipped">–</div>
+    </div>
+    <div class="stat-card">
+      <div class="label">Failed</div>
+      <div class="value" style="color: var(--red)" id="stat-failed">–</div>
+    </div>
+  </div>
+
+  <!-- Tabs -->
+  <div class="tabs">
+    <button class="tab active" data-tab="runs">Run History</button>
+    <button class="tab" data-tab="recordings">Recordings</button>
+    <button class="tab" data-tab="config">Batch Config</button>
+  </div>
+
+  <!-- ============================================================ -->
+  <!-- TAB: Run History -->
+  <!-- ============================================================ -->
+  <div class="tab-panel active" id="panel-runs">
+    <div class="card">
+      <div class="card-header">
+        <h2>Pipeline Runs</h2>
+        <div class="btn-group">
+          <button class="btn btn-primary" id="btn-trigger-all" onclick="triggerAll()">
+            ▶ Run All Enabled
+          </button>
+          <button class="btn btn-secondary" onclick="refreshRuns()">↻ Refresh</button>
+        </div>
+      </div>
+      <div id="runs-table-container">
+        <table>
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>Batch</th>
+              <th>Status</th>
+              <th>Found</th>
+              <th>Up</th>
+              <th>Skip</th>
+              <th>Fail</th>
+              <th>Started</th>
+              <th class="hide-mobile">Duration</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="runs-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============================================================ -->
+  <!-- TAB: Recordings -->
+  <!-- ============================================================ -->
+  <div class="tab-panel" id="panel-recordings">
+    <div class="card">
+      <div class="card-header">
+        <h2>Recording Entries</h2>
+        <div class="btn-group">
+          <select id="rec-filter-status" onchange="refreshRecordings()" style="font-family:var(--mono);font-size:12px;background:var(--bg-2);color:var(--text-1);border:1px solid var(--border);padding:6px 10px;border-radius:5px;">
+            <option value="">All statuses</option>
+            <option value="uploaded">Uploaded</option>
+            <option value="skipped">Skipped</option>
+            <option value="failed">Failed</option>
+            <option value="pending">Pending</option>
+          </select>
+          <button class="btn btn-secondary" onclick="refreshRecordings()">↻ Refresh</button>
+        </div>
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th>Title</th>
+            <th>Status</th>
+            <th>Run #</th>
+            <th>Share Link</th>
+            <th class="hide-mobile">Error</th>
+          </tr>
+        </thead>
+        <tbody id="rec-tbody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- ============================================================ -->
+  <!-- TAB: Batch Config -->
+  <!-- ============================================================ -->
+  <div class="tab-panel" id="panel-config">
+    <div class="card">
+      <div class="card-header">
+        <h2>Batch → Course Mappings</h2>
+        <button class="btn btn-primary" onclick="openMappingModal()">+ Add Mapping</button>
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th>Name</th>
+            <th>Search Term</th>
+            <th>Course ID</th>
+            <th>Section</th>
+            <th>Limit</th>
+            <th>Enabled</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody id="config-tbody"></tbody>
+      </table>
+      <div class="empty-state" id="config-empty" style="display:none">
+        <div class="icon">⚙️</div>
+        <p>No batch mappings yet. Add one to start the pipeline.</p>
+      </div>
+    </div>
+  </div>
+
+</div> <!-- /shell -->
+
+<!-- ============================================================ -->
+<!-- Run Detail Modal -->
+<!-- ============================================================ -->
+<div class="modal-overlay" id="run-modal">
+  <div class="modal" style="max-width:800px">
+    <h3 id="run-modal-title">Run #–</h3>
+    <div class="stats-row" id="run-modal-stats"></div>
+    <div id="run-modal-entries"></div>
+    <div class="log-tabs" id="run-log-tabs">
+      <div class="log-tab active" data-log="zoom-out">zoom stdout</div>
+      <div class="log-tab" data-log="zoom-err">zoom stderr</div>
+      <div class="log-tab" data-log="moodle-out">moodle stdout</div>
+      <div class="log-tab" data-log="moodle-err">moodle stderr</div>
+    </div>
+    <div class="log-viewer" id="run-log-content">Select a log tab above.</div>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closeRunModal()">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<!-- Add/Edit Mapping Modal -->
+<!-- ============================================================ -->
+<div class="modal-overlay" id="mapping-modal">
+  <div class="modal">
+    <h3 id="mapping-modal-title">Add Batch Mapping</h3>
+    <input type="hidden" id="mapping-edit-id">
+    <div class="form-grid">
+      <div class="form-group full">
+        <label>Display Name</label>
+        <input type="text" id="m-name" placeholder="CSA SGOU Feb 2026">
+      </div>
+      <div class="form-group">
+        <label>Zoom Search Term</label>
+        <input type="text" id="m-search" placeholder="CSA SGOU">
+      </div>
+      <div class="form-group">
+        <label>Moodle Course ID</label>
+        <input type="number" id="m-course" placeholder="491">
+      </div>
+      <div class="form-group">
+        <label>Section Name</label>
+        <input type="text" id="m-section" placeholder="Recordings" value="Recordings">
+      </div>
+      <div class="form-group">
+        <label>Limit (0 = all, +N newest, -N oldest)</label>
+        <input type="number" id="m-limit" value="0">
+      </div>
+      <div class="form-group">
+        <div class="toggle-row">
+          <input type="checkbox" class="toggle" id="m-check-settings" checked>
+          <label for="m-check-settings" style="font-size:13px;color:var(--text-1);text-transform:none;letter-spacing:0">
+            Verify share settings before linking
+          </label>
+        </div>
+      </div>
+      <div class="form-group">
+        <div class="toggle-row">
+          <input type="checkbox" class="toggle" id="m-enabled" checked>
+          <label for="m-enabled" style="font-size:13px;color:var(--text-1);text-transform:none;letter-spacing:0">
+            Enabled (included in "Run All")
+          </label>
+        </div>
+      </div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closeMappingModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="saveMapping()">Save</button>
+    </div>
+  </div>
+</div>
+
+
+<script>
+// ---------------------------------------------------------------------------
+// State
+// ---------------------------------------------------------------------------
+let currentRunData = null;
+
+// ---------------------------------------------------------------------------
+// API helpers
+// ---------------------------------------------------------------------------
+const api = (path, opts = {}) =>
+  fetch(`/api${path}`, {
+    headers: { 'Content-Type': 'application/json', ...opts.headers },
+    ...opts,
+  }).then(r => r.ok ? r.json() : r.json().then(e => Promise.reject(e)));
+
+function fmtTime(iso) {
+  if (!iso) return '–';
+  const d = new Date(iso);
+  return d.toLocaleString('en-IN', { day:'2-digit', month:'short', hour:'2-digit', minute:'2-digit', hour12: true });
+}
+
+function fmtDuration(start, end) {
+  if (!start || !end) return '–';
+  const ms = new Date(end) - new Date(start);
+  if (ms < 1000) return '<1s';
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `${s}s`;
+  return `${Math.floor(s/60)}m ${s%60}s`;
+}
+
+function statusPill(status) {
+  return `<span class="status-pill status-${status}">${status}</span>`;
+}
+
+// ---------------------------------------------------------------------------
+// Tabs
+// ---------------------------------------------------------------------------
+document.querySelectorAll('.tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+    tab.classList.add('active');
+    document.getElementById('panel-' + tab.dataset.tab).classList.add('active');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Stats + Health
+// ---------------------------------------------------------------------------
+async function refreshStatus() {
+  try {
+    const data = await api('/status');
+    document.getElementById('stat-runs').textContent = data.totals?.total_runs ?? 0;
+    document.getElementById('stat-uploaded').textContent = data.totals?.total_uploaded ?? 0;
+    document.getElementById('stat-skipped').textContent = data.totals?.total_skipped ?? 0;
+    document.getElementById('stat-failed').textContent = data.totals?.total_failed_entries ?? 0;
+
+    const pDot = document.getElementById('pipeline-dot');
+    const pLabel = document.getElementById('pipeline-label');
+    if (data.pipeline_running) {
+      pDot.className = 'dot dot-blue refresh-spin';
+      pLabel.textContent = 'pipeline: running';
+      document.getElementById('btn-trigger-all').disabled = true;
+    } else {
+      pDot.className = 'dot dot-green';
+      pLabel.textContent = 'pipeline: idle';
+      document.getElementById('btn-trigger-all').disabled = false;
+    }
+  } catch (e) { console.error('status error', e); }
+}
+
+async function checkMoodleHealth() {
+  const dot = document.getElementById('moodle-dot');
+  const label = document.getElementById('moodle-label');
+  try {
+    const data = await api('/health/moodle');
+    if (data.status === 'healthy') {
+      dot.className = 'dot dot-green';
+      label.textContent = 'moodle: connected';
+    } else {
+      dot.className = 'dot dot-red';
+      label.textContent = 'moodle: ' + (data.detail || 'unhealthy');
+    }
+  } catch (e) {
+    dot.className = 'dot dot-red';
+    label.textContent = 'moodle: error';
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Runs
+// ---------------------------------------------------------------------------
+async function refreshRuns() {
+  try {
+    const data = await api('/runs?limit=50');
+    const tbody = document.getElementById('runs-tbody');
+    if (!data.runs.length) {
+      tbody.innerHTML = `<tr><td colspan="10" style="text-align:center;color:var(--text-2);padding:30px">
+        No pipeline runs yet. Configure a batch mapping and hit "Run All Enabled".</td></tr>`;
+      return;
+    }
+    tbody.innerHTML = data.runs.map(r => `
+      <tr>
+        <td class="mono">${r.id}</td>
+        <td class="small">${r.batch_name || '–'}</td>
+        <td>${statusPill(r.status)}</td>
+        <td class="mono">${r.recordings_found ?? '–'}</td>
+        <td class="mono" style="color:var(--green)">${r.uploaded_count ?? 0}</td>
+        <td class="mono" style="color:var(--yellow)">${r.skipped_count ?? 0}</td>
+        <td class="mono" style="color:var(--red)">${r.failed_count ?? 0}</td>
+        <td class="small">${fmtTime(r.started_at)}</td>
+        <td class="small mono hide-mobile">${fmtDuration(r.started_at, r.finished_at)}</td>
+        <td>
+          <button class="btn btn-sm btn-secondary" onclick="openRunModal(${r.id})">logs</button>
+        </td>
+      </tr>
+    `).join('');
+  } catch (e) { console.error('runs error', e); }
+}
+
+// ---------------------------------------------------------------------------
+// Run detail modal
+// ---------------------------------------------------------------------------
+async function openRunModal(runId) {
+  try {
+    const data = await api(`/runs/${runId}`);
+    currentRunData = data;
+    const r = data.run;
+    document.getElementById('run-modal-title').textContent = `Run #${r.id} — ${r.batch_name || 'Unknown'}`;
+
+    document.getElementById('run-modal-stats').innerHTML = `
+      <div class="stat-card"><div class="label">Status</div><div style="margin-top:6px">${statusPill(r.status)}</div></div>
+      <div class="stat-card"><div class="label">Found</div><div class="value" style="font-size:22px">${r.recordings_found ?? 0}</div></div>
+      <div class="stat-card"><div class="label">Uploaded</div><div class="value" style="font-size:22px;color:var(--green)">${r.uploaded_count ?? 0}</div></div>
+      <div class="stat-card"><div class="label">Skipped</div><div class="value" style="font-size:22px;color:var(--yellow)">${r.skipped_count ?? 0}</div></div>
+      ${r.error_summary ? `<div class="stat-card" style="grid-column:1/-1;border-color:var(--red)"><div class="label">Error</div><div class="small" style="color:var(--red);margin-top:4px">${esc(r.error_summary)}</div></div>` : ''}
+    `;
+
+    if (data.entries.length) {
+      document.getElementById('run-modal-entries').innerHTML = `
+        <table><thead><tr><th>Title</th><th>Status</th><th>Error</th></tr></thead>
+        <tbody>${data.entries.map(e => `
+          <tr>
+            <td class="small truncate">${esc(e.title)}</td>
+            <td>${statusPill(e.status)}</td>
+            <td class="small dim">${esc(e.error_log || '')}</td>
+          </tr>
+        `).join('')}</tbody></table>
+      `;
+    } else {
+      document.getElementById('run-modal-entries').innerHTML = '';
+    }
+
+    // Wire up log tabs
+    document.querySelectorAll('#run-log-tabs .log-tab').forEach(tab => {
+      tab.classList.remove('active');
+      tab.onclick = () => showLogTab(tab.dataset.log);
+    });
+    document.querySelector('#run-log-tabs .log-tab').classList.add('active');
+    showLogTab('zoom-out');
+
+    document.getElementById('run-modal').classList.add('open');
+  } catch (e) { console.error('run modal error', e); }
+}
+
+function showLogTab(key) {
+  document.querySelectorAll('#run-log-tabs .log-tab').forEach(t =>
+    t.classList.toggle('active', t.dataset.log === key));
+  const r = currentRunData?.run;
+  if (!r) return;
+  const map = {
+    'zoom-out': r.zoom_stdout,
+    'zoom-err': r.zoom_stderr,
+    'moodle-out': r.moodle_stdout,
+    'moodle-err': r.moodle_stderr,
+  };
+  const content = map[key] || '';
+  document.getElementById('run-log-content').textContent = content || '(empty)';
+}
+
+function closeRunModal() {
+  document.getElementById('run-modal').classList.remove('open');
+  currentRunData = null;
+}
+
+// ---------------------------------------------------------------------------
+// Recordings
+// ---------------------------------------------------------------------------
+async function refreshRecordings() {
+  const status = document.getElementById('rec-filter-status').value;
+  const qs = status ? `?status=${status}&limit=100` : '?limit=100';
+  try {
+    const data = await api(`/recordings${qs}`);
+    const tbody = document.getElementById('rec-tbody');
+    if (!data.length) {
+      tbody.innerHTML = `<tr><td colspan="5" style="text-align:center;color:var(--text-2);padding:30px">No recording entries found.</td></tr>`;
+      return;
+    }
+    tbody.innerHTML = data.map(e => `
+      <tr>
+        <td class="small">${esc(e.title)}</td>
+        <td>${statusPill(e.status)}</td>
+        <td class="mono">${e.pipeline_run_id ?? '–'}</td>
+        <td class="small">${e.share_url ? `<a href="${esc(e.share_url)}" target="_blank" class="truncate" style="display:block;max-width:200px">${esc(e.share_url)}</a>` : '–'}</td>
+        <td class="small dim hide-mobile">${esc(e.error_log || '–')}</td>
+      </tr>
+    `).join('');
+  } catch (e) { console.error('recordings error', e); }
+}
+
+// ---------------------------------------------------------------------------
+// Config
+// ---------------------------------------------------------------------------
+async function refreshConfig() {
+  try {
+    const data = await api('/mappings');
+    const tbody = document.getElementById('config-tbody');
+    const empty = document.getElementById('config-empty');
+    if (!data.length) {
+      tbody.innerHTML = '';
+      empty.style.display = 'block';
+      return;
+    }
+    empty.style.display = 'none';
+    tbody.innerHTML = data.map(m => `
+      <tr>
+        <td class="small">${esc(m.name)}</td>
+        <td class="mono">${esc(m.search_term)}</td>
+        <td class="mono">${m.course_id}</td>
+        <td class="small">${esc(m.section_name)}</td>
+        <td class="mono">${m.limit_count || 'all'}</td>
+        <td>${m.enabled ? '<span style="color:var(--green)">✓</span>' : '<span style="color:var(--text-2)">✗</span>'}</td>
+        <td>
+          <div class="btn-group">
+            <button class="btn btn-sm btn-primary" onclick="triggerOne(${m.id})" title="Run now">▶</button>
+            <button class="btn btn-sm btn-secondary" onclick="editMapping(${m.id})">edit</button>
+            <button class="btn btn-sm btn-danger" onclick="deleteMapping(${m.id}, '${esc(m.name)}')">×</button>
+          </div>
+        </td>
+      </tr>
+    `).join('');
+  } catch (e) { console.error('config error', e); }
+}
+
+// ---------------------------------------------------------------------------
+// Trigger actions
+// ---------------------------------------------------------------------------
+async function triggerAll() {
+  if (!confirm('Run the pipeline for all enabled batch mappings?')) return;
+  try {
+    const data = await api('/trigger-all', { method: 'POST', body: '{}' });
+    alert(data.message);
+    setTimeout(() => { refreshStatus(); refreshRuns(); }, 2000);
+  } catch (e) { alert(e.detail || 'Failed to trigger'); }
+}
+
+async function triggerOne(mappingId) {
+  try {
+    const data = await api(`/trigger/${mappingId}`, { method: 'POST', body: '{}' });
+    alert(`Pipeline started (Run #${data.run_id})`);
+    setTimeout(() => { refreshStatus(); refreshRuns(); }, 2000);
+  } catch (e) { alert(e.detail || 'Failed to trigger'); }
+}
+
+// ---------------------------------------------------------------------------
+// Mapping modal
+// ---------------------------------------------------------------------------
+function openMappingModal(editData) {
+  document.getElementById('mapping-edit-id').value = editData?.id || '';
+  document.getElementById('mapping-modal-title').textContent = editData ? 'Edit Batch Mapping' : 'Add Batch Mapping';
+  document.getElementById('m-name').value = editData?.name || '';
+  document.getElementById('m-search').value = editData?.search_term || '';
+  document.getElementById('m-course').value = editData?.course_id || '';
+  document.getElementById('m-section').value = editData?.section_name || 'Recordings';
+  document.getElementById('m-limit').value = editData?.limit_count ?? 0;
+  document.getElementById('m-check-settings').checked = editData?.check_settings ?? true;
+  document.getElementById('m-enabled').checked = editData?.enabled ?? true;
+  document.getElementById('mapping-modal').classList.add('open');
+}
+
+function closeMappingModal() {
+  document.getElementById('mapping-modal').classList.remove('open');
+}
+
+async function saveMapping() {
+  const editId = document.getElementById('mapping-edit-id').value;
+  const body = {
+    name: document.getElementById('m-name').value.trim(),
+    search_term: document.getElementById('m-search').value.trim(),
+    course_id: parseInt(document.getElementById('m-course').value) || 0,
+    section_name: document.getElementById('m-section').value.trim() || 'Recordings',
+    limit_count: parseInt(document.getElementById('m-limit').value) || 0,
+    check_settings: document.getElementById('m-check-settings').checked,
+    enabled: document.getElementById('m-enabled').checked,
+  };
+
+  if (!body.name || !body.search_term || !body.course_id) {
+    alert('Name, search term, and course ID are required.');
+    return;
+  }
+
+  try {
+    if (editId) {
+      await api(`/mappings/${editId}`, { method: 'PUT', body: JSON.stringify(body) });
+    } else {
+      await api('/mappings', { method: 'POST', body: JSON.stringify(body) });
+    }
+    closeMappingModal();
+    refreshConfig();
+  } catch (e) { alert(e.detail || 'Save failed'); }
+}
+
+async function editMapping(id) {
+  try {
+    const all = await api('/mappings');
+    const m = all.find(x => x.id === id);
+    if (m) openMappingModal(m);
+  } catch (e) { console.error(e); }
+}
+
+async function deleteMapping(id, name) {
+  if (!confirm(`Delete mapping "${name}"? This won't remove past run history.`)) return;
+  try {
+    await api(`/mappings/${id}`, { method: 'DELETE' });
+    refreshConfig();
+  } catch (e) { alert(e.detail || 'Delete failed'); }
+}
+
+// ---------------------------------------------------------------------------
+// Utility
+// ---------------------------------------------------------------------------
+function esc(s) {
+  if (!s) return '';
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+// Close modals on overlay click
+document.querySelectorAll('.modal-overlay').forEach(overlay => {
+  overlay.addEventListener('click', e => {
+    if (e.target === overlay) overlay.classList.remove('open');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Init + Polling
+// ---------------------------------------------------------------------------
+function refreshAll() {
+  refreshStatus();
+  refreshRuns();
+  refreshRecordings();
+  refreshConfig();
+}
+
+refreshAll();
+checkMoodleHealth();
+
+// Poll every 5s for status, every 15s for runs
+setInterval(refreshStatus, 5000);
+setInterval(refreshRuns, 15000);
+setInterval(checkMoodleHealth, 120000);
+</script>
+</body>
+</html>

@@ -1,0 +1,15 @@
+[Unit]
+Description=Zoom→Moodle Pipeline Dashboard
+After=network.target
+
+[Service]
+Type=simple
+User=your_linux_username
+WorkingDirectory=/path/to/paatshala
+ExecStart=/path/to/paatshala/venv/bin/python dashboard.py --scripts-dir /path/to/paatshala --port 8099
+Restart=on-failure
+RestartSec=5
+Environment=DISPLAY=:99
+
+[Install]
+WantedBy=multi-user.target

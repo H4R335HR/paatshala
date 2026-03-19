@@ -10,3 +10,15 @@ output/
 .git*
 .claude/
 .agent/
+
+# Dashboard & Database
+dashboard.sqlite3
+dashboard.sqlite3-*
+# Debug & Error Snapshots
+zoom_login_debug_*.png
+zoom_login_debug_*.html
+moodle_modedit_debug_*.html
+# Temporary Link Files
+zoom_links.json
+.zoom_links_run*.json
+recordings_metadata.json
