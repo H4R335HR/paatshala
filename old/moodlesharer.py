@@ -225,12 +225,47 @@ def create_url_activity(session, course_id: str, section_num: str, entry: dict) 
     return location
 
 
+def get_existing_activity_titles(session, course_id: str, section_num: str) -> set[str]:
+    """Fetch all activity names existing in a specific course section."""
+    resp = session.get(f"{BASE}/course/view.php?id={course_id}", timeout=30)
+    resp.raise_for_status()
+
+    soup = BeautifulSoup(resp.text, "html.parser")
+    section_node = soup.select_one(f'#section-{section_num}')
+    if not section_node:
+        return set()
+
+    titles = set()
+    for node in section_node.select('.activityinstance .instancename, .activity-instance-name, span.instancename'):
+        # Moodle often appends hidden text for accessibility (e.g. " URL" or " Forum")
+        for hidden in node.select('.accesshide'):
+            hidden.extract()
+            
+        title = node.get_text(strip=True)
+        if title:
+            titles.add(title)
+
+    return titles
+
+
 def upload_entries(session, course_id: str, section_num: str, entries: list[dict]):
     """Upload multiple recording entries as Moodle URL resources."""
+    existing_titles = get_existing_activity_titles(session, course_id, section_num)
+    
     for index, entry in enumerate(entries, 1):
-        print(f"[{index}/{len(entries)}] Creating URL activity: {entry['title']}")
+        title = entry['title']
+        print(f"[{index}/{len(entries)}] Processing: {title}")
+        
+        if title in existing_titles:
+            print(f"    [Skipping] Activity '{title}' already exists in this section.")
+            continue
+            
+        print(f"    Creating URL activity...")
         location = create_url_activity(session, course_id, section_num, entry)
         print(f"    Redirect: {location}")
+        
+        # Add to existing titles to prevent duplicates within the same run
+        existing_titles.add(title)
 
 
 def main():
