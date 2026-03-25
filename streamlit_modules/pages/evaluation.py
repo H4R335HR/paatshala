@@ -1067,7 +1067,29 @@ def _render_rubric_section(course, data):
                 result = generate_rubric(task_description)
                 if result:
                     st.session_state[rubric_key] = result
-                    st.success("✓ Rubric generated!")
+                    
+                    # Auto-save for the first time
+                    existing = load_rubric(
+                        course['id'], 
+                        module_id, 
+                        selected_group_id if customize else None
+                    )
+                    
+                    if not existing or not existing.get('criteria'):
+                        save_success = save_rubric(
+                            course['id'],
+                            module_id,
+                            result,
+                            selected_group_id if customize else None
+                        )
+                        if save_success:
+                            st.success("✓ Rubric generated and saved automatically!")
+                        else:
+                            st.success("✓ Rubric generated!")
+                            st.warning("⚠️ Failed to auto-save rubric.")
+                    else:
+                        st.success("✓ Rubric generated! (Not auto-saved to prevent overwriting existing)")
+                        
                     st.rerun()
                 else:
                     st.error("Failed to generate rubric. Check API key and try again.")
