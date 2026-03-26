@@ -152,6 +152,7 @@ def render_submissions_tab(course, meta):
                             new_due_date = st.date_input(
                                 "Date",
                                 value=current_due.date(),
+                                format="DD/MM/YYYY",
                                 key=f"due_date_picker_{module_id}"
                             )
                             new_due_time = st.time_input(
@@ -173,6 +174,7 @@ def render_submissions_tab(course, meta):
                             new_cutoff_date = st.date_input(
                                 "Date",
                                 value=current_cutoff.date(),
+                                format="DD/MM/YYYY",
                                 key=f"cutoff_date_picker_{module_id}"
                             )
                             new_cutoff_time = st.time_input(
@@ -423,6 +425,20 @@ def render_submissions_tab(course, meta):
                 # Clean names - remove batch suffix from Name column
                 if 'Name' in df.columns:
                     df['Name'] = df['Name'].apply(clean_name)
+                
+                # Convert dates to Indian format (DD/MM/YYYY)
+                def to_indian_date(date_str):
+                    """Convert Moodle date string to Indian format DD/MM/YYYY, H:MM AM/PM"""
+                    if not date_str or not isinstance(date_str, str):
+                        return date_str
+                    try:
+                        dt = datetime.strptime(date_str.strip(), "%A, %d %B %Y, %I:%M %p")
+                        return dt.strftime("%d/%m/%Y, %I:%M %p")
+                    except ValueError:
+                        return date_str
+                
+                if 'Last Modified' in df.columns:
+                    df['Last Modified'] = df['Last Modified'].apply(to_indian_date)
                 
                 # Add AI Score column from saved evaluations (same data shown in Evaluation tab)
                 ai_scores = []
