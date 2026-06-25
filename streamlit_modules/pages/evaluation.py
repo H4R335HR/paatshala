@@ -655,7 +655,7 @@ def _render_file_submission(course, row, idx):
                             }}
                         </script>
                     '''
-                    st.components.v1.html(view_html, height=40)
+                    st.iframe(view_html, height=40)
             
             with col3:
                 with open(path, "rb") as f:

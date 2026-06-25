@@ -593,6 +593,7 @@ def extract_docx_text(docx_source, max_chars: int = 100000) -> str:
     try:
         import mammoth
         import io
+        import re as _re
         
         # Handle both path and bytes
         if isinstance(docx_source, bytes):
@@ -611,6 +612,15 @@ def extract_docx_text(docx_source, max_chars: int = 100000) -> str:
         
         if not html_content.strip():
             return "(DOCX contains no extractable content)"
+        
+        # Strip base64-encoded inline images — they consume enormous character budget
+        # (a single screenshot can be 50K+ chars as base64) and provide no text value.
+        # Images are sent separately via the multimodal pipeline instead.
+        html_content = _re.sub(
+            r'<img\s+[^>]*src="data:[^"]*"[^>]*/?>',
+            '[embedded image]',
+            html_content
+        )
         
         # Truncate if too long
         if len(html_content) > max_chars:
@@ -2272,6 +2282,16 @@ def fetch_submission_content(row: Dict, course_id: int = None) -> Dict[str, Any]
                                     # Valid DOCX (ZIP format)
                                     docx_text = extract_docx_text(str(local_path))
                                     file_contents.append(f"--- Content of {fname} (Word Document) ---\n{docx_text}")
+                                    # Also extract page images for multimodal scoring (like PDFs)
+                                    try:
+                                        with open(local_path, 'rb') as docx_f:
+                                            docx_bytes = docx_f.read()
+                                        _, docx_images = convert_docx_to_pdf_images(docx_bytes, max_pages=10)
+                                        if docx_images:
+                                            result["images"].extend(docx_images)
+                                            logger.info(f"Extracted {len(docx_images)} page images from DOCX: {fname}")
+                                    except Exception as e:
+                                        logger.debug(f"Could not extract DOCX page images: {e}")
                                 else:
                                     # Not actually a DOCX - treat as text file
                                     try:
@@ -2484,9 +2504,11 @@ If images are provided below, examine them carefully as they may contain screens
             cleaned = re.sub(r'"\s+[a-zA-Z][a-zA-Z0-9_]*\.?\s+,', '",', cleaned)
             result = json.loads(cleaned)
         
-        # Calculate total score
+        # Calculate total score as a normalized percentage
         criteria_scores = result.get("criteria_scores", [])
-        total_score = sum(c.get("score", 0) for c in criteria_scores)
+        raw_total = sum(c.get("score", 0) for c in criteria_scores)
+        max_possible = sum(c.get("max_score", 0) for c in criteria_scores)
+        total_score = round((raw_total / max_possible) * 100, 1) if max_possible > 0 else 0
         
         return {
             "total_score": total_score,
@@ -2785,9 +2807,11 @@ If no score changes are needed (just answering a question), keep the original sc
         
         result = json.loads(response_text)
         
-        # Calculate total score
+        # Calculate total score as a normalized percentage
         criteria_scores = result.get("criteria_scores", [])
-        total_score = sum(c.get("score", 0) for c in criteria_scores)
+        raw_total = sum(c.get("score", 0) for c in criteria_scores)
+        max_possible = sum(c.get("max_score", 0) for c in criteria_scores)
+        total_score = round((raw_total / max_possible) * 100, 1) if max_possible > 0 else 0
         
         # Update conversation history
         new_conversation = conversation_history.copy()

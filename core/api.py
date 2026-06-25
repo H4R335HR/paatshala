@@ -1571,20 +1571,15 @@ def get_quizzes(session, course_id):
                 continue
             name = link.get_text(strip=True)
             name = re.sub(r'\s+(Quiz)$', '', name)
-            if "practice quiz" in name.lower():
-                m = re.search(r"id=(\d+)", link.get("href", ""))
-                if m:
-                    # Extract session number from quiz name (e.g., "#07" from "Practice Quiz - Session #07")
-                    session_match = re.search(r'#(\d+)', name)
-                    if session_match and topic_name:
-                        # Create display name: "#07 - Topic Name"
-                        session_num = session_match.group(1)
-                        display_name = f"#{session_num} - {topic_name}"
-                    else:
-                        # Fallback to original name if no session number or topic
-                        display_name = name
-                    
-                    quizzes.append((display_name, m.group(1)))
+            m = re.search(r"id=(\d+)", link.get("href", ""))
+            if m:
+                # Build display name with topic context if available
+                if topic_name and topic_name.lower() not in name.lower():
+                    display_name = f"{name} ({topic_name})"
+                else:
+                    display_name = name
+                
+                quizzes.append((display_name, m.group(1)))
     
     return quizzes
 
@@ -1592,7 +1587,7 @@ def fetch_quiz_scores(session_id, module_id, group_id=None):
     """Fetch scores for a quiz module"""
     s = get_thread_session(session_id)
     
-    report_url = f"https://{PAATSHALA_HOST}/mod/quiz/report.php?id={module_id}&mode=overview"
+    report_url = f"https://{PAATSHALA_HOST}/mod/quiz/report.php?id={module_id}&mode=overview&perpage=5000&pagesize=5000"
     if group_id:
         report_url += f"&group={group_id}"
     
@@ -1864,7 +1859,7 @@ def fetch_submissions(session_id, module_id, group_id=None):
     """
     session = setup_session(session_id)
     
-    url = f"{BASE}/mod/assign/view.php?id={module_id}&action=grading"
+    url = f"{BASE}/mod/assign/view.php?id={module_id}&action=grading&perpage=5000&pagesize=5000"
     if group_id:
         url += f"&group={group_id}"
     

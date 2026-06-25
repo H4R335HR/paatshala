@@ -260,7 +260,7 @@ def render_file_info_panel(filename: str, file_type: str = "", size_bytes: int =
         {''.join(info_items)}
     </div>
     '''
-    st.components.v1.html(info_html, height=50)
+    st.iframe(info_html, height=50)
 
 
 def render_pdf_viewer(pdf_bytes: bytes, filename: str = "document.pdf", unique_key: str = ""):
@@ -431,7 +431,7 @@ def render_pdf_viewer(pdf_bytes: bytes, filename: str = "document.pdf", unique_k
             }})();
         </script>
         '''
-        st.components.v1.html(pdfjs_html, height=650)
+        st.iframe(pdfjs_html, height=650)
         st.caption("💡 Scroll through pages • Zoom in/out • Fullscreen mode")
         
     except Exception as e:
@@ -871,7 +871,7 @@ def render_docx_viewer(docx_bytes: bytes, filename: str = "document.docx", uniqu
             }})();
         </script>
         '''
-        st.components.v1.html(mammoth_html, height=650)
+        st.iframe(mammoth_html, height=650)
         st.caption("💡 Scroll through document • Fullscreen mode available")
         
     except Exception as e:
@@ -988,7 +988,7 @@ def render_html_viewer(html_content: str, filename: str = "document.html", uniqu
             }})();
         </script>
         '''
-        st.components.v1.html(html_viewer, height=600)
+        st.iframe(html_viewer, height=600)
         
         # Source code toggle
         with st.expander("📝 View Source Code"):
@@ -1396,7 +1396,7 @@ def _render_file_preview(selected_path: str, owner: str, repo: str,
         {f'<a href="{download_url}" target="_blank" style="color: #4da6ff; text-decoration: none;">📥 Download</a>' if download_url else ''}
     </div>
     '''
-    st.components.v1.html(info_html, height=50)
+    st.iframe(info_html, height=50)
     
     if content_data.get("error"):
         st.error(content_data["error"])
@@ -1543,7 +1543,7 @@ def _render_file_preview(selected_path: str, owner: str, repo: str,
                                     </div>
                                 </div>
                                 '''
-                                st.components.v1.html(info_html, height=50)
+                                st.iframe(info_html, height=50)
                                 
                                 # Read file content
                                 try:
