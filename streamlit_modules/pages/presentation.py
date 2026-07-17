@@ -7,6 +7,7 @@ import streamlit as st
 import requests
 import json
 import io
+import random
 from datetime import datetime, timedelta
 
 try:
@@ -64,22 +65,50 @@ def api_call(action, batch, data=None, admin=False):
         return {'error': str(e)}
 
 
+def _refresh_session_data(batch):
+    """Refresh session, slots, and presenters from the API."""
+    refresh = api_call('session_info', batch)
+    if refresh.get('success'):
+        st.session_state.pres_session_data = refresh.get('session')
+        st.session_state.pres_slots = refresh.get('slots', [])
+        st.session_state.pres_presenters = refresh.get('presenters', [])
+
+
 def render_presentation_tab(course, meta):
     """Render the Presentation Sessions tab."""
     
     st.markdown("### 🎤 Presentation Sessions")
     st.caption("Manage student presentation sessions with live voting")
     
-    # Get batch name from selected group
+    # Auto-detect batch name from selected group
     from streamlit_modules.pages.tryhackme import extract_batch_name
     selected_group = st.session_state.get('selected_group')
-    batch = extract_batch_name(selected_group.get('name', '')) if selected_group else ''
+    auto_batch = extract_batch_name(selected_group.get('name', '')) if selected_group else ''
     
-    if not batch:
+    if not auto_batch:
         st.warning("⚠️ Please select a group in the sidebar to manage presentations.")
         return
     
-    st.info(f"📍 Batch: **{batch.upper()}**")
+    # Initialize editable batch name in session state
+    if 'pres_batch_name' not in st.session_state:
+        st.session_state.pres_batch_name = ""
+    
+    # Editable batch name — auto-detected value as placeholder, user can override
+    batch = st.text_input(
+        "📍 Batch identifier (used in student portal URL)",
+        value=st.session_state.pres_batch_name,
+        placeholder=auto_batch,
+        help=f"Auto-detected: **{auto_batch}** — override with a clean name like `csajun26` for the student URL",
+        key="pres_batch_input"
+    ).strip().lower()
+    
+    # Use override if provided, otherwise fall back to auto-detected
+    if batch:
+        st.session_state.pres_batch_name = batch
+    else:
+        batch = auto_batch
+    
+    st.info(f"📍 Batch: **{batch.upper()}** — Students access: `...presentation.php?b={batch}`")
     
     # Initialize session state
     if 'pres_session_data' not in st.session_state:
@@ -124,9 +153,7 @@ def render_presentation_tab(course, meta):
                 with col2:
                     voting_duration = st.number_input("Voting Duration (min)", 5, 30, 15)
                 
-                configured_default = min(5.0, max(0.0, float(get_config('default_volunteer_bonus', '5'))))
-                volunteer_bonus = st.slider("Volunteer Bonus Points", 0.0, 5.0, configured_default, 0.5, 
-                    help="Extra points awarded to presenters who volunteered for their slot")
+                st.info("📐 **Sliding Volunteer Bonus**: First volunteer gets **5 pts**, last person gets **0 pts**, scaled linearly based on remaining presenters.")
                 
                 if st.form_submit_button("✨ Create Session", type="primary"):
                     result = api_call('create_session', batch, {
@@ -134,7 +161,7 @@ def render_presentation_tab(course, meta):
                         'instructor_weight': instructor_weight,
                         'audience_weight': 1 - instructor_weight,
                         'voting_duration': voting_duration,
-                        'volunteer_bonus': volunteer_bonus
+                        'volunteer_bonus': 5  # max bonus (sliding scale applies)
                     }, admin=True)
                     
                     if result.get('success'):
@@ -154,7 +181,7 @@ def render_presentation_tab(course, meta):
             with col3:
                 st.metric("Voting Duration", f"{session.get('voting_duration', 15)} min")
             with col4:
-                st.metric("Volunteer Bonus", f"+{session.get('volunteer_bonus', 2)} pts")
+                st.metric("Volunteer Bonus", "0–5 pts (sliding)")
             
             # Student registration link and QR code
             st.divider()
@@ -299,43 +326,35 @@ def render_presentation_tab(course, meta):
                             available = [p for p in presenters if p.get('status') == 'registered']
                             
                             if slot_volunteers:
-                                # Show Assign button if there are volunteers
-                                if st.button(f"Assign ({len(slot_volunteers)})", key=f"assign_{slot['id']}"):
-                                    st.session_state[f"show_assign_{slot['id']}"] = True
-                            elif available:
-                                # No volunteers - show random assign button
-                                if st.button("🎲 Random", key=f"random_{slot['id']}", help="No volunteers - pick randomly from registered presenters"):
-                                    import random
-                                    picked = random.choice(available)
-                                    st.session_state[f"random_pick_{slot['id']}"] = picked
-                            
-                            # Show random pick result (persists after button click)
-                            if st.session_state.get(f"random_pick_{slot['id']}") and not slot.get('presenter_name'):
-                                picked = st.session_state[f"random_pick_{slot['id']}"]
-                                st.info(f"🎲 Picked: **{picked.get('name')}** — {picked.get('topic', 'No topic')}")
-                                col_ok, col_re = st.columns(2)
-                                with col_ok:
-                                    if st.button("✅ Confirm", key=f"confirm_random_{slot['id']}"):
+                                if len(slot_volunteers) == 1:
+                                    # Single volunteer — auto-assign with confirmation
+                                    v = slot_volunteers[0]
+                                    if st.button(f"🙋 Assign {v['name']}", key=f"assign_single_{slot['id']}"):
                                         result = api_call('assign_slot', batch, {
                                             'slot_id': slot['id'],
-                                            'presenter_id': picked.get('id')
+                                            'presenter_id': v['presenter_id']
                                         }, admin=True)
                                         if result.get('success'):
-                                            st.success(f"Assigned: {picked.get('name')}")
-                                            del st.session_state[f"random_pick_{slot['id']}"]
-                                            refresh = api_call('session_info', batch)
-                                            if refresh.get('success'):
-                                                st.session_state.pres_slots = refresh.get('slots', [])
-                                                st.session_state.pres_presenters = refresh.get('presenters', [])
+                                            bonus = result.get('volunteer_bonus', 0)
+                                            st.success(f"✅ Assigned {v['name']} (Bonus: +{bonus} pts)")
+                                            _refresh_session_data(batch)
                                             st.rerun()
                                         else:
                                             st.error(result.get('error', 'Failed'))
-                                with col_re:
-                                    if st.button("🔄 Re-roll", key=f"reroll_{slot['id']}"):
-                                        import random
-                                        picked = random.choice(available)
-                                        st.session_state[f"random_pick_{slot['id']}"] = picked
-                                        st.rerun()
+                                else:
+                                    # Multiple volunteers — roulette!
+                                    if st.button(f"🎰 Spin ({len(slot_volunteers)} volunteers)", key=f"spin_vol_{slot['id']}"):
+                                        winner = random.choice(slot_volunteers)
+                                        st.session_state[f"roulette_vol_{slot['id']}"] = {
+                                            'names': [v['name'] for v in slot_volunteers],
+                                            'volunteers': slot_volunteers,
+                                            'winner_index': next(i for i, v in enumerate(slot_volunteers) if v['presenter_id'] == winner['presenter_id']),
+                                            'winner': winner
+                                        }
+                            elif available:
+                                # No volunteers — show random draft button
+                                if st.button("🎲 Random Draft", key=f"random_{slot['id']}", help="No volunteers — pick randomly from registered presenters"):
+                                    st.session_state[f"show_attendance_{slot['id']}"] = True
                             else:
                                 st.caption("No presenters")
                         elif status == 'locked':
@@ -357,7 +376,6 @@ def render_presentation_tab(course, meta):
                                 result = api_call('delete_slot', batch, {'slot_id': slot['id']}, admin=True)
                                 if result.get('success'):
                                     st.success("Slot deleted!")
-                                    # Refresh
                                     refresh = api_call('session_info', batch)
                                     if refresh.get('success'):
                                         st.session_state.pres_slots = refresh.get('slots', [])
@@ -365,29 +383,131 @@ def render_presentation_tab(course, meta):
                                 else:
                                     st.error(result.get('error', 'Failed'))
                     
-                    # Assignment dialog (for volunteers)
-                    if st.session_state.get(f"show_assign_{slot['id']}"):
-                        volunteers_result = api_call('get_volunteers', batch, {'slot_id': slot['id']}, admin=True)
-                        slot_volunteers = volunteers_result.get('volunteers', []) if volunteers_result.get('success') else []
-                        
-                        if slot_volunteers:
-                            options = {f"{v['name']} - {v['topic']}": v['presenter_id'] for v in slot_volunteers}
-                            selected = st.selectbox("Select from volunteers", list(options.keys()), key=f"sel_{slot['id']}")
-                            col_a, col_b = st.columns(2)
-                            with col_a:
-                                if st.button("Confirm", key=f"confirm_{slot['id']}"):
-                                    result = api_call('assign_slot', batch, {
-                                        'slot_id': slot['id'],
-                                        'presenter_id': options[selected]
-                                    }, admin=True)
-                                    if result.get('success'):
-                                        st.success(f"Assigned! (Volunteer: {result.get('is_volunteer', True)})")
-                                        st.session_state[f"show_assign_{slot['id']}"] = False
-                                        st.rerun()
-                            with col_b:
-                                if st.button("Cancel", key=f"cancel_{slot['id']}"):
-                                    st.session_state[f"show_assign_{slot['id']}"] = False
+                    # ---- Volunteer Roulette (multiple volunteers) ----
+                    roulette_data = st.session_state.get(f"roulette_vol_{slot['id']}")
+                    if roulette_data and status == 'open':
+                        from streamlit_modules.components.roulette_wheel import render_roulette
+                        render_roulette(
+                            names=roulette_data['names'],
+                            winner_index=roulette_data['winner_index'],
+                            mode='volunteer',
+                            wheel_id=f"wheel_vol_{slot['id']}"
+                        )
+                        winner = roulette_data['winner']
+                        col_confirm, col_respin = st.columns(2)
+                        with col_confirm:
+                            if st.button("✅ Confirm", key=f"confirm_vol_{slot['id']}", type="primary"):
+                                result = api_call('assign_slot', batch, {
+                                    'slot_id': slot['id'],
+                                    'presenter_id': winner['presenter_id']
+                                }, admin=True)
+                                if result.get('success'):
+                                    bonus = result.get('volunteer_bonus', 0)
+                                    st.success(f"✅ Assigned {winner['name']} (Bonus: +{bonus} pts)")
+                                    del st.session_state[f"roulette_vol_{slot['id']}"]
+                                    _refresh_session_data(batch)
                                     st.rerun()
+                                else:
+                                    st.error(result.get('error', 'Failed'))
+                        with col_respin:
+                            if st.button("🔄 Re-spin", key=f"respin_vol_{slot['id']}"):
+                                new_winner = random.choice(roulette_data['volunteers'])
+                                st.session_state[f"roulette_vol_{slot['id']}"] = {
+                                    'names': roulette_data['names'],
+                                    'volunteers': roulette_data['volunteers'],
+                                    'winner_index': next(i for i, v in enumerate(roulette_data['volunteers']) if v['presenter_id'] == new_winner['presenter_id']),
+                                    'winner': new_winner
+                                }
+                                st.rerun()
+                    
+                    # ---- Attendance Check + Random Draft Roulette ----
+                    if st.session_state.get(f"show_attendance_{slot['id']}") and status == 'open':
+                        presenters = st.session_state.pres_presenters
+                        available = [p for p in presenters if p.get('status') == 'registered']
+                        
+                        st.markdown("---")
+                        st.markdown("##### 📋 Attendance Check")
+                        st.caption("Select anyone who is **absent** (they'll be excluded from the wheel)")
+                        
+                        absent_names = st.multiselect(
+                            "Mark absent students",
+                            options=[f"{p.get('name')} — {p.get('topic', 'No topic')}" for p in available],
+                            default=[],
+                            key=f"absent_{slot['id']}",
+                            label_visibility="collapsed"
+                        )
+                        
+                        # Filter to present students
+                        absent_labels = set(absent_names)
+                        present = [p for p in available if f"{p.get('name')} — {p.get('topic', 'No topic')}" not in absent_labels]
+                        
+                        if not present:
+                            st.warning("⚠️ All presenters marked as absent. Cannot spin.")
+                        elif len(present) == 1:
+                            # Only one present — skip wheel, direct assign
+                            p = present[0]
+                            st.info(f"Only **{p.get('name')}** is available.")
+                            if st.button(f"Assign {p.get('name')}", key=f"assign_last_{slot['id']}", type="primary"):
+                                result = api_call('assign_slot', batch, {
+                                    'slot_id': slot['id'],
+                                    'presenter_id': p.get('id'),
+                                    'is_volunteer': 'false'
+                                }, admin=True)
+                                if result.get('success'):
+                                    st.success(f"✅ Assigned {p.get('name')} (No volunteer bonus)")
+                                    st.session_state[f"show_attendance_{slot['id']}"] = False
+                                    _refresh_session_data(batch)
+                                    st.rerun()
+                                else:
+                                    st.error(result.get('error', 'Failed'))
+                        else:
+                            st.caption(f"{len(present)} present, {len(absent_names)} absent")
+                            if st.button("🎰 Spin the Wheel", key=f"spin_random_{slot['id']}", type="primary"):
+                                winner = random.choice(present)
+                                st.session_state[f"roulette_random_{slot['id']}"] = {
+                                    'names': [p.get('name') for p in present],
+                                    'present': present,
+                                    'winner_index': next(i for i, p in enumerate(present) if p.get('id') == winner.get('id')),
+                                    'winner': winner
+                                }
+                    
+                    # ---- Random Draft Roulette (after attendance) ----
+                    roulette_random = st.session_state.get(f"roulette_random_{slot['id']}")
+                    if roulette_random and status == 'open':
+                        from streamlit_modules.components.roulette_wheel import render_roulette
+                        render_roulette(
+                            names=roulette_random['names'],
+                            winner_index=roulette_random['winner_index'],
+                            mode='random',
+                            wheel_id=f"wheel_rnd_{slot['id']}"
+                        )
+                        winner = roulette_random['winner']
+                        col_confirm, col_respin = st.columns(2)
+                        with col_confirm:
+                            if st.button("✅ Confirm", key=f"confirm_rnd_{slot['id']}", type="primary"):
+                                result = api_call('assign_slot', batch, {
+                                    'slot_id': slot['id'],
+                                    'presenter_id': winner.get('id'),
+                                    'is_volunteer': 'false'
+                                }, admin=True)
+                                if result.get('success'):
+                                    st.success(f"✅ Assigned {winner.get('name')} (No volunteer bonus)")
+                                    del st.session_state[f"roulette_random_{slot['id']}"]
+                                    st.session_state[f"show_attendance_{slot['id']}"] = False
+                                    _refresh_session_data(batch)
+                                    st.rerun()
+                                else:
+                                    st.error(result.get('error', 'Failed'))
+                        with col_respin:
+                            if st.button("🔄 Re-spin", key=f"respin_rnd_{slot['id']}"):
+                                new_winner = random.choice(roulette_random['present'])
+                                st.session_state[f"roulette_random_{slot['id']}"] = {
+                                    'names': roulette_random['names'],
+                                    'present': roulette_random['present'],
+                                    'winner_index': next(i for i, p in enumerate(roulette_random['present']) if p.get('id') == new_winner.get('id')),
+                                    'winner': new_winner
+                                }
+                                st.rerun()
                     
                     st.divider()
     
@@ -518,23 +638,9 @@ def render_presentation_tab(course, meta):
             import pandas as pd
             df = pd.DataFrame(leaderboard)
             
-            # Override volunteer_bonus with configured default and recalculate final
-            configured_bonus = min(5.0, max(0.0, float(get_config('default_volunteer_bonus', '5'))))
-            session = st.session_state.pres_session_data or {}
-            instr_w = float(session.get('instructor_weight', 0.6))
-            aud_w = float(session.get('audience_weight', 1 - instr_w))
-            
-            if 'volunteer_bonus' in df.columns:
-                df['volunteer_bonus'] = df.apply(
-                    lambda r: configured_bonus if r.get('is_volunteer') else 0, axis=1)
-            if 'final' in df.columns and 'instructor' in df.columns and 'audience_avg' in df.columns:
-                df['final'] = df.apply(
-                    lambda r: round(
-                        float(r.get('instructor') or 0) * instr_w +
-                        float(r.get('audience_avg') or 0) * aud_w +
-                        float(r.get('volunteer_bonus') or 0), 1
-                    ), axis=1)
-                # Re-sort by final score descending
+            # Leaderboard now uses pre-computed sliding volunteer bonus from the API
+            # Sort by final score descending (should already be sorted, but ensure)
+            if 'final' in df.columns:
                 df = df.sort_values('final', ascending=False).reset_index(drop=True)
             
             df.insert(0, 'Rank', range(1, len(df) + 1))
@@ -542,7 +648,7 @@ def render_presentation_tab(course, meta):
             # Add medal emojis
             df['Rank'] = df['Rank'].apply(lambda x: {1: '🥇', 2: '🥈', 3: '🥉'}.get(x, str(x)))
             
-            st.caption(f"📌 Using configured volunteer bonus: **{configured_bonus}** pts")
+            st.caption("📐 Volunteer bonus uses **sliding scale**: first volunteer gets 5 pts → last person gets 0 pts")
             st.dataframe(df, hide_index=True, width='stretch')
             
             # Export

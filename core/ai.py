@@ -1337,7 +1337,9 @@ def fetch_github_content(repo_url: str, pat: Optional[str] = None) -> Dict[str, 
         "files": [],
         "file_contents": [],  # Extracted text from files
         "images": [],  # Images for multimodal scoring
-        "error": None
+        "error": None,
+        "resolved_owner": None,  # Actual owner used (after URL cleanup)
+        "resolved_repo": None,  # Actual repo name used (may differ if trailing dot was stripped)
     }
     
     # Normalize the URL first - handle common student input errors
@@ -1349,7 +1351,9 @@ def fetch_github_content(repo_url: str, pat: Optional[str] = None) -> Dict[str, 
         cleaned_url = cleaned_url.lstrip('(').split(')')[0]
     
     # 2. Strip trailing punctuation that might be part of surrounding text
-    cleaned_url = cleaned_url.rstrip('.,;:!?')
+    # NOTE: Do NOT strip dots (.) here — they are valid in GitHub repo names (e.g., "3-linux-cli-exercise.")
+    # If a student accidentally adds a dot after a normal repo, we handle it via retry logic below.
+    cleaned_url = cleaned_url.rstrip(',;:!?')
     
     # Extract owner/repo from URL
     # Handles: github.com/owner/repo, github.com/owner/repo.git, etc.
@@ -1380,6 +1384,8 @@ def fetch_github_content(repo_url: str, pat: Optional[str] = None) -> Dict[str, 
         logger.info(f"[GitHub] Detected ref={ref}, subpath={subpath or '(root)'} in URL")
     
     logger.info(f"[GitHub] Parsed URL: owner={owner}, repo={repo}, ref={ref or '(default)'}, subpath={subpath or '(root)'} from: {repo_url[:100]}")
+    result["resolved_owner"] = owner
+    result["resolved_repo"] = repo
     
     # Build query string for ref parameter (for specific branches/commits)
     ref_query = f"?ref={ref}" if ref else ""
@@ -1398,6 +1404,25 @@ def fetch_github_content(repo_url: str, pat: Optional[str] = None) -> Dict[str, 
         logger.info(f"[GitHub] Fetching README from: {readme_url}")
         readme_resp = requests.get(readme_url, headers=headers, timeout=10)
         logger.info(f"[GitHub] README response: {readme_resp.status_code}")
+        
+        # If repo ends with a dot and we get a 404, the dot might be accidental punctuation.
+        # Retry without the trailing dot to handle both cases:
+        #   - Legit repo name ending with dot (e.g., "3-linux-cli-exercise.") → first try succeeds
+        #   - Student accidentally typed a full stop after repo name → retry without dot
+        if readme_resp.status_code == 404 and repo.endswith('.'):
+            repo_stripped = repo.rstrip('.')
+            logger.info(f"[GitHub] Repo '{repo}' returned 404, retrying without trailing dot as '{repo_stripped}'")
+            if subpath:
+                retry_url = f"https://api.github.com/repos/{owner}/{repo_stripped}/readme/{subpath}{ref_query}"
+            else:
+                retry_url = f"https://api.github.com/repos/{owner}/{repo_stripped}/readme{ref_query}"
+            retry_resp = requests.get(retry_url, headers=headers, timeout=10)
+            if retry_resp.status_code != 404:
+                # The repo without the dot exists — use the stripped name
+                repo = repo_stripped
+                result["resolved_repo"] = repo
+                readme_resp = retry_resp
+                logger.info(f"[GitHub] Retry succeeded, using repo name: '{repo}'")
         
         if readme_resp.status_code == 200:
             readme_data = readme_resp.json()

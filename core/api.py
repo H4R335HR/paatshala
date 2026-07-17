@@ -3281,7 +3281,7 @@ def fetch_feedback_responses(session_id, module_id, group_id=None):
     Dynamic columns: Question responses (classes like val12136, val12137, etc.)
     """
     session = setup_session(session_id)
-    url = f"{BASE}/mod/feedback/show_entries.php?id={module_id}"
+    url = f"{BASE}/mod/feedback/show_entries.php?id={module_id}&showall=1"
     if group_id:
         url += f"&group={group_id}"
     

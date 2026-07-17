@@ -1055,6 +1055,19 @@ def render_github_viewer(repo_url: str, pat: Optional[str] = None):
                 if result.get("error"):
                     st.error(f"Could not load repository: {result['error']}")
                     return
+                # Update owner/repo if fetch_github_content resolved a different name
+                # (e.g., trailing dot was stripped because it was accidental punctuation)
+                if result.get("resolved_owner"):
+                    owner = result["resolved_owner"]
+                if result.get("resolved_repo"):
+                    repo = result["resolved_repo"]
+                repo_id = f"{owner}_{repo}"
+                # Re-derive session state keys with the resolved repo name
+                tree_key = f"gh_tree_{repo_id}"
+                selected_key = f"gh_selected_{repo_id}"
+                content_cache_key = f"gh_content_{repo_id}"
+                current_path_key = f"gh_path_{repo_id}"
+                cache_key = f"{tree_key}_{current_path}"
                 files = result.get("files", [])
                 readme = result.get("readme", "")
             st.session_state[cache_key] = {"files": files, "readme": readme}

@@ -115,9 +115,9 @@ def find_thm_columns(columns):
         
         # Check for TryHackMe username column
         if thm_column is None:
-            if 'tryhackme' in col_lower and ('username' in col_lower or 'enter' in col_lower):
+            if 'tryhackme' in col_lower and ('username' in col_lower or 'enter' in col_lower or 'profile' in col_lower or 'name' in col_lower):
                 thm_column = col
-            elif 'thm' in col_lower and 'username' in col_lower:
+            elif 'thm' in col_lower and ('username' in col_lower or 'profile' in col_lower):
                 thm_column = col
             elif 'tryhackme username' in col_lower:
                 thm_column = col
