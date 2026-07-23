@@ -3,7 +3,7 @@ Roulette wheel component for Streamlit.
 Renders a spinning wheel via st.components.v1.html() for visual presenter selection.
 """
 
-import streamlit.components.v1 as components
+import streamlit as st
 import json
 import math
 
@@ -234,8 +234,9 @@ def render_roulette(
             let targetAngle = pointerAngle - targetSegmentCenter;
             // Normalize to positive
             while (targetAngle < 0) targetAngle += 2 * Math.PI;
-            // Add extra full rotations for visual effect (5-8 rotations)
-            const extraRotations = (5 + Math.random() * 3) * 2 * Math.PI;
+            // Add extra full rotations for visual effect (5-8 full rotations)
+            const extraSpins = 5 + Math.floor(Math.random() * 4);
+            const extraRotations = extraSpins * 2 * Math.PI;
             const totalRotation = extraRotations + targetAngle;
             
             const duration = 4000; // 4 seconds
@@ -317,4 +318,4 @@ def render_roulette(
     </script>
     """
     
-    components.html(html, height=height, scrolling=False)
+    st.html(html, height=height, scrolling=False)

@@ -884,7 +884,7 @@ def _render_link_submission(row, sub_type, course=None):
                     else:
                         embed_url = f"https://drive.google.com/file/d/{gdrive_id}/preview"
                     
-                    st.components.v1.iframe(embed_url, height=600, scrolling=True)
+                    st.iframe(embed_url, height=600, scrolling=True)
             else:
                 st.markdown(f"**Submission Link:** [{effective_link}]({effective_link})")
         else:
