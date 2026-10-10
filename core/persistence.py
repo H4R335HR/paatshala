@@ -13,7 +13,7 @@ OUTPUT_DIR = "output"
 # Keys that should be masked in UI (write-only display)
 SENSITIVE_KEYS = {
     'password', 'cookie', 'wayground_password', 
-    'thm_auth_value', 'thm_cron_secret'
+    'thm_auth_value', 'thm_cron_secret', 'openrouter_api_key'
 }
 
 # =============================================================================

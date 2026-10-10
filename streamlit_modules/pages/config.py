@@ -91,14 +91,10 @@ CONFIG_SCHEMA = {
             "type": "password"
         }
     },
-    "AI / Gemini": {
+    "AI Settings": {
         # gemini_api_keys is handled separately with custom UI
-        "gemini_model": {
-            "label": "Model",
-            "help": "Gemini model to use (e.g., gemini-2.5-flash, gemini-2.0-flash, gemini-1.5-pro)",
-            "default": "gemini-2.5-flash",
-            "type": "text"
-        },
+        # ai_provider is handled separately with radio buttons
+        # gemini_model and openrouter_model are handled by live API-fetched dropdowns
         "github_pat": {
             "label": "GitHub PAT (Optional)",
             "help": "Personal Access Token for GitHub API. Optional - increases rate limit from 60/hr to 5000/hr. Create at github.com/settings/tokens (no scopes needed for public repos)",
@@ -189,8 +185,156 @@ def render_config_page():
     # Track changes
     changes = {}
     
-    # === Custom API Keys Section ===
-    with st.expander("**🔑 Gemini API Keys**", expanded=True):
+    # === AI Provider Selection ===
+    with st.expander("**🤖 AI Provider**", expanded=True):
+        st.caption("Choose your AI backend. Gemini uses Google's API keys. OpenRouter gives access to 200+ models (GPT-4o, Claude, Llama, etc.) with a single key.")
+        
+        current_provider = current_config.get("ai_provider", "gemini") or "gemini"
+        provider_options = ["gemini", "openrouter"]
+        provider_labels = {"gemini": "🔷 Google Gemini", "openrouter": "🌐 OpenRouter"}
+        
+        selected_provider = st.radio(
+            "AI Provider",
+            options=provider_options,
+            format_func=lambda x: provider_labels.get(x, x),
+            index=provider_options.index(current_provider) if current_provider in provider_options else 0,
+            horizontal=True,
+            key="config_ai_provider",
+            label_visibility="collapsed"
+        )
+        
+        if selected_provider != current_provider:
+            changes["ai_provider"] = selected_provider
+        
+        # Show Gemini model selector when Gemini is selected
+        if selected_provider == "gemini":
+            st.markdown("---")
+            current_gemini_model = current_config.get("gemini_model", "") or "gemini-3.8-flash"
+            
+            from core.ai import fetch_gemini_models
+            
+            with st.spinner("Loading Gemini models..."):
+                gemini_models = fetch_gemini_models()
+            
+            if gemini_models:
+                # Build display with free/paid indicators
+                model_ids = [m["id"] for m in gemini_models]
+                model_display = {}
+                for m in gemini_models:
+                    tag = "🆓" if m["free"] else "💰"
+                    model_display[m["id"]] = f"{tag}  {m['id']}"
+                
+                # Ensure current model is in the list
+                if current_gemini_model not in model_ids:
+                    model_ids.insert(0, current_gemini_model)
+                    model_display[current_gemini_model] = current_gemini_model
+                
+                free_count = sum(1 for m in gemini_models if m["free"])
+                selected_gemini = st.selectbox(
+                    "Gemini Model",
+                    options=model_ids,
+                    index=model_ids.index(current_gemini_model) if current_gemini_model in model_ids else 0,
+                    format_func=lambda x: model_display.get(x, x),
+                    help=f"{len(gemini_models)} models available ({free_count} free). 🆓 = Free, 💰 = Paid.",
+                    key="config_gemini_model_select"
+                )
+                
+                if selected_gemini != current_gemini_model:
+                    changes["gemini_model"] = selected_gemini
+            else:
+                # Fallback: text input if no API key or fetch failed
+                manual_gemini = st.text_input(
+                    "Gemini Model",
+                    value=current_gemini_model,
+                    help="Add API keys below to see available models as a dropdown",
+                    key="config_gemini_model_manual"
+                )
+                if manual_gemini != current_gemini_model:
+                    changes["gemini_model"] = manual_gemini
+            
+            # Optional: fall back to OpenRouter when all Gemini models fail
+            current_or_fallback = str(current_config.get("openrouter_fallback", "false")).lower() == "true"
+            or_fallback = st.checkbox(
+                "🌐 Fall back to OpenRouter if all Gemini models fail",
+                value=current_or_fallback,
+                help="Used only when Gemini is overloaded (503) or all Gemini keys hit their quota. "
+                     "Uses the OpenRouter key and model configured below.",
+                key="config_openrouter_fallback"
+            )
+            if or_fallback != current_or_fallback:
+                changes["openrouter_fallback"] = "true" if or_fallback else "false"
+        else:
+            or_fallback = False
+        
+        # Show OpenRouter settings when OpenRouter is the provider OR used as fallback
+        if selected_provider == "openrouter" or or_fallback:
+            st.markdown("---")
+            if selected_provider != "openrouter":
+                st.caption("**OpenRouter fallback settings**")
+            current_or_key = current_config.get("openrouter_api_key", "")
+            if current_or_key:
+                st.caption("🔒 OpenRouter API Key is set")
+            
+            new_or_key = st.text_input(
+                "OpenRouter API Key",
+                value="",
+                type="password",
+                help="Get your key at https://openrouter.ai/keys",
+                placeholder="sk-or-... (enter to change)" if current_or_key else "sk-or-...",
+                key="config_openrouter_api_key"
+            )
+            if new_or_key:
+                changes["openrouter_api_key"] = new_or_key
+            
+            # Model selector - fetch live from OpenRouter API
+            st.markdown("")
+            current_or_model = current_config.get("openrouter_model", "") or "openai/gpt-4o-mini"
+            
+            from core.ai import fetch_openrouter_models
+            
+            with st.spinner("Loading available models..."):
+                or_models = fetch_openrouter_models(api_key=current_or_key or None)
+            
+            if or_models:
+                # Build display with free/paid indicators
+                model_ids = [m["id"] for m in or_models]
+                model_display = {}
+                for m in or_models:
+                    tag = "🆓" if m["free"] else "💰"
+                    model_display[m["id"]] = f"{tag}  {m['id']}  —  {m['name']}"
+                
+                # Ensure current model is in the list
+                if current_or_model not in model_ids:
+                    model_ids.insert(0, current_or_model)
+                    model_display[current_or_model] = current_or_model
+                
+                free_count = sum(1 for m in or_models if m["free"])
+                selected_or_model = st.selectbox(
+                    "Model",
+                    options=model_ids,
+                    index=model_ids.index(current_or_model) if current_or_model in model_ids else 0,
+                    format_func=lambda x: model_display.get(x, x),
+                    help=f"{len(or_models)} models available ({free_count} free). 🆓 = Free, 💰 = Paid. Free models shown first.",
+                    key="config_openrouter_model_select"
+                )
+                
+                if selected_or_model != current_or_model:
+                    changes["openrouter_model"] = selected_or_model
+            else:
+                # Fallback: manual text input if API fails
+                st.warning("⚠️ Could not fetch models. Enter API key and save first, or type a model ID manually.")
+                manual_model = st.text_input(
+                    "Model ID",
+                    value=current_or_model,
+                    help="e.g., openai/gpt-4o, anthropic/claude-sonnet-4",
+                    key="config_openrouter_model_manual"
+                )
+                if manual_model != current_or_model:
+                    changes["openrouter_model"] = manual_model
+    
+    # === Custom Gemini API Keys Section (only show when Gemini selected) ===
+    if selected_provider == "gemini":
+      with st.expander("**🔑 Gemini API Keys**", expanded=True):
         st.caption("Keys are tried in order (top = first). Falls back to next on quota/rate-limit errors.")
         
         # Load existing keys from config
@@ -295,6 +439,11 @@ def render_config_page():
             col_idx = 0
             
             for key, meta in settings.items():
+                # Skip provider-specific fields that don't match the active provider
+                field_provider = meta.get("provider")
+                if field_provider and field_provider != selected_provider:
+                    continue
+                
                 with cols[col_idx % 2]:
                     current_value = current_config.get(key, "") or current_config.get(key.lower(), "")
                     

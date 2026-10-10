@@ -13,7 +13,7 @@ import ast
 from core.api import evaluate_submission, download_file, get_assignment_dates, submit_grade, get_fresh_sesskey
 from core.auth import setup_session
 from core.persistence import save_csv_to_disk, get_config
-from core.ai import generate_rubric, save_rubric, load_rubric, refine_rubric, fetch_submission_content, score_submission, save_evaluation, load_evaluation, refine_evaluation
+from core.ai import generate_rubric, save_rubric, load_rubric, refine_rubric, fetch_submission_content, score_submission, save_evaluation, load_evaluation, refine_evaluation, save_failed_queue, load_failed_queue, clear_failed_queue
 from streamlit_modules.ui.components import format_timestamp
 from streamlit_modules.ui.content_viewer import (
     render_docx_viewer, render_pdf_viewer, render_pdf_content, render_html_viewer,
@@ -1179,7 +1179,15 @@ def _render_rubric_section(course, data):
                     f"({total_files} file(s) total). Scoring these without fetching may produce inaccurate results."
                 )
             
-            col_batch1, col_batch2, col_batch3, col_batch4 = st.columns(4)
+            # Check for failed queue from previous batch
+            failed_q = load_failed_queue(course['id'], module_id)
+            has_failed_queue = len(failed_q) > 0
+            
+            if has_failed_queue:
+                col_batch1, col_batch2, col_batch3, col_batch4, col_batch5 = st.columns(5)
+            else:
+                col_batch1, col_batch2, col_batch3, col_batch4 = st.columns(4)
+            
             with col_batch1:
                 do_batch_score = st.button(
                     "🎯 Batch Score", 
@@ -1199,6 +1207,16 @@ def _render_rubric_section(course, data):
             with col_batch4:
                 do_clear_scores = st.button("🗑️ Clear Scores", width="stretch", help="Delete all saved AI scores for this assignment")
             
+            # Resume Failed button — only shown when queue has entries
+            do_resume_failed = False
+            if has_failed_queue:
+                with col_batch5:
+                    do_resume_failed = st.button(
+                        f"🔁 Resume ({len(failed_q)})",
+                        width="stretch",
+                        help=f"Retry {len(failed_q)} failed submission(s) from last batch run"
+                    )
+            
             # Execute batch operations OUTSIDE column blocks for full-width progress bars
             if do_batch_score:
                 _perform_batch_scoring(course, data, edited_df.to_dict('records'), module_id, selected_group_id, auto_fetch=False)
@@ -1208,6 +1226,8 @@ def _render_rubric_section(course, data):
                 _perform_batch_submit_to_moodle(course, data, module_id, selected_group_id)
             if do_clear_scores:
                 _clear_ai_scores(course, data, module_id, selected_group_id)
+            if do_resume_failed:
+                _perform_resume_failed(course, data, edited_df.to_dict('records'), module_id, selected_group_id)
         
         # Show task description for reference
         with st.expander("📝 Task Description (Reference)", expanded=False):
@@ -1596,6 +1616,8 @@ def _perform_batch_scoring(course, data, rubric, module_id, group_id, auto_fetch
     progress_bar = st.progress(0, text=f"Scoring 0/{len(pending)} submissions...")
     status_text = st.empty()
     results = {'scored': 0, 'failed': 0, 'skipped': 0, 'fetched': 0}
+    failed_queue = []  # Collect failed submissions for resume
+    from datetime import datetime as datetime
     
     # Setup session for file downloads if auto_fetch is enabled
     session = None
@@ -1672,7 +1694,10 @@ def _perform_batch_scoring(course, data, rubric, module_id, group_id, auto_fetch
                         except ValueError:
                             pass
             
-            # Score with AI - with retry logic for transient errors
+            # Score with AI - with smart retry logic
+            # 429 (rate limit): exponential backoff — quota replenishes with time
+            # 503 (server overloaded): fail immediately, queue for resume — server won't recover in seconds
+            # 404 (deprecated model): fail immediately — no point retrying
             max_retries = 3
             retry_delay = 3  # Start with 3 seconds
             result = None
@@ -1685,22 +1710,45 @@ def _perform_batch_scoring(course, data, rubric, module_id, group_id, auto_fetch
                     student_name
                 )
                 
-                # Check for transient errors that should be retried
+                # Check for errors that might be retryable
                 if result and result.get('error'):
                     error_msg = str(result.get('error', '')).lower()
-                    is_transient = any(x in error_msg for x in ['503', 'overloaded', 'unavailable', '429', 'rate'])
                     
-                    if is_transient and attempt < max_retries - 1:
-                        status_text.caption(f"⏳ {student_name}: API busy, retrying in {retry_delay}s... (attempt {attempt + 1}/{max_retries})")
+                    # 503 / overloaded: server-side capacity issue, don't waste time retrying
+                    is_server_overloaded = any(x in error_msg for x in ['503', 'overloaded', 'unavailable'])
+                    # 404 / deprecated model: will never succeed
+                    is_not_found = '404' in error_msg or 'not_found' in error_msg or 'no longer available' in error_msg
+                    # 429 / rate limit: client pacing issue, backoff will help
+                    is_rate_limited = any(x in error_msg for x in ['429', 'rate', 'resource_exhausted', 'quota'])
+                    
+                    if is_not_found:
+                        # Model deprecated or gone — no point retrying
+                        status_text.caption(f"🚫 {student_name}: Model not available — check AI settings")
+                        break
+                    elif is_server_overloaded:
+                        # Server overloaded — fail immediately, queue for later
+                        status_text.caption(f"⚡ {student_name}: Server overloaded (503), queued for retry")
+                        break
+                    elif is_rate_limited and attempt < max_retries - 1:
+                        # Rate limited — backoff and retry
+                        status_text.caption(f"⏳ {student_name}: Rate limited, retrying in {retry_delay}s... (attempt {attempt + 1}/{max_retries})")
                         time.sleep(retry_delay)
                         retry_delay *= 2  # Exponential backoff
                         continue
                 
-                break  # Success or non-transient error, exit retry loop
+                break  # Success or non-retryable error, exit retry loop
             
             if result and result.get('error'):
-                status_text.caption(f"❌ {student_name}: {result['error']}")
+                error_str = str(result['error'])
+                status_text.caption(f"❌ {student_name}: {error_str[:80]}")
                 results['failed'] += 1
+                # Add to failed queue for later resume
+                failed_queue.append({
+                    "student_name": student_name,
+                    "row_index": i,
+                    "error": error_str[:200],
+                    "failed_at": datetime.now().isoformat()
+                })
             elif result:
                 # Save evaluation
                 save_evaluation(course['id'], module_id, student_name, result, group_id)
@@ -1708,11 +1756,23 @@ def _perform_batch_scoring(course, data, rubric, module_id, group_id, auto_fetch
                 results['scored'] += 1
             else:
                 results['failed'] += 1
+                failed_queue.append({
+                    "student_name": student_name,
+                    "row_index": i,
+                    "error": "No result returned",
+                    "failed_at": datetime.now().isoformat()
+                })
         
         except Exception as e:
             logger.error(f"Error scoring {student_name}: {e}")
             status_text.caption(f"❌ {student_name}: Error - {str(e)[:50]}")
             results['failed'] += 1
+            failed_queue.append({
+                "student_name": student_name,
+                "row_index": i,
+                "error": str(e)[:200],
+                "failed_at": datetime.now().isoformat()
+            })
         
         # Small delay between API calls to avoid rate limiting
         if idx < len(pending) - 1:  # Don't delay after last item
@@ -1720,6 +1780,14 @@ def _perform_batch_scoring(course, data, rubric, module_id, group_id, auto_fetch
     
     # Complete progress bar
     progress_bar.progress(1.0, text="Batch scoring complete!")
+    
+    # Save or clear the failed queue
+    if failed_queue:
+        save_failed_queue(course['id'], module_id, failed_queue, group_id)
+        logger.info(f"Saved {len(failed_queue)} failed submission(s) to queue for resume")
+    else:
+        # All succeeded — clear any leftover queue from a previous run
+        clear_failed_queue(course['id'], module_id)
     
     # Build completion notification message
     toast_msg = f"🎯 Batch scoring complete: {results['scored']} scored"
@@ -1749,8 +1817,161 @@ def _perform_batch_scoring(course, data, rubric, module_id, group_id, auto_fetch
         st.warning(f"⚠️ Batch scoring complete: {results['scored']} scored, {results['skipped']} skipped.{skip_note}")
     else:
         st.warning(f"⚠️ Batch scoring complete: {results['scored']} scored, {results['failed']} failed.{skip_note}")
+        if failed_queue:
+            st.info(f"💡 {len(failed_queue)} failed submission(s) saved to queue. Use **🔁 Resume Failed** to retry.")
     
     # Trigger rerun to refresh the UI with new scores
+    st.rerun()
+
+def _perform_resume_failed(course, data, rubric, module_id, group_id):
+    """Resume scoring for previously failed submissions from the queue.
+    
+    Loads the failed queue, matches students back to data rows,
+    and re-runs them through the same scoring pipeline with the
+    same smart retry logic (429 backoff, 503 instant-fail).
+    
+    Args:
+        course: Course dict with 'id'
+        data: List of submission rows
+        rubric: List of rubric criteria dicts
+        module_id: Module ID for the assignment
+        group_id: Optional group ID
+    """
+    from datetime import datetime as datetime
+    
+    # Load the failed queue
+    failed_q = load_failed_queue(course['id'], module_id)
+    if not failed_q:
+        st.info("ℹ️ No failed submissions in queue.")
+        return
+    
+    # Get task description
+    task_description = _get_task_description(module_id)
+    if not task_description:
+        st.warning("⚠️ Task description not available. Fetch tasks in Submissions tab first.")
+        return
+    
+    st.caption(f"🔁 Resuming {len(failed_q)} failed submission(s)...")
+    progress_bar = st.progress(0, text=f"Resuming 0/{len(failed_q)}...")
+    status_text = st.empty()
+    results = {'scored': 0, 'failed': 0}
+    new_failed_queue = []
+    
+    for idx, item in enumerate(failed_q):
+        student_name = item.get("student_name", "Unknown")
+        row_index = item.get("row_index")
+        
+        progress_bar.progress(idx / len(failed_q),
+                             text=f"Resuming {idx + 1}/{len(failed_q)}: {student_name}...")
+        
+        # Find the matching data row
+        row = None
+        if row_index is not None and 0 <= row_index < len(data):
+            candidate = data[row_index]
+            if candidate.get('Name', '') == student_name:
+                row = candidate
+        
+        # Fallback: search by name if row_index doesn't match
+        if row is None:
+            for r in data:
+                if r.get('Name', '') == student_name:
+                    row = r
+                    break
+        
+        if row is None:
+            status_text.caption(f"⚠️ {student_name}: Not found in current data, skipping")
+            results['failed'] += 1
+            continue
+        
+        try:
+            submission_content = fetch_submission_content(row, course['id'])
+            
+            if submission_content.get('error'):
+                status_text.caption(f"⚠️ {student_name}: {submission_content['error']}")
+            
+            # Same smart retry logic as batch scoring
+            max_retries = 3
+            retry_delay = 3
+            result = None
+            
+            for attempt in range(max_retries):
+                result = score_submission(
+                    submission_content,
+                    rubric,
+                    task_description,
+                    student_name
+                )
+                
+                if result and result.get('error'):
+                    error_msg = str(result.get('error', '')).lower()
+                    
+                    is_server_overloaded = any(x in error_msg for x in ['503', 'overloaded', 'unavailable'])
+                    is_not_found = '404' in error_msg or 'not_found' in error_msg or 'no longer available' in error_msg
+                    is_rate_limited = any(x in error_msg for x in ['429', 'rate', 'resource_exhausted', 'quota'])
+                    
+                    if is_not_found:
+                        status_text.caption(f"🚫 {student_name}: Model not available — check AI settings")
+                        break
+                    elif is_server_overloaded:
+                        status_text.caption(f"⚡ {student_name}: Server overloaded (503), re-queued")
+                        break
+                    elif is_rate_limited and attempt < max_retries - 1:
+                        status_text.caption(f"⏳ {student_name}: Rate limited, retrying in {retry_delay}s... (attempt {attempt + 1}/{max_retries})")
+                        time.sleep(retry_delay)
+                        retry_delay *= 2
+                        continue
+                
+                break
+            
+            if result and result.get('error'):
+                error_str = str(result['error'])
+                status_text.caption(f"❌ {student_name}: {error_str[:80]}")
+                results['failed'] += 1
+                new_failed_queue.append({
+                    "student_name": student_name,
+                    "row_index": row_index,
+                    "error": error_str[:200],
+                    "failed_at": datetime.now().isoformat()
+                })
+            elif result:
+                save_evaluation(course['id'], module_id, student_name, result, group_id)
+                status_text.caption(f"✓ {student_name}: {result['total_score']}/100")
+                results['scored'] += 1
+            else:
+                results['failed'] += 1
+                new_failed_queue.append({
+                    "student_name": student_name,
+                    "row_index": row_index,
+                    "error": "No result returned",
+                    "failed_at": datetime.now().isoformat()
+                })
+        
+        except Exception as e:
+            logger.error(f"Error resuming {student_name}: {e}")
+            status_text.caption(f"❌ {student_name}: Error - {str(e)[:50]}")
+            results['failed'] += 1
+            new_failed_queue.append({
+                "student_name": student_name,
+                "row_index": row_index,
+                "error": str(e)[:200],
+                "failed_at": datetime.now().isoformat()
+            })
+        
+        # Small delay between API calls
+        if idx < len(failed_q) - 1:
+            time.sleep(1.5)
+    
+    progress_bar.progress(1.0, text="Resume complete!")
+    
+    # Update the queue: save remaining failures or clear if all succeeded
+    if new_failed_queue:
+        save_failed_queue(course['id'], module_id, new_failed_queue, group_id)
+        st.warning(f"⚠️ Resume complete: {results['scored']} scored, {results['failed']} still failed.")
+        st.info(f"💡 {len(new_failed_queue)} submission(s) still in queue for retry.")
+    else:
+        clear_failed_queue(course['id'], module_id)
+        st.success(f"✅ Resume complete! All {results['scored']} previously failed submission(s) scored successfully.")
+    
     st.rerun()
 
 

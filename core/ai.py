@@ -401,7 +401,249 @@ def get_gemini_client(api_key: str = None):
         return None
 
 
-def call_gemini_with_fallback(model: str, contents, start_key_index: int = None):
+# Simple in-memory cache for model lists
+_model_cache = {}
+_MODEL_CACHE_TTL = 300  # 5 minutes
+
+# Dynamic model blocklist — models that returned 404 at call time
+_BLOCKED_MODELS_FILE = Path("output") / "blocked_models.json"
+
+
+def _load_blocked_models() -> set:
+    """Load the set of dynamically blocked model names."""
+    try:
+        if _BLOCKED_MODELS_FILE.exists():
+            with open(_BLOCKED_MODELS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return set(data.get("models", []))
+    except Exception:
+        pass
+    return set()
+
+
+def add_blocked_model(model_name: str) -> None:
+    """
+    Add a model to the dynamic blocklist (e.g., after a 404 'no longer available').
+    Also clears the model cache so the dropdown refreshes.
+    """
+    try:
+        blocked = _load_blocked_models()
+        blocked.add(model_name)
+        _BLOCKED_MODELS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(_BLOCKED_MODELS_FILE, "w", encoding="utf-8") as f:
+            json.dump({"models": sorted(blocked), "updated_at": datetime.now().isoformat()}, f, indent=2)
+        logger.info(f"Blocked model '{model_name}' from future dropdowns")
+        # Clear cache so next fetch excludes this model
+        _model_cache.pop("gemini_models", None)
+    except Exception as e:
+        logger.debug(f"Failed to save blocked model: {e}")
+
+
+def clear_blocked_models() -> None:
+    """Clear the dynamic model blocklist (e.g., after a new API generation launches)."""
+    try:
+        if _BLOCKED_MODELS_FILE.exists():
+            _BLOCKED_MODELS_FILE.unlink()
+            logger.info("Cleared blocked models list")
+        _model_cache.pop("gemini_models", None)
+    except Exception as e:
+        logger.debug(f"Failed to clear blocked models: {e}")
+
+
+def fetch_gemini_models() -> List[Dict]:
+    """
+    Fetch available Gemini model names from Google's API.
+    Results are cached for 5 minutes.
+    
+    Returns:
+        List of dicts with 'id' (model name) and 'free' (bool) keys.
+        Example: [{'id': 'gemini-3.8-flash', 'free': True}, ...]
+    """
+    import time as _time
+    
+    cache_key = "gemini_models"
+    cached = _model_cache.get(cache_key)
+    if cached and (_time.time() - cached["time"]) < _MODEL_CACHE_TTL:
+        return cached["data"]
+    
+    try:
+        client = get_gemini_client()
+        if not client:
+            return []
+        
+        models = []
+        
+        # Models that returned 404 ("no longer available") are dynamically blocklisted
+        blocked = _load_blocked_models()
+        
+        # Non-text-generation model name patterns to exclude from the dropdown
+        _SKIP_PATTERNS = [
+            '-tts',           # Text-to-speech variants
+            'native-audio',   # Audio-native / dialog models
+            'embedding',      # Embedding models
+            'robotics',       # Robotics models
+            'computer-use',   # Computer-use agent models
+            'aqa',            # Attributed QA (retrieval-only)
+            'bisheng',        # Internal/experimental
+        ]
+        
+        # Deprecated model generations — still listed by API but sunset for new users.
+        # Users with legacy access can manually type the model name in the fallback input.
+        _DEPRECATED_PREFIXES = [
+            'gemini-1.0', 'gemini-1.5',
+            'gemini-2.0', 'gemini-2.5',
+        ]
+        
+        for model in client.models.list():
+            name = model.name
+            # API returns "models/gemini-2.5-flash" format - strip prefix
+            if name.startswith("models/"):
+                name = name[7:]
+            
+            name_lower = name.lower()
+            
+            # Skip non-text-generation models
+            if any(pat in name_lower for pat in _SKIP_PATTERNS):
+                continue
+            
+            # Skip deprecated generations
+            if any(name_lower.startswith(dep) for dep in _DEPRECATED_PREFIXES):
+                continue
+            
+            # Skip dynamically blocklisted models (ones that returned 404)
+            if name in blocked:
+                continue
+            
+            # Only include models that support generateContent
+            supported = getattr(model, 'supported_actions', None)
+            if supported and 'generateContent' not in supported:
+                continue
+            
+            # Determine free/paid: Flash/Lite models are free, Pro models are paid
+            is_free = "pro" not in name_lower
+            
+            models.append({"id": name, "free": is_free})
+        
+        # Sort: prefer newer/flash models at top
+        def model_sort_key(m):
+            name = m["id"]
+            # Priority order: 3.8 > 3.7 > 3.6 > 3.5 > 3.1 > 3.0, flash before pro
+            score = 0
+            if "3.8" in name: score -= 800
+            elif "3.7" in name: score -= 700
+            elif "3.6" in name: score -= 600
+            elif "3.5" in name: score -= 500
+            elif "3.1" in name: score -= 400
+            elif "3-" in name or "3." in name: score -= 300  # gemini-3-flash-preview etc
+            if "flash" in name: score -= 50
+            if "pro" in name: score -= 40
+            if "lite" in name: score += 10  # lite after full variants
+            if "preview" in name: score += 20  # previews after stable
+            if "exp" in name: score += 100  # experimental at end
+            return (score, name)
+        
+        models.sort(key=model_sort_key)
+        
+        _model_cache[cache_key] = {"time": _time.time(), "data": models}
+        logger.info(f"Fetched {len(models)} Gemini models")
+        return models
+        
+    except Exception as e:
+        logger.error(f"Failed to fetch Gemini models: {e}")
+        return []
+
+
+def fetch_openrouter_models(api_key: str = None) -> List[Dict]:
+    """
+    Fetch available models from OpenRouter's API.
+    Results are cached for 5 minutes.
+    
+    Args:
+        api_key: OpenRouter API key. If None, reads from config.
+    
+    Returns:
+        List of dicts with 'id', 'name', and 'free' keys.
+        Free models (sorted first) are those with $0 prompt + completion pricing.
+        Example: [{'id': 'openai/gpt-4o', 'name': 'OpenAI: GPT-4o', 'free': False}, ...]
+    """
+    import time as _time
+    import requests
+    
+    if not api_key:
+        api_key = get_config("openrouter_api_key")
+    
+    cache_key = f"openrouter_models_{api_key[:8] if api_key else 'none'}"
+    cached = _model_cache.get(cache_key)
+    if cached and (_time.time() - cached["time"]) < _MODEL_CACHE_TTL:
+        return cached["data"]
+    
+    try:
+        headers = {}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        
+        resp = requests.get(
+            "https://openrouter.ai/api/v1/models",
+            headers=headers,
+            timeout=15
+        )
+        
+        if not resp.ok:
+            logger.error(f"OpenRouter models API returned {resp.status_code}")
+            return []
+        
+        data = resp.json()
+        raw_models = data.get("data", [])
+        
+        models = []
+        for m in raw_models:
+            model_id = m.get("id", "")
+            model_name = m.get("name", model_id)
+            
+            # Skip models without an ID
+            if not model_id:
+                continue
+            
+            # Check if free: both prompt and completion pricing are "0"
+            pricing = m.get("pricing", {})
+            prompt_cost = pricing.get("prompt", "1")
+            completion_cost = pricing.get("completion", "1")
+            is_free = (str(prompt_cost) == "0" and str(completion_cost) == "0")
+            
+            models.append({
+                "id": model_id,
+                "name": model_name,
+                "free": is_free
+            })
+        
+        # Sort: free models first, then alphabetically by ID
+        models.sort(key=lambda m: (not m["free"], m["id"]))
+        
+        _model_cache[cache_key] = {"time": _time.time(), "data": models}
+        logger.info(f"Fetched {len(models)} OpenRouter models ({sum(1 for m in models if m['free'])} free)")
+        return models
+        
+    except Exception as e:
+        logger.error(f"Failed to fetch OpenRouter models: {e}")
+        return []
+
+
+def clear_model_cache():
+    """Clear the cached model lists (e.g., after changing API keys)."""
+    _model_cache.clear()
+
+
+def _is_transient_error(err) -> bool:
+    """True for server-side overload/availability errors (500/503) that are worth retrying."""
+    s = str(err)
+    return (
+        "503" in s or "UNAVAILABLE" in s
+        or "500" in s or "INTERNAL" in s
+        or "overloaded" in s.lower() or "high demand" in s.lower()
+    )
+
+
+def call_gemini_with_fallback(model: str, contents, start_key_index: int = None, max_retries: int = 3):
     """
     Call Gemini API with automatic fallback to next API key on quota errors.
     
@@ -412,6 +654,7 @@ def call_gemini_with_fallback(model: str, contents, start_key_index: int = None)
         model: Model name to use
         contents: The prompt/contents to send
         start_key_index: Deprecated, ignored. Always starts from first available key.
+        max_retries: Retries (with exponential backoff) on transient 500/503 errors.
     
     Returns:
         Tuple of (response, key_name_used, key_index_used) or raises exception
@@ -445,12 +688,30 @@ def call_gemini_with_fallback(model: str, contents, start_key_index: int = None)
         
         try:
             from google import genai
+            import time as _time
             
             client = genai.Client(api_key=api_key)
-            response = client.models.generate_content(
-                model=model,
-                contents=contents
-            )
+            
+            # Retry transient server-side errors (503 high demand, 500, overloaded)
+            # with exponential backoff. These are model-wide, so switching keys won't help.
+            _max_retries = max_retries
+            for _attempt in range(_max_retries + 1):
+                try:
+                    response = client.models.generate_content(
+                        model=model,
+                        contents=contents
+                    )
+                    break
+                except Exception as _e:
+                    if _is_transient_error(_e) and _attempt < _max_retries:
+                        _delay = 2 ** (_attempt + 1)  # 2s, 4s, 8s
+                        logger.warning(
+                            f"Gemini model '{model}' temporarily unavailable "
+                            f"(attempt {_attempt + 1}/{_max_retries + 1}), retrying in {_delay}s..."
+                        )
+                        _time.sleep(_delay)
+                        continue
+                    raise
             
             logger.info(f"Gemini call succeeded using '{key_name}'")
             # Log successful key usage
@@ -460,6 +721,13 @@ def call_gemini_with_fallback(model: str, contents, start_key_index: int = None)
         except Exception as e:
             error_str = str(e)
             last_error = e
+            
+            # Check if model is deprecated/sunsetted (404)
+            if "404" in error_str or "NOT_FOUND" in error_str or "no longer available" in error_str.lower():
+                logger.warning(f"Model '{model}' returned 404 — blocklisting from dropdown")
+                log_key_usage(key_name, success=False, error_message=error_str, is_quota_error=False)
+                add_blocked_model(model)
+                raise  # Don't try other keys — the model itself is gone
             
             # Check if it's a quota/rate limit error (429)
             if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str or "quota" in error_str.lower():
@@ -479,6 +747,243 @@ def call_gemini_with_fallback(model: str, contents, start_key_index: int = None)
         raise ValueError("All API keys are marked as exhausted. Reset a key in AI Debug to retry.")
     raise last_error or ValueError("All API keys exhausted")
 
+
+def call_openrouter(model: str, contents, api_key: str = None):
+    """
+    Call OpenRouter API (OpenAI-compatible) with text or multimodal content.
+    
+    OpenRouter provides access to 200+ models (GPT-4o, Claude, Gemini, Llama, etc.)
+    through a single OpenAI-compatible API.
+    
+    Args:
+        model: Model name (e.g., 'openai/gpt-4o', 'anthropic/claude-3.5-sonnet')
+        contents: Text string, or list of content parts (for multimodal).
+                  For multimodal, list items can be:
+                  - str (text)
+                  - bytes (image PNG data, from Gemini's Part format)
+                  - dict with 'type' key (already in OpenAI message format)
+        api_key: OpenRouter API key. If None, reads from config.
+    
+    Returns:
+        A response object with .text attribute (matching Gemini response interface)
+    
+    Raises:
+        ValueError: If API key not configured
+        Exception: On API errors
+    """
+    if not api_key:
+        api_key = get_config("openrouter_api_key")
+    
+    if not api_key:
+        raise ValueError("OpenRouter API key not configured. Add it in Configuration → AI / Gemini.")
+    
+    try:
+        from openai import OpenAI
+    except ImportError:
+        raise ImportError("openai package not installed. Run: pip install openai>=1.0.0")
+    
+    client = OpenAI(
+        base_url="https://openrouter.ai/api/v1",
+        api_key=api_key
+    )
+    
+    # Build message content
+    if isinstance(contents, str):
+        # Simple text prompt
+        messages = [{"role": "user", "content": contents}]
+    elif isinstance(contents, list):
+        # Multimodal content - convert from Gemini format to OpenAI format
+        import base64
+        message_parts = []
+        
+        for part in contents:
+            if isinstance(part, str):
+                message_parts.append({"type": "text", "text": part})
+            elif isinstance(part, bytes):
+                # Raw image bytes (PNG) - convert to base64 data URL
+                b64_data = base64.b64encode(part).decode("utf-8")
+                message_parts.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/png;base64,{b64_data}"}
+                })
+            elif getattr(part, 'inline_data', None) is not None and getattr(part.inline_data, 'data', None):
+                # google.genai.types.Part (e.g. Part.from_bytes) - bytes live under .inline_data
+                b64_data = base64.b64encode(part.inline_data.data).decode("utf-8")
+                mime = getattr(part.inline_data, 'mime_type', None) or 'image/png'
+                message_parts.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{mime};base64,{b64_data}"}
+                })
+            elif getattr(part, 'text', None):
+                # google.genai.types.Part text part
+                message_parts.append({"type": "text", "text": part.text})
+            elif hasattr(part, 'data') and hasattr(part, 'mime_type'):
+                # google.genai.types.Part object - extract bytes
+                b64_data = base64.b64encode(part.data).decode("utf-8")
+                mime = getattr(part, 'mime_type', 'image/png')
+                message_parts.append({
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{mime};base64,{b64_data}"}
+                })
+            elif isinstance(part, dict) and "type" in part:
+                # Already in OpenAI format
+                message_parts.append(part)
+        
+        messages = [{"role": "user", "content": message_parts}]
+    else:
+        messages = [{"role": "user", "content": str(contents)}]
+    
+    response = client.chat.completions.create(
+        model=model,
+        messages=messages
+    )
+    
+    # Wrap in a simple object with .text to match Gemini response interface
+    class OpenRouterResponse:
+        def __init__(self, text):
+            self.text = text
+    
+    response_text = response.choices[0].message.content or ""
+    return OpenRouterResponse(response_text)
+
+
+def get_ai_provider() -> str:
+    """
+    Get the configured AI provider.
+    
+    Returns:
+        'gemini' or 'openrouter'
+    """
+    return get_config("ai_provider") or "gemini"
+
+
+def get_ai_model() -> str:
+    """
+    Get the configured AI model name based on the active provider.
+    
+    Returns:
+        Model name string
+    """
+    provider = get_ai_provider()
+    if provider == "openrouter":
+        return get_config("openrouter_model") or "openai/gpt-4o-mini"
+    else:
+        return get_config("gemini_model") or "gemini-3.8-flash"
+
+
+def call_ai(model: str = None, contents=None):
+    """
+    Unified AI dispatch - routes to Gemini or OpenRouter based on config.
+    
+    This is the primary entry point for all AI calls. It reads the ai_provider
+    config to decide which backend to use.
+    
+    Args:
+        model: Model name. If None, reads from config based on provider.
+        contents: Text string or list of content parts (for multimodal).
+    
+    Returns:
+        Tuple of (response, key_name_used, key_index_used)
+        - response has a .text attribute with the AI response
+        - key_name_used: name of the key used (or 'openrouter' for OpenRouter)
+        - key_index_used: index of the key used (or 0 for OpenRouter)
+    
+    Raises:
+        ValueError: If API keys not configured
+        Exception: On API errors
+    """
+    provider = get_ai_provider()
+    
+    if not model:
+        model = get_ai_model()
+    
+    if provider == "openrouter":
+        api_key = get_config("openrouter_api_key")
+        key_name = "OpenRouter"
+        
+        try:
+            response = call_openrouter(model=model, contents=contents, api_key=api_key)
+            log_key_usage(key_name, success=True)
+            return response, key_name, 0
+        except Exception as e:
+            error_str = str(e)
+            log_key_usage(key_name, success=False, error_message=error_str)
+            raise
+    else:
+        # Default: Gemini with multi-key + multi-model fallback
+        try:
+            return _call_gemini_with_model_fallback(model, contents)
+        except Exception as gemini_error:
+            # Optional last resort: OpenRouter (only for overload/quota failures)
+            if not _should_fallback_to_openrouter(gemini_error):
+                raise
+            or_key = get_config("openrouter_api_key")
+            or_model = get_config("openrouter_model") or "openai/gpt-4o-mini"
+            logger.warning(
+                f"All Gemini options failed ({str(gemini_error)[:120]}), "
+                f"falling back to OpenRouter model '{or_model}'"
+            )
+            try:
+                response = call_openrouter(model=or_model, contents=contents, api_key=or_key)
+                log_key_usage("OpenRouter", success=True)
+                logger.info(f"OpenRouter fallback succeeded using '{or_model}'")
+                return response, f"OpenRouter (via {or_model})", 0
+            except Exception as or_err:
+                log_key_usage("OpenRouter", success=False, error_message=str(or_err))
+                logger.error(f"OpenRouter fallback also failed: {or_err}")
+                raise gemini_error
+
+
+def _should_fallback_to_openrouter(err) -> bool:
+    """True if OpenRouter fallback is enabled/configured and the Gemini error is overload or quota."""
+    if str(get_config("openrouter_fallback") or "false").lower() != "true":
+        return False
+    if not get_config("openrouter_api_key"):
+        logger.debug("OpenRouter fallback enabled but no OpenRouter API key configured")
+        return False
+    s = str(err)
+    is_quota = (
+        "429" in s or "RESOURCE_EXHAUSTED" in s
+        or "quota" in s.lower() or "exhausted" in s.lower()
+    )
+    return _is_transient_error(err) or is_quota
+
+
+def _call_gemini_with_model_fallback(model: str, contents):
+    """
+    Call the configured Gemini model; if it's still overloaded after retries,
+    try up to 2 other free Flash models. Raises the primary error if all fail.
+    """
+    try:
+        return call_gemini_with_fallback(model=model, contents=contents)
+    except Exception as e:
+        if not _is_transient_error(e):
+            raise
+        primary_error = e
+    
+    # Primary model still overloaded after retries -> try other free models.
+    # Only happens on failure, so no quota is spent proactively.
+    # (models.list is a metadata call and doesn't count against generation quota.)
+    MAX_FALLBACK_MODELS = 2
+    candidates = [
+        m["id"] for m in fetch_gemini_models()
+        if m.get("free") and "flash" in m["id"].lower() and m["id"] != model
+    ][:MAX_FALLBACK_MODELS]
+    
+    for fb_model in candidates:
+        logger.warning(f"Model '{model}' overloaded, falling back to '{fb_model}'")
+        try:
+            response, key_name, idx = call_gemini_with_fallback(
+                model=fb_model, contents=contents, max_retries=1
+            )
+            logger.info(f"Fallback model '{fb_model}' succeeded (primary '{model}' was overloaded)")
+            return response, f"{key_name} (via {fb_model})", idx
+        except Exception as fb_err:
+            if not _is_transient_error(fb_err):
+                logger.warning(f"Fallback model '{fb_model}' failed: {fb_err}")
+            continue
+    
+    raise primary_error
 
 def extract_pdf_text(pdf_source, max_chars: int = 100000) -> str:
     """
@@ -999,13 +1504,13 @@ Return ONLY a valid JSON array, no markdown formatting, no explanation. Example 
 ]"""
 
     try:
-        # Get model from config or use default
-        model = get_config("gemini_model") or "gemini-2.5-flash"
+        # Get model from config based on active provider
+        model = get_ai_model()
         
         import time
         start_time = time.time()
         
-        response, key_used, _ = call_gemini_with_fallback(
+        response, key_used, _ = call_ai(
             model=model,
             contents=prompt
         )
@@ -1124,12 +1629,12 @@ IMPORTANT: All weight_percent values MUST be multiples of 5 (e.g., 20, 25, 30, 3
 Return ONLY a valid JSON array with the modified rubric, no markdown formatting, no explanation."""
 
     try:
-        model = get_config("gemini_model") or "gemini-2.5-flash"
+        model = get_ai_model()
         
         import time
         start_time = time.time()
         
-        response, key_used, _ = call_gemini_with_fallback(
+        response, key_used, _ = call_ai(
             model=model,
             contents=prompt
         )
@@ -2440,7 +2945,8 @@ Be fair but thorough. If content couldn't be fetched, base your evaluation on wh
 If images are provided below, examine them carefully as they may contain screenshots demonstrating completed work."""
 
     try:
-        model = get_config("gemini_model") or "gemini-2.5-flash"
+        model = get_ai_model()
+        provider = get_ai_provider()
         
         import time
         start_time = time.time()
@@ -2451,8 +2957,6 @@ If images are provided below, examine them carefully as they may contain screens
         
         if images:
             # Build multimodal content: [image1, image2, ..., text_prompt]
-            from google.genai import types
-            
             contents = []
             
             # Get max images from config (default 10)
@@ -2465,12 +2969,17 @@ If images are provided below, examine them carefully as they may contain screens
             images_to_use = images[:max_images]
             for i, img_bytes in enumerate(images_to_use):
                 try:
-                    # Create image part
-                    image_part = types.Part.from_bytes(
-                        data=img_bytes,
-                        mime_type="image/png"
-                    )
-                    contents.append(image_part)
+                    if provider == "gemini":
+                        # Gemini needs types.Part objects
+                        from google.genai import types
+                        image_part = types.Part.from_bytes(
+                            data=img_bytes,
+                            mime_type="image/png"
+                        )
+                        contents.append(image_part)
+                    else:
+                        # OpenRouter/OpenAI: pass raw bytes, call_openrouter handles base64
+                        contents.append(img_bytes)
                     num_images_sent += 1
                 except Exception as e:
                     logger.debug(f"Failed to add image {i+1}: {e}")
@@ -2479,14 +2988,14 @@ If images are provided below, examine them carefully as they may contain screens
             final_prompt = prompt + f"\n\n(Note: {len(images_to_use)} screenshot(s) are provided above - examine them for evidence of completed work)"
             contents.append(final_prompt)
             
-            response, key_used, _ = call_gemini_with_fallback(
+            response, key_used, _ = call_ai(
                 model=model,
                 contents=contents
             )
         else:
             final_prompt = prompt
             # Text-only content
-            response, key_used, _ = call_gemini_with_fallback(
+            response, key_used, _ = call_ai(
                 model=model,
                 contents=prompt
             )
@@ -2721,6 +3230,106 @@ def delete_evaluation(course_id: int, module_id: int, student_name: str, group_i
     return deleted_any
 
 
+# =============================================================================
+# FAILED QUEUE (for resuming batch scoring after transient API errors)
+# =============================================================================
+
+FAILED_QUEUE_FILENAME = "failed_queue.json"
+
+
+def save_failed_queue(course_id: int, module_id: int, failed_items: list, group_id: Optional[int] = None) -> bool:
+    """
+    Save a list of failed submission entries to disk for later retry.
+    
+    Each item should be a dict with at least:
+        - student_name: str
+        - row_index: int (index in the data list)
+        - error: str (the error message)
+        - failed_at: str (ISO timestamp)
+    
+    Args:
+        course_id: Course ID
+        module_id: Assignment module ID
+        failed_items: List of failed submission dicts
+        group_id: Optional group ID
+    
+    Returns:
+        True if saved successfully
+    """
+    try:
+        base_dir = Path("output") / f"course_{course_id}" / EVALUATIONS_DIR / f"mod{module_id}"
+        base_dir.mkdir(parents=True, exist_ok=True)
+        
+        doc = {
+            "course_id": course_id,
+            "module_id": module_id,
+            "group_id": group_id,
+            "saved_at": datetime.now().isoformat(),
+            "count": len(failed_items),
+            "items": failed_items
+        }
+        
+        filepath = base_dir / FAILED_QUEUE_FILENAME
+        with open(filepath, "w", encoding="utf-8") as f:
+            json.dump(doc, f, indent=2, ensure_ascii=False)
+        
+        logger.info(f"Saved {len(failed_items)} failed item(s) to {filepath}")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Failed to save failed queue: {e}")
+        return False
+
+
+def load_failed_queue(course_id: int, module_id: int) -> list:
+    """
+    Load the failed submissions queue from disk.
+    
+    Args:
+        course_id: Course ID
+        module_id: Assignment module ID
+    
+    Returns:
+        List of failed submission dicts, or empty list if none
+    """
+    try:
+        filepath = Path("output") / f"course_{course_id}" / EVALUATIONS_DIR / f"mod{module_id}" / FAILED_QUEUE_FILENAME
+        if not filepath.exists():
+            return []
+        
+        with open(filepath, "r", encoding="utf-8") as f:
+            doc = json.load(f)
+        
+        return doc.get("items", [])
+        
+    except Exception as e:
+        logger.error(f"Failed to load failed queue: {e}")
+        return []
+
+
+def clear_failed_queue(course_id: int, module_id: int) -> bool:
+    """
+    Delete the failed submissions queue file.
+    
+    Args:
+        course_id: Course ID
+        module_id: Assignment module ID
+    
+    Returns:
+        True if cleared (or already absent)
+    """
+    try:
+        filepath = Path("output") / f"course_{course_id}" / EVALUATIONS_DIR / f"mod{module_id}" / FAILED_QUEUE_FILENAME
+        if filepath.exists():
+            filepath.unlink()
+            logger.info(f"Cleared failed queue: {filepath}")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Failed to clear failed queue: {e}")
+        return False
+
+
 def refine_evaluation(
     current_evaluation: Dict,
     instructions: str,
@@ -2801,12 +3410,12 @@ Return a JSON object with this structure (no markdown):
 If no score changes are needed (just answering a question), keep the original scores."""
 
     try:
-        model = get_config("gemini_model") or "gemini-2.5-flash"
+        model = get_ai_model()
         
         import time
         start_time = time.time()
         
-        response, key_used, _ = call_gemini_with_fallback(
+        response, key_used, _ = call_ai(
             model=model,
             contents=prompt
         )
