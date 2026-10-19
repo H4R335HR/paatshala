@@ -131,6 +131,14 @@ def init_wayground_session_state():
         st.session_state.wayground_auto_login_attempted = False
 
 
+def _expire_wayground_session():
+    """Drop an expired Wayground session so the login form is shown again."""
+    st.session_state.wayground_session = None
+    st.session_state.wayground_user = None
+    st.session_state.wayground_reports = None
+    st.session_state.wayground_expired_notice = True
+
+
 def get_name_mappings_file(course_id):
     """Get path to the name mappings JSON file."""
     return get_quizizz_dir(course_id) / "name_mappings.json"
@@ -584,6 +592,9 @@ def render_quizizz_tab(course, meta):
                 if st.button("🔄 Fetch", key="fetch_wg_reports"):
                     with st.spinner("Fetching reports..."):
                         reports = get_available_reports(st.session_state.wayground_session)
+                        if getattr(st.session_state.wayground_session, 'wg_auth_expired', False):
+                            _expire_wayground_session()
+                            st.rerun()
                         st.session_state.wayground_reports = reports
                         if not reports:
                             st.warning("No reports found")
@@ -621,10 +632,15 @@ def render_quizizz_tab(course, meta):
                                 if content:
                                     st.session_state.quizizz_data = None
                                     st.rerun()
+                                elif getattr(st.session_state.wayground_session, 'wg_auth_expired', False):
+                                    _expire_wayground_session()
+                                    st.rerun()
                                 else:
                                     st.error("Download failed")
         else:
             # Login form (compact)
+            if st.session_state.pop('wayground_expired_notice', False):
+                st.warning("Wayground session expired (possibly due to a login elsewhere). Please log in again.")
             st.caption("Login to fetch reports from Wayground")
             
             # Quick login with saved credentials button

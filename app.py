@@ -385,6 +385,10 @@ def main():
     
     st.divider()
     
+    # Automated Activity Inbox / Ungraded Activities Detector
+    from streamlit_modules.components.inbox import render_ungraded_detector
+    render_ungraded_detector(course, meta)
+    
     # Dynamic tabs based on configuration
     from streamlit_modules.tab_registry import TAB_REGISTRY, get_tab_renderer
     from core.persistence import get_enabled_tabs, set_enabled_tabs

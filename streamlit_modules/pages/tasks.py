@@ -7,7 +7,9 @@ import time
 import logging
 import streamlit as st
 
-from core.api import fetch_tasks_list
+from core.api import fetch_tasks_list, get_course_activity_restrictions
+from core.auth import setup_session
+from core.grading_pipeline import is_task_permitted_for_group
 from core.persistence import (
     load_csv_from_disk, save_csv_to_disk, 
     load_meta, save_meta, dataframe_to_csv
@@ -74,8 +76,41 @@ def render_tasks_tab(course, meta):
             st.warning("No tasks found")
     
     if st.session_state.tasks_data:
+        restr_map = {}
+        try:
+            session = setup_session(st.session_state.session_id)
+            restr_map = get_course_activity_restrictions(session, course['id'])
+        except Exception as e:
+            logger.debug(f"Could not load restrictions: {e}")
+
+        show_all = True
+        displayed_tasks = st.session_state.tasks_data
+
+        if st.session_state.selected_group:
+            filter_col1, filter_col2 = st.columns([3, 2])
+            with filter_col1:
+                st.info(f"📌 Active Batch: **{st.session_state.selected_group['name']}**")
+            with filter_col2:
+                show_all = st.checkbox(
+                    "Show all assignments (include other batches)",
+                    value=False,
+                    key=f"tasks_show_all_{course['id']}",
+                    help="Uncheck to hide activities restricted to other batches or hidden"
+                )
+
+            if not show_all:
+                filtered = [
+                    t for t in st.session_state.tasks_data
+                    if is_task_permitted_for_group(t, st.session_state.selected_group, restr_map)
+                ]
+                if filtered:
+                    displayed_tasks = filtered
+                st.caption(f"🎯 Showing **{len(displayed_tasks)}** of **{len(st.session_state.tasks_data)}** assignments permitted for **{st.session_state.selected_group['name']}**")
+        else:
+            st.caption(f"Showing all **{len(st.session_state.tasks_data)}** assignments (select a group in sidebar to filter by batch)")
+
         st.dataframe(
-            st.session_state.tasks_data,
+            displayed_tasks,
             width="stretch",
             hide_index=True,
             column_config={
@@ -83,9 +118,9 @@ def render_tasks_tab(course, meta):
             }
         )
         
-        csv_data = convert_to_csv(st.session_state.tasks_data)
+        csv_data = convert_to_csv(displayed_tasks)
         st.download_button(
-            label="📥 Download CSV",
+            label="📥 Download CSV" if show_all else f"📥 Download Filtered CSV ({len(displayed_tasks)} tasks)",
             data=csv_data,
             file_name=f"tasks_{course['id']}.csv",
             mime="text/csv"

@@ -19,6 +19,43 @@ REPORT_TYPES = {
 }
 
 
+def _post_login(session, email: str, password: str):
+    """
+    Perform the login POST on an existing session (updates its cookies in place).
+    
+    Returns:
+        dict: user_info on success, None on failure
+    """
+    login_url = f"{WAYGROUND_BASE}/_authserver/public/public/v1/auth/login/local"
+    payload = {
+        "username": email,
+        "password": password,
+        "requestId": ""
+    }
+    # Explicit headers so a re-login isn't affected by API headers set later on the session
+    headers = {
+        'Content-Type': 'application/json',
+        'Origin': WAYGROUND_BASE,
+        'Referer': f'{WAYGROUND_BASE}/login'
+    }
+    
+    logger.info(f"Attempting Wayground login for {email}")
+    resp = session.post(login_url, json=payload, headers=headers, timeout=30)
+    
+    if not resp.ok:
+        logger.error(f"Wayground login HTTP error: {resp.status_code} - {resp.text[:300]}")
+        return None
+    
+    data = resp.json()
+    if not data.get('success'):
+        logger.error(f"Wayground login failed: {data}")
+        return None
+    
+    user_info = data.get('data', {}).get('user', {})
+    logger.info(f"Wayground login successful for {user_info.get('firstName', email)}")
+    return user_info
+
+
 def wayground_login(email: str, password: str):
     """
     Login to Wayground and return session with auth cookies.
@@ -36,33 +73,55 @@ def wayground_login(email: str, password: str):
             'Referer': f'{WAYGROUND_BASE}/login'
         })
         
-        # Login request
-        login_url = f"{WAYGROUND_BASE}/_authserver/public/public/v1/auth/login/local"
-        payload = {
-            "username": email,
-            "password": password,
-            "requestId": ""
-        }
-        
-        logger.info(f"Attempting Wayground login for {email}")
-        resp = session.post(login_url, json=payload, timeout=30)
-        
-        if resp.ok:
-            data = resp.json()
-            if data.get('success'):
-                user_info = data.get('data', {}).get('user', {})
-                logger.info(f"Wayground login successful for {user_info.get('firstName', email)}")
-                return session, user_info
-            else:
-                logger.error(f"Wayground login failed: {data}")
-                return None, None
-        else:
-            logger.error(f"Wayground login HTTP error: {resp.status_code}")
+        user_info = _post_login(session, email, password)
+        if user_info is None:
             return None, None
+        
+        # Keep credentials on the session so expired sessions can be renewed transparently
+        session.wg_creds = (email, password)
+        session.wg_auth_expired = False
+        return session, user_info
             
     except Exception as e:
         logger.error(f"Wayground login error: {e}")
         return None, None
+
+
+def _get_with_reauth(session, url, **kwargs):
+    """
+    GET with one automatic re-login + retry if Wayground reports the session
+    as not authenticated (401). Wayground can invalidate sessions server-side,
+    e.g. after logging in from a browser.
+    
+    Sets session.wg_auth_expired = True if the session could not be renewed.
+    """
+    resp = session.get(url, **kwargs)
+    if resp.status_code != 401:
+        return resp
+    
+    creds = getattr(session, 'wg_creds', None)
+    if not creds:
+        logger.warning("Wayground session expired and no credentials available to renew it")
+        session.wg_auth_expired = True
+        return resp
+    
+    logger.warning("Wayground session expired (401), re-authenticating...")
+    session.cookies.clear()
+    try:
+        renewed = _post_login(session, *creds) is not None
+    except Exception as e:
+        logger.error(f"Wayground re-login error: {e}")
+        renewed = False
+    
+    if not renewed:
+        session.wg_auth_expired = True
+        return resp
+    
+    # Refresh CSRF header in case the new login issued one
+    session.headers['X-Csrf-Token'] = session.cookies.get('x-csrf-token', '')
+    resp = session.get(url, **kwargs)
+    session.wg_auth_expired = resp.status_code == 401
+    return resp
 
 
 def validate_wayground_session(session):
@@ -130,7 +189,7 @@ def get_available_reports(session):
             'mock': 'false'
         }
         
-        resp = session.get(api_url, params=params, timeout=30)
+        resp = _get_with_reauth(session, api_url, params=params, timeout=30)
         
         if not resp.ok:
             logger.error(f"Failed to fetch games list: {resp.status_code}")
@@ -227,7 +286,7 @@ def download_report(session, game_id: str, save_path: Path = None):
             '_': str(int(time.time() * 1000) % 100000)  # Cache buster
         }
         
-        resp = session.get(download_api_url, params=params, timeout=60)
+        resp = _get_with_reauth(session, download_api_url, params=params, timeout=60)
         
         if not resp.ok:
             logger.error(f"Failed to get export URL: {resp.status_code}")

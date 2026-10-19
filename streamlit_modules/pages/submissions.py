@@ -7,17 +7,101 @@ import logging
 from datetime import datetime, timedelta
 import streamlit as st
 
-from core.api import fetch_submissions, fetch_tasks_list, get_assignment_dates, update_assignment_dates, clean_name, fetch_full_feedback
+from core.api import (
+    fetch_submissions, fetch_tasks_list, get_assignment_dates,
+    update_assignment_dates, clean_name, fetch_full_feedback,
+    get_course_activity_restrictions
+)
 from core.auth import setup_session
-from core.ai import load_evaluation
+from core.ai import load_evaluation, load_failed_queue
 from core.persistence import (
     load_csv_from_disk, save_csv_to_disk, 
     load_last_session, save_last_session,
     save_meta
 )
+from core.grading_pipeline import (
+    get_task_grading_status,
+    run_batch_scoring,
+    run_batch_moodle_submit,
+    parse_moodle_grade,
+    is_task_permitted_for_group
+)
+from streamlit_modules.components.inbox import show_rubric_approval_dialog
 from streamlit_modules.ui.components import show_data_status
 
 logger = logging.getLogger(__name__)
+
+
+@st.dialog("Review Grades Before Submitting to Moodle", width="large")
+def show_moodle_review_dialog(course, mod_id, grp_id, submissions, max_grd, asgn_id):
+    st.subheader("Review Grades")
+    st.caption("Review calculated AI grades before submitting them to Moodle / Paatshala:")
+    
+    import pandas as pd
+    pending_items = []
+    effective_max = max_grd if (max_grd and 1 <= max_grd <= 1000) else 15.0
+    
+    for row in submissions:
+        sname = row.get('Name', 'Unknown')
+        uid = row.get('User_ID')
+        eval_doc = load_evaluation(course['id'], mod_id, sname, grp_id)
+        if eval_doc and eval_doc.get('total_score') is not None:
+            m_score, s_max = parse_moodle_grade(row.get('Final Grade', ''))
+            t_max = s_max or effective_max
+            ai_score = eval_doc.get('total_score', 0)
+            scaled = round((ai_score / 100) * t_max)
+            
+            if m_score is None or abs(m_score - scaled) >= 0.5:
+                pending_items.append({
+                    "Student": clean_name(sname),
+                    "User ID": uid or "Missing",
+                    "AI Score": f"{ai_score}%",
+                    "New Grade": f"{scaled}/{int(t_max)}",
+                    "Current Grade": str(row.get('Final Grade', '-')) or "-",
+                })
+    
+    if not pending_items:
+        st.info("✅ All AI-scored evaluations are already submitted to Moodle!")
+        if st.button("Close"):
+            st.rerun()
+        return
+        
+    st.dataframe(pd.DataFrame(pending_items), hide_index=True, use_container_width=True)
+    st.markdown(f"**Total to submit:** `{len(pending_items)}` students")
+    st.warning("⚠️ Submitting will immediately update the official grades and post feedback comments on Paatshala.")
+    
+    col1, col2 = st.columns([2, 1])
+    with col1:
+        if st.button("🚀 Confirm & Submit to Moodle", type="primary", use_container_width=True):
+            pbar = st.progress(0, text="Submitting to Moodle...")
+            st_text = st.empty()
+            
+            def p_cb(info):
+                curr = info.get("current", 0)
+                tot = info.get("total", 1)
+                pbar.progress(curr / tot if tot > 0 else 0, text=info.get("message", ""))
+                if info.get("type") in ["success", "warning", "error"]:
+                    st_text.caption(info.get("message", ""))
+            
+            try:
+                sub_res = run_batch_moodle_submit(
+                    course_id=course['id'],
+                    module_id=mod_id,
+                    group_id=grp_id,
+                    submissions_data=submissions,
+                    session_id=st.session_state.session_id,
+                    assignment_id=asgn_id,
+                    max_grade=effective_max,
+                    progress_callback=p_cb
+                )
+                st.toast(f"Submitted {sub_res['submitted']} grades to Moodle!", icon="✅")
+                st.success(f"✓ Submission complete! {sub_res['submitted']} grades submitted, {sub_res['failed']} failed.")
+                st.rerun()
+            except Exception as e:
+                st.error(f"Failed to submit: {e}")
+    with col2:
+        if st.button("Cancel", use_container_width=True):
+            st.rerun()
 
 
 def render_submissions_tab(course, meta):
@@ -45,10 +129,47 @@ def render_submissions_tab(course, meta):
                         st.success(f"✓ Fetched {len(rows)} tasks")
                         st.rerun()
     else:
+        # Restrictions / Batch Filtering
+        restr_map = {}
+        try:
+            session = setup_session(st.session_state.session_id)
+            restr_map = get_course_activity_restrictions(session, course['id'])
+        except Exception as e:
+            logger.debug(f"Could not load restrictions: {e}")
+
+        show_all_tasks = False
+        selected_group_id = None
+        if st.session_state.selected_group:
+            selected_group_id = st.session_state.selected_group['id']
+            f_col1, f_col2 = st.columns([3, 2])
+            with f_col1:
+                st.info(f"📌 Active Batch: **{st.session_state.selected_group['name']}**")
+            with f_col2:
+                show_all_tasks = st.checkbox(
+                    "Show all assignments (include other batches)",
+                    value=False,
+                    key=f"subm_show_all_{course['id']}",
+                    help="By default, activities restricted to other batches or hidden are excluded. Check this to see all."
+                )
+        else:
+            st.caption("💡 Select a group in the sidebar to filter assignments by batch")
+
+        if st.session_state.selected_group and not show_all_tasks:
+            filtered_tasks = [
+                t for t in st.session_state.tasks_data
+                if is_task_permitted_for_group(t, st.session_state.selected_group, restr_map)
+            ]
+            if not filtered_tasks:
+                filtered_tasks = st.session_state.tasks_data
+            else:
+                st.caption(f"🎯 Filtered to **{len(filtered_tasks)}** assignments permitted for **{st.session_state.selected_group['name']}** (out of {len(st.session_state.tasks_data)} total)")
+        else:
+            filtered_tasks = st.session_state.tasks_data
+
         # Task selector
         task_options = {
             f"{t['Task Name']} (ID: {t['Module ID']})": t
-            for t in st.session_state.tasks_data
+            for t in filtered_tasks
         }
         
         # Try to pre-select from last session
@@ -56,25 +177,17 @@ def render_submissions_tab(course, meta):
         last = load_last_session()
         if last.get('last_module_id'):
             for i, (name, t) in enumerate(task_options.items()):
-                if str(t['Module ID']) == str(last['last_module_id']):
+                if str(t.get('Module ID')) == str(last['last_module_id']):
                     pre_select_index = i
                     break
 
         selected_task_name = st.selectbox(
             "Select Assignment",
             options=list(task_options.keys()),
-            index=pre_select_index
+            index=pre_select_index if pre_select_index < len(task_options) else 0
         )
         
         selected_task = task_options.get(selected_task_name)
-        
-        # Use global group from sidebar (if selected)
-        selected_group_id = None
-        if st.session_state.selected_group:
-            selected_group_id = st.session_state.selected_group['id']
-            st.info(f"📌 Filtering by: {st.session_state.selected_group['name']}")
-        else:
-            st.caption("💡 Select a group in the sidebar to filter results")
         
         # Show task description if available
         if selected_task and selected_task.get('description'):
@@ -463,6 +576,107 @@ def render_submissions_tab(course, meta):
                 if internal_cols:
                     df = df.drop(columns=internal_cols)
                 
+                # =====================================================================
+                # BATCH EVALUATION & MOODLE SUBMISSION CARD
+                # =====================================================================
+                grading_status = get_task_grading_status(
+                    course_id=course['id'],
+                    module_id=module_id,
+                    group_id=selected_group_id,
+                    submissions_data=display_data,
+                    max_grade=st.session_state.get(f"max_grade_{module_id}")
+                )
+
+                # Check if evaluation was triggered after rubric approval
+                trigger_eval_key = f"start_evaluation_after_rubric_{module_id}"
+                auto_trigger_eval = st.session_state.get(trigger_eval_key, False)
+                if auto_trigger_eval:
+                    st.session_state[trigger_eval_key] = False
+
+                with st.container(border=True):
+                    ev_c1, ev_c2, ev_c3, ev_c4 = st.columns([4, 2, 2, 2])
+                    with ev_c1:
+                        rubric_status_text = "✅ Rubric Configured" if grading_status['has_rubric'] else "⚠️ No Rubric Found"
+                        st.markdown(
+                            f"**⚡ AI Evaluation:** "
+                            f"**{grading_status['ai_evaluated_count']}/{grading_status['submitted_count']}** scored "
+                            f"({grading_status['ai_pending_count']} pending)"
+                            f"<br><span style='font-size:12px; color:#888;'>Rubric: {rubric_status_text}</span>",
+                            unsafe_allow_html=True
+                        )
+                    with ev_c2:
+                        eval_btn = st.button(
+                            "⚡ Evaluate Pending",
+                            key=f"eval_pending_btn_{module_id}_{selected_group_id}",
+                            disabled=(grading_status['ai_pending_count'] == 0),
+                            type="primary",
+                            use_container_width=True,
+                            help="Evaluate all pending submissions with AI"
+                        )
+                    with ev_c3:
+                        ready_cnt = grading_status['ready_for_moodle_count']
+                        review_moodle_btn = st.button(
+                            f"📤 Submit to Moodle ({ready_cnt})",
+                            key=f"moodle_review_btn_{module_id}_{selected_group_id}",
+                            disabled=(ready_cnt == 0),
+                            use_container_width=True,
+                            help="Review grades before submitting to Moodle"
+                        )
+                    with ev_c4:
+                        failed_cnt = grading_status['failed_queue_count']
+                        resume_btn = st.button(
+                            f"🔁 Resume ({failed_cnt})",
+                            key=f"resume_failed_btn_{module_id}_{selected_group_id}",
+                            disabled=(failed_cnt == 0),
+                            use_container_width=True,
+                            help="Retry previously failed submissions"
+                        )
+
+                # Execute evaluation if button pressed or auto-triggered
+                if eval_btn or auto_trigger_eval:
+                    if not grading_status['has_rubric']:
+                        show_rubric_approval_dialog(
+                            course=course,
+                            module_id=module_id,
+                            task_name=selected_task['Task Name'],
+                            task_description=selected_task.get('description', '') or selected_task['Task Name'],
+                            group_id=selected_group_id
+                        )
+                    else:
+                        progress_bar = st.progress(0, text="Evaluating submissions with AI...")
+                        status_text = st.empty()
+                        
+                        def p_callback(info):
+                            curr = info.get("current", 0)
+                            tot = info.get("total", 1)
+                            progress_bar.progress(curr / tot if tot > 0 else 0, text=info.get("message", ""))
+                            if info.get("type") in ["success", "warning", "error", "skipped"]:
+                                status_text.caption(info.get("message", ""))
+                        
+                        task_desc = selected_task.get('description', '') or selected_task['Task Name']
+                        res = run_batch_scoring(
+                            course_id=course['id'],
+                            module_id=module_id,
+                            group_id=selected_group_id,
+                            submissions_data=display_data,
+                            rubric=grading_status['rubric'],
+                            task_description=task_desc,
+                            session_id=st.session_state.session_id,
+                            progress_callback=p_callback,
+                            auto_fetch=True
+                        )
+                        st.toast(f"Scored {res['scored']} submissions!", icon="🎯")
+                        st.rerun()
+
+                if resume_btn:
+                    from streamlit_modules.pages.evaluation import _perform_resume_failed
+                    _perform_resume_failed(course, display_data, grading_status['rubric'], module_id, selected_group_id)
+
+                if review_moodle_btn:
+                    asgn_id = st.session_state.get(f"assignment_id_{module_id}")
+                    max_grd = st.session_state.get(f"max_grade_{module_id}", 15.0)
+                    show_moodle_review_dialog(course, module_id, selected_group_id, display_data, max_grd, asgn_id)
+
                 # Add selection capability to dataframe
                 selection = st.dataframe(
                     df,

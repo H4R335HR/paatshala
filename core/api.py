@@ -143,8 +143,111 @@ def get_courses(session):
     except Exception:
         return []
 
+def extract_restrictions_from_moodle_element(item, sec=None):
+    """
+    Extract group names and hidden status from an activity element and optional parent section.
+    Returns:
+        tuple: (clean_groups_list, is_hidden_bool)
+    """
+    groups = []
+    is_hidden = False
+    
+    # Check item classes
+    item_classes = item.get('class', [])
+    if any(c in item_classes for c in ['hidden', 'dimmed', 'stealth']):
+        is_hidden = True
+        
+    for a in item.find_all(class_=lambda c: c and 'availability' in c):
+        text = a.get_text(' ', strip=True)
+        if 'hidden from students' in text.lower():
+            is_hidden = True
+        for s in a.find_all(['strong', 'b']):
+            groups.append(s.get_text(strip=True))
+
+    if sec:
+        sec_classes = sec.get('class', [])
+        if any(c in sec_classes for c in ['hidden', 'dimmed']):
+            is_hidden = True
+        for a in sec.find_all(class_=lambda c: c and 'availability' in c):
+            if a.find_parent('li', class_=lambda c: c and 'activity' in c):
+                continue
+            text = a.get_text(' ', strip=True)
+            if 'hidden from students' in text.lower():
+                is_hidden = True
+            for s in a.find_all(['strong', 'b']):
+                groups.append(s.get_text(strip=True))
+
+    clean_groups = list(dict.fromkeys([g.strip() for g in groups if g.strip()]))
+    return clean_groups, is_hidden
+
+
+def get_course_activity_restrictions(session, course_id, force_refresh=False):
+    """
+    Quickly fetch availability restrictions for all activities in a course.
+    Makes only 1 GET request to /course/view.php?id={course_id} and caches on disk.
+    
+    Returns:
+        dict: { module_id_str: {'groups': [list of group names], 'is_hidden': bool, 'section': str, 'name': str} }
+    """
+    cache_file = Path("output") / f"course_{course_id}" / ".restrictions_cache.json"
+    if not force_refresh and cache_file.exists():
+        try:
+            with open(cache_file, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+
+    url = f"{BASE}/course/view.php?id={course_id}"
+    try:
+        resp = session.get(url, timeout=30)
+        if not resp.ok:
+            return {}
+        
+        soup = BeautifulSoup(resp.text, "html.parser")
+        items = soup.find_all("li", class_=lambda c: c and "activity" in c)
+        
+        restr_map = {}
+        for item in items:
+            link = item.find("a", href=lambda h: h and "/mod/" in h)
+            if not link:
+                continue
+            href = link.get("href", "")
+            m = re.search(r"[?&]id=(\d+)", href)
+            if not m:
+                continue
+            mid = m.group(1)
+            name = link.get_text(strip=True)
+            
+            sec = item.find_parent("li", class_=lambda c: c and "section" in c)
+            sec_name = ""
+            if sec:
+                name_node = sec.find(class_="sectionname") or sec.find(class_="section-title")
+                sec_name = name_node.get_text(strip=True) if name_node else sec.get("aria-label", "")
+            
+            groups, is_hidden = extract_restrictions_from_moodle_element(item, sec)
+            restr_map[mid] = {
+                "groups": groups,
+                "is_hidden": is_hidden,
+                "section": sec_name,
+                "name": name
+            }
+            
+        # Cache to disk
+        try:
+            cache_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(cache_file, "w", encoding="utf-8") as f:
+                json.dump(restr_map, f, indent=2)
+        except Exception as e:
+            logger.debug(f"Failed to save restrictions cache: {e}")
+            
+        return restr_map
+    except Exception as e:
+        logger.error(f"Error fetching course activity restrictions: {e}")
+        return {}
+
+
 def get_tasks(session, course_id):
-    """Get list of tasks (assignments) from course page"""
+    """Get list of tasks (assignments) from course page with restriction info"""
     url = f"{BASE}/course/view.php?id={course_id}"
     resp = session.get(url)
     if not resp.ok:
@@ -167,7 +270,19 @@ def get_tasks(session, course_id):
                 href = BASE + href
             elif not href.startswith("http"):
                 href = BASE + "/" + href.lstrip("/")
-            tasks.append((name, module_id, href))
+            
+            # Find parent section
+            sec = item.find_parent("li", class_=lambda c: c and "section" in c)
+            sec_name = ""
+            if sec:
+                name_node = sec.find(class_="sectionname") or sec.find(class_="section-title")
+                if name_node:
+                    sec_name = name_node.get_text(strip=True)
+                elif sec.get("aria-label"):
+                    sec_name = sec.get("aria-label")
+            
+            groups, is_hidden = extract_restrictions_from_moodle_element(item, sec)
+            tasks.append((name, module_id, href, groups, is_hidden, sec_name))
     
     return tasks
 
@@ -1127,13 +1242,17 @@ def fetch_tasks_list(session_id, course_id, progress_callback=None):
     
     with ThreadPoolExecutor(max_workers=DEFAULT_THREADS) as executor:
         futures = {
-            executor.submit(fetch_task_details, session_id, name, mid, url): (name, mid, url)
-            for name, mid, url in tasks
+            executor.submit(fetch_task_details, session_id, item[0], item[1], item[2]): item
+            for item in tasks
         }
         
         completed = 0
         for fut in as_completed(futures):
-            name, mid, url = futures[fut]
+            item = futures[fut]
+            name, mid, url = item[0], item[1], item[2]
+            groups = item[3] if len(item) > 3 else []
+            is_hidden = item[4] if len(item) > 4 else False
+            sec_name = item[5] if len(item) > 5 else ""
             try:
                 returned_name, returned_mid, returned_url, info = fut.result()
                 rows.append({
@@ -1146,7 +1265,10 @@ def fetch_tasks_list(session_id, course_id, progress_callback=None):
                     "Submitted": info.get("submitted", ""),
                     "Needs Grading": info.get("needs_grading", ""),
                     "description": info.get("description", ""),
-                    "URL": returned_url
+                    "URL": returned_url,
+                    "Restricted Groups": ",".join(groups) if groups else "",
+                    "Is Hidden": "1" if is_hidden else "0",
+                    "Section": sec_name
                 })
             except Exception as e:
                 logger.error(f"Error fetching task detail: {e}")
@@ -1157,7 +1279,7 @@ def fetch_tasks_list(session_id, course_id, progress_callback=None):
                 progress_callback(completed / total)
     
     # Sort by original order
-    task_order = {(name, mid): i for i, (name, mid, _) in enumerate(tasks)}
+    task_order = {(item[0], item[1]): i for i, item in enumerate(tasks)}
     rows.sort(key=lambda r: task_order.get((r["Task Name"], r["Module ID"]), 999))
     
     return rows

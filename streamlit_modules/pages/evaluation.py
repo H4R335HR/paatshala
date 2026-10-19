@@ -227,10 +227,10 @@ def render_evaluation_tab(course, meta):
     
     col1, col2, col3 = st.columns([2, 1, 1])
     with col1:
-        st.metric("Evaluated Submissions", f"{evaluated} / {total}")
+        st.metric("Validated Links", f"{evaluated} / {total}")
     
     with col2:
-        if st.button("🚀 Evaluate Pending", width="stretch", disabled=(evaluated == total)):
+        if st.button("🔍 Validate Links", width="stretch", disabled=(evaluated == total), help="Validate repository links and fork status"):
             progress_bar = st.progress(0, text="Evaluating pending submissions...")
             pending_indices = [i for i, r in enumerate(data) if not r.get('Eval_Last_Checked')]
             count = len(pending_indices)
