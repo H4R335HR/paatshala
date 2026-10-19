@@ -558,7 +558,9 @@
             <th>Search Term</th>
             <th>Course ID</th>
             <th>Section</th>
+            <th class="hide-mobile">Zoom Account</th>
             <th>Limit</th>
+            <th>Delay</th>
             <th>Enabled</th>
             <th></th>
           </tr>
@@ -612,6 +614,26 @@
         <input type="text" id="m-search" placeholder="CSA SGOU">
       </div>
       <div class="form-group">
+        <label>Zoom Account</label>
+        <select id="m-zoom-account" onchange="onZoomAccountChange()" style="font-family:var(--sans);font-size:13px;background:var(--bg-2);color:var(--text-0);border:1px solid var(--border);padding:8px 10px;border-radius:5px;width:100%;">
+          <option value="">Default (.config zoom_username)</option>
+          <option value="__custom__">Custom account...</option>
+        </select>
+      </div>
+      <div id="m-custom-zoom-block" class="form-group full" style="display:none;background:var(--bg-1);padding:12px;border-radius:6px;border:1px dashed var(--border);">
+        <div style="font-size:12px;font-weight:600;margin-bottom:8px;color:var(--accent);">Custom Zoom Account Override</div>
+        <div class="form-grid" style="grid-template-columns: 1fr 1fr; gap: 10px;">
+          <div class="form-group" style="margin:0;">
+            <label style="font-size:11px;">Account Tag or Email</label>
+            <input type="text" id="m-zoom-custom-user" placeholder="e.g. batch2 or user@domain.com">
+          </div>
+          <div class="form-group" style="margin:0;">
+            <label style="font-size:11px;">Password (optional if in .config)</label>
+            <input type="password" id="m-zoom-custom-pass" placeholder="Password override">
+          </div>
+        </div>
+      </div>
+      <div class="form-group">
         <label>Moodle Course ID</label>
         <input type="number" id="m-course" placeholder="491">
       </div>
@@ -622,6 +644,11 @@
       <div class="form-group">
         <label>Limit (0 = all, +N newest, -N oldest)</label>
         <input type="number" id="m-limit" value="0">
+      </div>
+      <div class="form-group">
+        <label>Upload Delay (days, optional)</label>
+        <input type="number" id="m-delay" min="0" max="365" step="1" value="0" placeholder="0 = upload immediately"
+               title="Only upload recordings at least this many days old. 0 = upload as soon as available.">
       </div>
       <div class="form-group">
         <div class="toggle-row">
@@ -874,11 +901,15 @@ async function refreshConfig() {
     empty.style.display = 'none';
     tbody.innerHTML = data.map(m => `
       <tr>
-        <td class="small">${esc(m.name)}</td>
+        <td class="small"><strong>${esc(m.name)}</strong></td>
         <td class="mono">${esc(m.search_term)}</td>
         <td class="mono">${m.course_id}</td>
         <td class="small">${esc(m.section_name)}</td>
+        <td class="small hide-mobile">
+          ${m.zoom_account ? `<span class="status-pill status-running" style="font-size:10px;padding:2px 7px;">${esc(m.zoom_account)}</span>` : '<span class="dim" style="font-size:11px;">(default)</span>'}
+        </td>
         <td class="mono">${m.limit_count || 'all'}</td>
+        <td class="mono">${m.upload_delay_days ? `${m.upload_delay_days}d` : '<span class="dim">–</span>'}</td>
         <td>${m.enabled ? '<span style="color:var(--green)">✓</span>' : '<span style="color:var(--text-2)">✗</span>'}</td>
         <td>
           <div class="btn-group">
@@ -913,6 +944,46 @@ async function triggerOne(mappingId) {
 }
 
 // ---------------------------------------------------------------------------
+// Zoom accounts helper
+// ---------------------------------------------------------------------------
+let zoomAccountsCache = [];
+
+async function fetchZoomAccounts() {
+  try {
+    const res = await api('/zoom-accounts');
+    zoomAccountsCache = res.accounts || [];
+    const sel = document.getElementById('m-zoom-account');
+    if (!sel) return;
+    
+    // Save current selection if any
+    const curVal = sel.value;
+    
+    sel.innerHTML = '<option value="">Default (.config zoom_username)</option>';
+    for (const acc of zoomAccountsCache) {
+      if (!acc.is_default) {
+        const label = acc.tag + (acc.username ? ` (${acc.username})` : '');
+        sel.innerHTML += `<option value="${esc(acc.tag)}">${esc(label)}</option>`;
+      }
+    }
+    sel.innerHTML += '<option value="__custom__">Custom account...</option>';
+    
+    if (curVal) sel.value = curVal;
+  } catch (e) {
+    console.warn('Failed to load zoom accounts', e);
+  }
+}
+
+function onZoomAccountChange() {
+  const selVal = document.getElementById('m-zoom-account').value;
+  const customBlock = document.getElementById('m-custom-zoom-block');
+  if (selVal === '__custom__') {
+    customBlock.style.display = 'block';
+  } else {
+    customBlock.style.display = 'none';
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Mapping modal
 // ---------------------------------------------------------------------------
 function openMappingModal(editData) {
@@ -923,8 +994,45 @@ function openMappingModal(editData) {
   document.getElementById('m-course').value = editData?.course_id || '';
   document.getElementById('m-section').value = editData?.section_name || 'Recordings';
   document.getElementById('m-limit').value = editData?.limit_count ?? 0;
+  document.getElementById('m-delay').value = editData?.upload_delay_days ?? 0;
   document.getElementById('m-check-settings').checked = editData?.check_settings ?? true;
   document.getElementById('m-enabled').checked = editData?.enabled ?? true;
+
+  // Populate Zoom account inputs
+  const sel = document.getElementById('m-zoom-account');
+  const customBlock = document.getElementById('m-custom-zoom-block');
+  const customUser = document.getElementById('m-zoom-custom-user');
+  const customPass = document.getElementById('m-zoom-custom-pass');
+  const accVal = editData?.zoom_account || '';
+  const hasSavedPass = !!editData?.has_zoom_password;
+
+  customUser.value = '';
+  // The API never returns the stored password; blank means "keep existing".
+  customPass.value = '';
+  customPass.dataset.hasSaved = hasSavedPass ? '1' : '';
+  customPass.placeholder = hasSavedPass ? '•••••• saved — leave blank to keep' : 'Password override';
+
+  if (!accVal) {
+    sel.value = '';
+    customBlock.style.display = 'none';
+  } else {
+    let optionExists = false;
+    for (const opt of sel.options) {
+      if (opt.value === accVal) {
+        optionExists = true;
+        break;
+      }
+    }
+    if (optionExists) {
+      sel.value = accVal;
+      customBlock.style.display = hasSavedPass ? 'block' : 'none';
+    } else {
+      sel.value = '__custom__';
+      customUser.value = accVal;
+      customBlock.style.display = 'block';
+    }
+  }
+
   document.getElementById('mapping-modal').classList.add('open');
 }
 
@@ -934,15 +1042,38 @@ function closeMappingModal() {
 
 async function saveMapping() {
   const editId = document.getElementById('mapping-edit-id').value;
+  const selVal = document.getElementById('m-zoom-account').value;
+  const customPassEl = document.getElementById('m-zoom-custom-pass');
+  const customBlockVisible = document.getElementById('m-custom-zoom-block').style.display !== 'none';
+  let zoomAccount = '';
+  const typedPassword = customPassEl.value.trim();
+
+  if (selVal === '__custom__') {
+    zoomAccount = document.getElementById('m-zoom-custom-user').value.trim();
+  } else {
+    zoomAccount = selVal;
+  }
+
   const body = {
     name: document.getElementById('m-name').value.trim(),
     search_term: document.getElementById('m-search').value.trim(),
     course_id: parseInt(document.getElementById('m-course').value) || 0,
     section_name: document.getElementById('m-section').value.trim() || 'Recordings',
     limit_count: parseInt(document.getElementById('m-limit').value) || 0,
+    upload_delay_days: Math.min(365, Math.max(0, parseInt(document.getElementById('m-delay').value) || 0)),
     check_settings: document.getElementById('m-check-settings').checked,
     enabled: document.getElementById('m-enabled').checked,
+    zoom_account: zoomAccount,
   };
+
+  // zoom_password: omitted = keep existing (edit only), '' = clear, value = set
+  if (!customBlockVisible) {
+    body.zoom_password = '';
+  } else if (typedPassword) {
+    body.zoom_password = typedPassword;
+  } else if (!(editId && customPassEl.dataset.hasSaved)) {
+    body.zoom_password = '';
+  }
 
   if (!body.name || !body.search_term || !body.course_id) {
     alert('Name, search term, and course ID are required.');
@@ -1001,6 +1132,7 @@ function refreshAll() {
   refreshRuns();
   refreshRecordings();
   refreshConfig();
+  fetchZoomAccounts();
 }
 
 refreshAll();

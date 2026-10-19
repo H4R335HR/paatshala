@@ -714,13 +714,22 @@ def save_links(entries: list, output_file: str):
     print(f"[+] Links saved to {output_file}")
 
 
-def load_zoom_credentials(config_path: str) -> tuple[str | None, str | None]:
-    """Load zoom_username and zoom_password from the config file."""
+def load_all_zoom_accounts(config_path: str) -> dict[str, dict[str, str]]:
+    """
+    Parse config file and discover all configured Zoom accounts.
+    Supports:
+      zoom_username=... / zoom_password=... (default account)
+      zoom_username_<tag>=... / zoom_password_<tag>=... (named accounts)
+    Returns:
+        dict: {tag: {"username": ..., "password": ...}}
+    """
     path = Path(config_path)
     if not path.exists():
-        return None, None
-        
-    username, password = None, None
+        return {}
+
+    accounts = {}
+    default_user, default_pass = None, None
+
     try:
         with path.open("r", encoding="utf-8") as f:
             for line in f:
@@ -730,24 +739,98 @@ def load_zoom_credentials(config_path: str) -> tuple[str | None, str | None]:
                 key, value = stripped.split("=", 1)
                 normalized_key = key.strip().lower()
                 value = value.strip().strip('"').strip("'")
-                
+
                 if normalized_key == "zoom_username":
-                    username = value
+                    default_user = value
                 elif normalized_key == "zoom_password":
-                    password = value
+                    default_pass = value
+                elif normalized_key.startswith("zoom_username_"):
+                    tag = normalized_key[len("zoom_username_"):].strip()
+                    if tag not in accounts:
+                        accounts[tag] = {}
+                    accounts[tag]["username"] = value
+                elif normalized_key.startswith("zoom_password_"):
+                    tag = normalized_key[len("zoom_password_"):].strip()
+                    if tag not in accounts:
+                        accounts[tag] = {}
+                    accounts[tag]["password"] = value
     except Exception as e:
-        print(f"[!] Failed to read Zoom credentials from {config_path}: {e}")
-        
-    return username, password
+        print(f"[!] Failed to parse Zoom accounts from {config_path}: {e}")
+
+    if default_user:
+        accounts["default"] = {"username": default_user, "password": default_pass or ""}
+
+    return accounts
 
 
-def save_zoom_credentials(config_path: str, username: str, password: str) -> bool:
+def load_zoom_credentials(config_path: str, account: str | None = None) -> tuple[str | None, str | None]:
+    """
+    Load Zoom credentials from config file.
+    Args:
+        config_path: Path to .config
+        account: Account tag (e.g. 'batch2'), email/username, or None for default.
+    Returns:
+        (username, password)
+
+    If an explicit account is requested but not found in the config, this
+    never falls back to the default account (that would silently log in as
+    the wrong user). Instead:
+      - an email-like account returns (account, None) so the caller can
+        supply the password separately;
+      - anything else returns (None, None).
+    """
+    accounts = load_all_zoom_accounts(config_path)
+
+    if account:
+        acc_lower = account.strip().lower()
+        # 1. Exact tag match
+        if acc_lower in accounts:
+            acc = accounts[acc_lower]
+            return acc.get("username"), acc.get("password")
+
+        # 2. Match by username/email
+        for tag, data in accounts.items():
+            if data.get("username", "").strip().lower() == acc_lower:
+                return data.get("username"), data.get("password")
+
+        # 3. Match sanitized tag (e.g. email with dots replaced by underscores)
+        sanitized = re.sub(r"[^a-zA-Z0-9_]", "_", acc_lower)
+        if sanitized in accounts:
+            acc = accounts[sanitized]
+            return acc.get("username"), acc.get("password")
+
+        # Not found: do NOT fall back to the default account
+        if "@" in acc_lower:
+            return account.strip(), None
+        print(f"[!] Zoom account '{account}' not found in {config_path}")
+        return None, None
+
+    if not accounts:
+        return None, None
+
+    # Fallback to default
+    default = accounts.get("default")
+    if default:
+        return default.get("username"), default.get("password")
+
+    # If only 1 account exists in file and no default, use that account
+    if len(accounts) == 1:
+        first_acc = next(iter(accounts.values()))
+        return first_acc.get("username"), first_acc.get("password")
+
+    return None, None
+
+
+def save_zoom_credentials(config_path: str, username: str, password: str, account: str | None = None) -> bool:
     """Persist Zoom credentials without overwriting unrelated config entries."""
     try:
         path = Path(config_path)
         lines = []
-        found_zoom_username = False
-        found_zoom_password = False
+        user_key = f"zoom_username_{account.strip().lower()}" if account and account != "default" else "zoom_username"
+        pass_key = f"zoom_password_{account.strip().lower()}" if account and account != "default" else "zoom_password"
+
+        found_user = False
+        found_pass = False
 
         if path.exists():
             with path.open("r", encoding="utf-8") as f:
@@ -760,22 +843,22 @@ def save_zoom_credentials(config_path: str, username: str, password: str) -> boo
                     key, _ = stripped.split("=", 1)
                     normalized_key = key.strip().lower()
 
-                    if normalized_key == "zoom_username":
-                        lines.append(f"zoom_username={username}\n")
-                        found_zoom_username = True
+                    if normalized_key == user_key:
+                        lines.append(f"{user_key}={username}\n")
+                        found_user = True
                         continue
 
-                    if normalized_key == "zoom_password":
-                        lines.append(f"zoom_password={password}\n")
-                        found_zoom_password = True
+                    if normalized_key == pass_key:
+                        lines.append(f"{pass_key}={password}\n")
+                        found_pass = True
                         continue
 
                     lines.append(line)
 
-        if not found_zoom_username:
-            lines.append(f"zoom_username={username}\n")
-        if not found_zoom_password:
-            lines.append(f"zoom_password={password}\n")
+        if not found_user:
+            lines.append(f"{user_key}={username}\n")
+        if not found_pass:
+            lines.append(f"{pass_key}={password}\n")
 
         with path.open("w", encoding="utf-8") as f:
             f.writelines(lines)
@@ -1380,6 +1463,8 @@ Examples:
     )
 
     auth = parser.add_argument_group("authentication")
+    auth.add_argument("--account",
+                      help="Zoom account tag from .config (e.g. 'batch2') or email")
     auth.add_argument("--cookies",
                         help="Path to Netscape-format cookies.txt file")
     auth.add_argument("--csrf",
@@ -1429,12 +1514,24 @@ Examples:
 
     args = parser.parse_args()
 
+    # Fallback to environment variables if not passed on CLI
+    if not args.username and os.environ.get("ZOOM_USERNAME"):
+        args.username = os.environ.get("ZOOM_USERNAME")
+    if not args.password and os.environ.get("ZOOM_PASSWORD"):
+        args.password = os.environ.get("ZOOM_PASSWORD")
+
     # Automatically load credentials from config if no auth arguments are provided
     if not args.username and not (args.cookies and args.csrf):
-        config_user, config_pass = load_zoom_credentials(CONFIG_FILE)
-        if config_user and config_pass:
-            print(f"[*] Loaded Zoom credentials from {CONFIG_FILE}")
+        config_user, config_pass = load_zoom_credentials(CONFIG_FILE, args.account)
+        if config_user:
+            print(f"[*] Loaded Zoom credentials for '{args.account or 'default'}' from {CONFIG_FILE}")
             args.username = config_user
+            args.password = config_pass or None  # prompts later if missing
+    elif args.username and not args.password:
+        # If username was provided, attempt to look up matching password in config.
+        # Only reuse it if it belongs to the same username.
+        config_user, config_pass = load_zoom_credentials(CONFIG_FILE, args.account or args.username)
+        if config_pass and (config_user or "").strip().lower() == args.username.strip().lower():
             args.password = config_pass
 
     using_browser_login = bool(args.username)

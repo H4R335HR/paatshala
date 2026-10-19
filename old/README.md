@@ -93,10 +93,62 @@ crontab -e
 
 CLI equivalents: `--scripts-dir`, `--db`, `--port`, `--host`.
 
+## Multi-Account Zoom Configuration
+
+You can configure multiple Zoom accounts in `.config` by using account tags:
+
+```ini
+# Default Zoom account (used if no account tag is assigned to a batch)
+zoom_username=account1@ictkerala.org
+zoom_password=pass_for_account1
+
+# Additional Zoom account (e.g. tag: batch2)
+zoom_username_batch2=account2@ictkerala.org
+zoom_password_batch2=pass_for_account2
+
+# Another Zoom account (e.g. tag: cyber)
+zoom_username_cyber=cyber_trainer@ictkerala.org
+zoom_password_cyber=pass_for_cyber
+```
+
+### Assigning Accounts to Batches
+In the Dashboard UI under **Config** -> **Add/Edit Mapping**:
+1. Select the account tag from the **Zoom Account** dropdown (automatically populated from `.config`).
+2. Or choose **Custom account...** to specify an account tag, email, and password directly.
+3. If left blank / Default, the mapping uses the default `zoom_username` and `zoom_password`.
+
+### CLI Usage with Accounts
+```bash
+# Uses 'batch2' credentials from .config:
+python zoomvshare.py --account batch2 --links --search "Batch 2 Term"
+
+# Uses custom username & password directly:
+python zoomvshare.py --username user@domain.com --password mypass --links --search "Term"
+```
+
+## Upload Delay
+
+Each batch mapping has an optional **Upload Delay (days)** field (default `0` = upload as soon as available).
+
+With a delay of `N`, a run only considers recordings dated at least `N` days ago
+(the dashboard passes `--to-date <today − N days>` to `zoomvshare.py`). Newer
+recordings are left untouched — share settings aren't changed either — and get
+uploaded by a later run once they're old enough. Moodle's existing duplicate
+check skips anything already posted.
+
+| Delay | Recording on Mon is uploaded by the run on… |
+|-------|---------------------------------------------|
+| 0     | Mon (same day)                              |
+| 1     | Tue                                         |
+| 6     | Sun                                         |
+
+> Delays rely on the pipeline running regularly (e.g. the daily cron above).
+
 ## API Endpoints
 
 | Method | Path                     | Description                    |
 |--------|--------------------------|--------------------------------|
+| GET    | `/api/zoom-accounts`     | List detected Zoom accounts    |
 | GET    | `/api/mappings`          | List batch mappings            |
 | POST   | `/api/mappings`          | Create a mapping               |
 | PUT    | `/api/mappings/{id}`     | Update a mapping               |

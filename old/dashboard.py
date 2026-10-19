@@ -23,13 +23,13 @@ import sys
 import threading
 import time
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import HTMLResponse, JSONResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import uvicorn
 
 
@@ -58,6 +58,79 @@ def get_db_path() -> str:
     return app.state.db_path if hasattr(app.state, "db_path") else DB_FILE
 
 
+def get_config_path() -> Path:
+    """Find .config file in scripts directory or repository root."""
+    scripts_dir = Path(app.state.scripts_dir if hasattr(app.state, "scripts_dir") else SCRIPTS_DIR)
+    candidate = scripts_dir / ".config"
+    if candidate.exists():
+        return candidate
+    parent_candidate = Path(__file__).resolve().parent.parent / ".config"
+    if parent_candidate.exists():
+        return parent_candidate
+    return candidate
+
+
+def load_zoom_accounts_summary() -> list[dict]:
+    """Parse .config to discover all configured Zoom accounts."""
+    cfg_path = get_config_path()
+    if not cfg_path.exists():
+        return []
+
+    accounts = []
+    default_user = None
+    try:
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            for line in f:
+                stripped = line.strip()
+                if not stripped or stripped.startswith("#") or "=" not in stripped:
+                    continue
+                k, v = stripped.split("=", 1)
+                k_norm = k.strip().lower()
+                val = v.strip().strip('"').strip("'")
+                if k_norm == "zoom_username":
+                    default_user = val
+                elif k_norm.startswith("zoom_username_"):
+                    tag = k_norm[len("zoom_username_"):].strip()
+                    accounts.append({"tag": tag, "username": val, "is_default": False})
+    except Exception as e:
+        print(f"[!] Failed to read Zoom accounts from {cfg_path}: {e}")
+
+    if default_user:
+        accounts.insert(0, {"tag": "default", "username": default_user, "is_default": True})
+    return accounts
+
+
+def resolve_zoom_auth(mapping: dict) -> tuple[str | None, str | None, str | None]:
+    """
+    Resolve (username, password, account_tag) for a given mapping.
+    """
+    account_tag = (mapping.get("zoom_account") or "").strip()
+    custom_pass = (mapping.get("zoom_password") or "").strip()
+    cfg_path = get_config_path()
+
+    user, pwd = None, None
+    if cfg_path.exists():
+        try:
+            scripts_dir = str(Path(app.state.scripts_dir if hasattr(app.state, "scripts_dir") else SCRIPTS_DIR))
+            here = str(Path(__file__).resolve().parent)
+            for p in (scripts_dir, here):
+                if p not in sys.path:
+                    sys.path.insert(0, p)
+            from zoomvshare import load_zoom_credentials
+            user, pwd = load_zoom_credentials(str(cfg_path), account_tag or None)
+        except Exception as e:
+            print(f"[!] Error loading zoom credentials: {e}")
+
+    if not user and account_tag and "@" in account_tag:
+        user = account_tag
+    if custom_pass:
+        pwd = custom_pass
+    if account_tag and not user:
+        print(f"[!] Zoom account '{account_tag}' could not be resolved from {cfg_path}")
+
+    return user, pwd, account_tag
+
+
 @contextmanager
 def get_db():
     conn = sqlite3.connect(get_db_path())
@@ -83,6 +156,9 @@ def init_db():
             check_settings  INTEGER NOT NULL DEFAULT 1,
             limit_count     INTEGER NOT NULL DEFAULT 0,
             enabled         INTEGER NOT NULL DEFAULT 1,
+            zoom_account    TEXT NOT NULL DEFAULT '',
+            zoom_password   TEXT NOT NULL DEFAULT '',
+            upload_delay_days INTEGER NOT NULL DEFAULT 0,
             created_at      TEXT NOT NULL DEFAULT (datetime('now')),
             updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
         );
@@ -127,6 +203,17 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_entries_run ON recording_entries(pipeline_run_id);
         """)
 
+        # Safely migrate existing databases if columns do not exist
+        for col in ("zoom_account", "zoom_password"):
+            try:
+                conn.execute(f"ALTER TABLE batch_mappings ADD COLUMN {col} TEXT NOT NULL DEFAULT ''")
+            except sqlite3.OperationalError:
+                pass
+        try:
+            conn.execute("ALTER TABLE batch_mappings ADD COLUMN upload_delay_days INTEGER NOT NULL DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass
+
 
 # ---------------------------------------------------------------------------
 # Pydantic models
@@ -140,6 +227,9 @@ class BatchMappingCreate(BaseModel):
     check_settings: bool = True
     limit_count: int = 0
     enabled: bool = True
+    zoom_account: Optional[str] = ""
+    zoom_password: Optional[str] = ""
+    upload_delay_days: int = Field(0, ge=0, le=365)
 
 
 class BatchMappingUpdate(BaseModel):
@@ -150,6 +240,9 @@ class BatchMappingUpdate(BaseModel):
     check_settings: Optional[bool] = None
     limit_count: Optional[int] = None
     enabled: Optional[bool] = None
+    zoom_account: Optional[str] = None
+    zoom_password: Optional[str] = None
+    upload_delay_days: Optional[int] = Field(None, ge=0, le=365)
 
 
 class TriggerRequest(BaseModel):
@@ -181,6 +274,10 @@ def _run_pipeline(run_id: int, mapping: dict):
 
     # --- Stage 1: Zoom link extraction ---
     zoom_links_file = scripts_dir / f".zoom_links_run{run_id}.json"
+
+    # Resolve Zoom account & credentials for this mapping
+    zoom_user, zoom_pass, zoom_tag = resolve_zoom_auth(mapping)
+
     zoom_cmd = [
         XVFB_PREFIX, PYTHON_BIN, str(scripts_dir / "zoomvshare.py"),
         "--links",
@@ -188,9 +285,27 @@ def _run_pipeline(run_id: int, mapping: dict):
         "--links-output", str(zoom_links_file),
         "--check-settings" if mapping["check_settings"] else "",
     ]
+    if zoom_tag:
+        zoom_cmd.extend(["--account", zoom_tag])
     if mapping["limit_count"] != 0:
         zoom_cmd.extend(["--limit", str(mapping["limit_count"])])
+    # Upload delay: only consider recordings at least N days old. Newer ones are
+    # left untouched and picked up by a later run (Moodle skips duplicates).
+    delay_days = int(mapping.get("upload_delay_days") or 0)
+    if delay_days > 0:
+        cutoff = (datetime.now() - timedelta(days=delay_days)).strftime("%m/%d/%Y")
+        zoom_cmd.extend(["--to-date", cutoff])
     zoom_cmd = [c for c in zoom_cmd if c]  # remove empty strings
+
+    # Pass credentials via environment only — never on argv, where they
+    # would be visible to other users via `ps` / /proc.
+    subproc_env = os.environ.copy()
+    subproc_env.pop("ZOOM_USERNAME", None)
+    subproc_env.pop("ZOOM_PASSWORD", None)
+    if zoom_user:
+        subproc_env["ZOOM_USERNAME"] = zoom_user
+    if zoom_pass:
+        subproc_env["ZOOM_PASSWORD"] = zoom_pass
 
     try:
         zoom_result = subprocess.run(
@@ -199,6 +314,8 @@ def _run_pipeline(run_id: int, mapping: dict):
             text=True,
             timeout=300,
             cwd=str(scripts_dir),
+            env=subproc_env,
+            stdin=subprocess.DEVNULL,  # fail fast instead of hanging on a password prompt
         )
         _update_run(
             zoom_stdout=zoom_result.stdout[-50000:],  # cap at 50KB
@@ -266,7 +383,10 @@ def _run_pipeline(run_id: int, mapping: dict):
         _update_run(
             status="completed",
             finished_at=_now_iso(),
-            error_summary="No recordings found matching search term",
+            error_summary=(
+                f"No recordings older than {delay_days} day(s) matching search term"
+                if delay_days > 0 else "No recordings found matching search term"
+            ),
         )
         return
 
@@ -414,13 +534,26 @@ def trigger_pipeline(mapping_id: int, trigger_type: str = "manual") -> int:
 # API routes — Batch Mappings
 # ---------------------------------------------------------------------------
 
+def _public_mapping(row) -> dict:
+    """Serialize a mapping for the API without leaking the stored Zoom password."""
+    m = dict(row)
+    m["has_zoom_password"] = bool(m.pop("zoom_password", ""))
+    return m
+
+
 @app.get("/api/mappings")
 def list_mappings():
     with get_db() as conn:
         rows = conn.execute(
             "SELECT * FROM batch_mappings ORDER BY created_at DESC"
         ).fetchall()
-        return [dict(r) for r in rows]
+        return [_public_mapping(r) for r in rows]
+
+
+@app.get("/api/zoom-accounts")
+def list_zoom_accounts():
+    """List available Zoom accounts configured in .config."""
+    return {"accounts": load_zoom_accounts_summary()}
 
 
 @app.post("/api/mappings", status_code=201)
@@ -428,8 +561,8 @@ def create_mapping(data: BatchMappingCreate):
     with get_db() as conn:
         cursor = conn.execute(
             """INSERT INTO batch_mappings
-               (name, search_term, course_id, section_name, check_settings, limit_count, enabled)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+               (name, search_term, course_id, section_name, check_settings, limit_count, enabled, zoom_account, zoom_password, upload_delay_days)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 data.name,
                 data.search_term,
@@ -438,6 +571,9 @@ def create_mapping(data: BatchMappingCreate):
                 int(data.check_settings),
                 data.limit_count,
                 int(data.enabled),
+                data.zoom_account or "",
+                data.zoom_password or "",
+                data.upload_delay_days,
             ),
         )
         return {"id": cursor.lastrowid, "message": "Created"}
@@ -446,7 +582,8 @@ def create_mapping(data: BatchMappingCreate):
 @app.put("/api/mappings/{mapping_id}")
 def update_mapping(mapping_id: int, data: BatchMappingUpdate):
     updates = {}
-    for field in ("name", "search_term", "course_id", "section_name", "limit_count"):
+    # zoom_password: None = keep existing, "" = clear, otherwise = set
+    for field in ("name", "search_term", "course_id", "section_name", "limit_count", "zoom_account", "zoom_password", "upload_delay_days"):
         val = getattr(data, field)
         if val is not None:
             updates[field] = val
