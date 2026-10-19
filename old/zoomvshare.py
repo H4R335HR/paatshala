@@ -883,6 +883,17 @@ def _extract_csrf_from_page(page) -> str:
         if (el?.content) candidates.push(el.content);
       }
 
+      const inputSelectors = [
+        'input[name="ZOOM-CSRFTOKEN"]',
+        'input[name="csrf-token"]',
+        'input[name="csrfToken"]',
+        '#csrf_token',
+      ];
+      for (const selector of inputSelectors) {
+        const el = document.querySelector(selector);
+        if (el?.value) candidates.push(el.value);
+      }
+
       const cookieMatches = document.cookie.match(/(?:^|; )(?:csrftoken|zm_csrf(?:token)?)=([^;]+)/i);
       if (cookieMatches?.[1]) candidates.push(decodeURIComponent(cookieMatches[1]));
 
@@ -928,8 +939,12 @@ def _extract_login_debug_info(page) -> list[str]:
       const messages = [];
       for (const selector of selectors) {
         for (const el of document.querySelectorAll(selector)) {
+          const style = window.getComputedStyle(el);
+          const visible = style.display !== 'none' && style.visibility !== 'hidden' &&
+            (el.offsetWidth > 0 || el.offsetHeight > 0);
+          if (!visible) continue;
           const text = (el.innerText || el.textContent || '').trim();
-          if (text) messages.push(text);
+          if (text && text.toLowerCase() !== 'loading') messages.push(text);
         }
       }
       return [...new Set(messages)];
@@ -1036,9 +1051,16 @@ def browser_login(
 
     captured_headers = {}
 
+    DEFAULT_USER_AGENT = (
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
+    )
+
     with sync_playwright() as playwright:
         try:
-            browser = playwright.chromium.launch(headless=headless)
+            browser = playwright.chromium.launch(
+                headless=headless,
+                args=["--disable-blink-features=AutomationControlled"],
+            )
             print("[*] Using Chromium for browser login")
         except Exception as chromium_error:
             print(f"[*] Chromium launch failed, falling back to Firefox: {chromium_error}")
@@ -1047,7 +1069,7 @@ def browser_login(
                 headless=headless,
             )
             print("[*] Using Firefox fallback for browser login")
-        context = browser.new_context()
+        context = browser.new_context(user_agent=DEFAULT_USER_AGENT)
         page = context.new_page()
 
         def capture_request(request):
@@ -1061,20 +1083,24 @@ def browser_login(
         page.goto("https://zoom.us/signin", wait_until="domcontentloaded")
 
         email_selectors = [
-            'input[type="email"]',
+            '#email',
             'input[name="account"]',
+            '[data-testid="account-ipt"] input',
+            'input[type="email"]',
             'input[name="email"]',
             'input[name="username"]',
             'input[autocomplete="username"]',
-            '#email',
         ]
         password_selectors = [
-            'input[type="password"]',
             'input[name="password"]',
+            'input[type="password"]',
             'input[autocomplete="current-password"]',
             '#password',
         ]
         continue_selectors = [
+            '#signin_btn_next',
+            '[data-testid="account-next-btn"]',
+            'button.zoom-button--primary',
             'button[type="submit"]',
             'input[type="submit"]',
             '[role="button"]',
@@ -1093,10 +1119,13 @@ def browser_login(
                 return None
 
             for selector in selectors:
-                locator = page.locator(selector).first
+                candidates = page.locator(selector)
                 try:
-                    if locator.count() and locator.is_visible():
-                        return locator
+                    count = candidates.count()
+                    for i in range(count):
+                        candidate = candidates.nth(i)
+                        if candidate.is_visible():
+                            return candidate
                 except Exception:
                     continue
             return None
@@ -1248,7 +1277,11 @@ def browser_login(
             print("[*] Manual login mode enabled.")
             print("    Username has been filled in the browser.")
             if password:
-                if click_action(["continue", "next", "sign in", "login", "log in"]):
+                next_btn = page.locator('#signin_btn_next, [data-testid="account-next-btn"]').first
+                if next_btn.count() and next_btn.is_visible() and next_btn.is_enabled():
+                    click_like_user(next_btn, "Next")
+                    page.wait_for_timeout(1000)
+                elif click_action(["continue", "next", "sign in", "login", "log in"]):
                     page.wait_for_timeout(1000)
                 else:
                     email_field.press("Enter")
@@ -1263,16 +1296,27 @@ def browser_login(
             print("    Complete the Zoom login in the browser window, then press Enter here.")
             input()
         else:
-            # Prefer Enter to advance past the email screen — more reliable than text matching
+            # Advance past the email screen:
+            # Try Zoom's dedicated Next button first, then Enter as fallback
+            next_btn = page.locator('#signin_btn_next, [data-testid="account-next-btn"]').first
+            advanced = False
             try:
-                email_field.press("Enter")
-                page.wait_for_timeout(1000)
+                if next_btn.count() and next_btn.is_visible() and next_btn.is_enabled():
+                    click_like_user(next_btn, "Next")
+                    advanced = True
+                    page.wait_for_timeout(1000)
             except Exception:
                 pass
 
-            # If still on the email screen, fall back to clicking the Continue/Next button
-            if find_first_visible(email_selectors) is not None:
-                if click_action(["continue", "next"]):
+            if not advanced:
+                try:
+                    email_field.press("Enter")
+                    page.wait_for_timeout(1000)
+                except Exception:
+                    pass
+
+            if find_first_visible(password_selectors) is None:
+                if click_action(["next", "continue"]):
                     page.wait_for_timeout(1000)
 
             password_field = wait_for_password_screen(timeout_ms=15000)
@@ -1287,49 +1331,103 @@ def browser_login(
                 browser.close()
                 sys.exit(1)
 
-            # Tab out of the password field so React/Angular re-enables the submit button
+            # Submit credentials:
+            # First look for the primary Sign In button on Zoom's password view
+            submitted = False
+            primary_btn = page.locator('button.zoom-button--primary, #signin_btn, [data-testid="signin-btn"]').first
             try:
-                password_field.press("Tab")
-                page.wait_for_timeout(300)
+                if primary_btn.count() and primary_btn.is_visible() and primary_btn.is_enabled():
+                    btn_text = (primary_btn.inner_text(timeout=500) or "").strip().lower()
+                    if "next" not in btn_text:
+                        click_like_user(primary_btn, btn_text or "Sign in")
+                        submitted = True
+                        page.wait_for_timeout(1000)
             except Exception:
                 pass
 
-            # Try Enter first — most reliable way to submit a login form
-            try:
-                password_field.press("Enter")
-                page.wait_for_timeout(1500)
-            except Exception:
-                pass
-
-            # If still on sign-in page, try clicking the submit button by type
-            if "/signin" in page.url or "/login" in page.url:
-                try:
-                    page.locator('button[type="submit"]').first.click(timeout=3000)
+            if not submitted:
+                if click_action(["sign in", "login", "log in"]):
+                    submitted = True
                     page.wait_for_timeout(1000)
+
+            if not submitted:
+                try:
+                    password_field.press("Enter")
+                    page.wait_for_timeout(1500)
                 except Exception:
                     pass
-
-            # If still on sign-in page, try matching the button by visible text
-            if "/signin" in page.url or "/login" in page.url:
-                if not click_action(["sign in", "login", "log in", "continue", "next"]):
-                    if submit_current_form():
-                        page.wait_for_timeout(1500)
 
         print("[*] Waiting for authentication to complete...")
         print("    If Zoom asks for MFA, CAPTCHA, or SSO approval, finish it in the browser window.")
         print("    The script will continue once the recording page is reachable.")
 
-        try:
-            page.wait_for_url(re.compile(r"https://(.+\.)?zoom\.us/.*"), timeout=15000)
-        except PlaywrightTimeoutError:
-            pass
+        AUTH_COOKIES = {
+            "_zm_ct",
+            "_zm_chtaid",
+            "_zm_ssid",
+            "cred",
+            "zpk",
+            "zm_token",
+            "s_session",
+            "_zm_visitor_guid",
+        }
 
-        page.goto("https://zoom.us/recording", wait_until="networkidle")
+        # Give sufficient time for invisible reCAPTCHA, network requests, or manual 2FA/MFA
+        auth_timeout = 60 if not headless else 30
+        end_time = time.time() + auth_timeout
+        auth_completed = False
 
-        try:
-            page.wait_for_load_state("networkidle", timeout=15000)
-        except PlaywrightTimeoutError:
-            pass
+        while time.time() < end_time:
+            current_url = page.url.lower()
+
+            # 1. URL left the sign-in / login page entirely (e.g. app.zoom.us/wc/home, /profile, /meeting)
+            if not ("/signin" in current_url or "/login" in current_url):
+                auth_completed = True
+                break
+
+            # 2. Check for hard error messages on page (e.g. incorrect password)
+            debug_messages = _extract_login_debug_info(page)
+            real_errors = [
+                m for m in debug_messages
+                if m.lower() not in ("loading", "")
+                and not m.lower().startswith("zoom is protected by")
+            ]
+            if real_errors:
+                print("[!] Zoom sign-in reported error:")
+                for err in real_errors:
+                    print(f"    {err}")
+                if any(term in " ".join(real_errors).lower() for term in ["incorrect", "invalid", "not exist", "does not exist", "locked"]):
+                    break
+
+            page.wait_for_timeout(1000)
+
+        # Allow post-login redirect to settle before navigating to recordings
+        if auth_completed or not ("/signin" in page.url.lower() or "/login" in page.url.lower()):
+            try:
+                page.wait_for_load_state("domcontentloaded", timeout=5000)
+            except Exception:
+                pass
+            page.wait_for_timeout(1500)
+
+            if "/recording" not in page.url.lower():
+                print("[*] Navigating to recordings page...")
+                try:
+                    page.goto("https://zoom.us/recording", wait_until="networkidle", timeout=30000)
+                except Exception:
+                    try:
+                        page.goto("https://zoom.us/recording/", wait_until="domcontentloaded", timeout=30000)
+                    except Exception:
+                        pass
+            else:
+                try:
+                    page.wait_for_load_state("networkidle", timeout=15000)
+                except PlaywrightTimeoutError:
+                    pass
+        else:
+            try:
+                page.wait_for_load_state("networkidle", timeout=5000)
+            except Exception:
+                pass
 
         current_url = page.url
         page_title = page.title()
