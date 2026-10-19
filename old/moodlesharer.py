@@ -137,12 +137,14 @@ def find_section_number(session, course_id: str, section_name: str) -> str:
     raise ValueError(f"Section not found: {section_name}")
 
 
-def get_url_activity_form(session, course_id: str, section_num: str) -> tuple[str, dict]:
+def get_url_activity_form(session, course_id: str, section_num: str, before_mod: str | None = None) -> tuple[str, dict]:
     """Open the Moodle add-URL form and extract default form fields."""
     form_url = (
         f"{BASE}/course/modedit.php?add=url&type=&course={course_id}"
         f"&section={section_num}&return=0&sr=0"
     )
+    if before_mod:
+        form_url += f"&beforemod={before_mod}"
     resp = session.get(form_url, timeout=30)
     resp.raise_for_status()
 
@@ -198,9 +200,9 @@ def get_url_activity_form(session, course_id: str, section_num: str) -> tuple[st
     return urljoin(resp.url, action), payload
 
 
-def create_url_activity(session, course_id: str, section_num: str, entry: dict) -> str:
+def create_url_activity(session, course_id: str, section_num: str, entry: dict, before_mod: str | None = None) -> str:
     """Create a Moodle URL activity for a Zoom recording."""
-    action_url, payload = get_url_activity_form(session, course_id, section_num)
+    action_url, payload = get_url_activity_form(session, course_id, section_num, before_mod=before_mod)
 
     payload.update({
         "name": entry["title"],
@@ -213,6 +215,8 @@ def create_url_activity(session, course_id: str, section_num: str, entry: dict) 
         "visible": payload.get("visible", "1"),
         "submitbutton2": "Save and return to course",
     })
+    if before_mod:
+        payload["beforemod"] = str(before_mod)
 
     resp = session.post(action_url, data=payload, allow_redirects=False, timeout=30)
     if resp.status_code not in {302, 303}:
@@ -225,45 +229,75 @@ def create_url_activity(session, course_id: str, section_num: str, entry: dict) 
     return location
 
 
-def get_existing_activity_titles(session, course_id: str, section_num: str) -> set[str]:
-    """Fetch all activity names existing in a specific course section."""
+def get_section_info(session, course_id: str, section_num: str) -> tuple[set[str], str | None]:
+    """Fetch all activity names existing in a section and the first activity's course module ID (cmid)."""
     resp = session.get(f"{BASE}/course/view.php?id={course_id}", timeout=30)
     resp.raise_for_status()
 
     soup = BeautifulSoup(resp.text, "html.parser")
     section_node = soup.select_one(f'#section-{section_num}')
     if not section_node:
-        return set()
+        return set(), None
 
     titles = set()
     for node in section_node.select('.activityinstance .instancename, .activity-instance-name, span.instancename'):
         # Moodle often appends hidden text for accessibility (e.g. " URL" or " Forum")
         for hidden in node.select('.accesshide'):
             hidden.extract()
-            
+
         title = node.get_text(strip=True)
         if title:
             titles.add(title)
 
+    first_cmid = None
+    for act in section_node.select('[id^="module-"]'):
+        match = re.search(r"module-(\d+)", act.get("id", ""))
+        if match:
+            first_cmid = match.group(1)
+            break
+
+    return titles, first_cmid
+
+
+def get_existing_activity_titles(session, course_id: str, section_num: str) -> set[str]:
+    """Fetch all activity names existing in a specific course section."""
+    titles, _ = get_section_info(session, course_id, section_num)
     return titles
 
 
-def upload_entries(session, course_id: str, section_num: str, entries: list[dict]):
-    """Upload multiple recording entries as Moodle URL resources."""
-    existing_titles = get_existing_activity_titles(session, course_id, section_num)
-    
-    for index, entry in enumerate(entries, 1):
+def upload_entries(session, course_id: str, section_num: str, entries: list[dict], order: str = "newest_first"):
+    """Upload multiple recording entries as Moodle URL resources.
+
+    order: 'newest_first' (place at top of section) or 'oldest_first' (append to bottom)
+    """
+    existing_titles, first_cmid = get_section_info(session, course_id, section_num)
+    is_newest_first = order in {"newest_first", "newest", "top"}
+
+    if is_newest_first:
+        entries_to_upload = list(entries)
+        anchor_beforemod = first_cmid
+        if anchor_beforemod:
+            print(f"[Moodle] Order: newest first (inserting before module {anchor_beforemod} at top)")
+        else:
+            print("[Moodle] Order: newest first (section currently empty)")
+    else:
+        # For oldest first (bottom of section), older recordings should be added first
+        entries_to_upload = list(reversed(entries))
+        anchor_beforemod = None
+        print("[Moodle] Order: oldest first (appending to bottom of section)")
+
+    for index, entry in enumerate(entries_to_upload, 1):
         title = entry['title']
-        print(f"[{index}/{len(entries)}] Processing: {title}")
-        
+        print(f"[{index}/{len(entries_to_upload)}] Processing: {title}")
+
         if title in existing_titles:
             print(f"    [Skipping] Activity '{title}' already exists in this section.")
             continue
-            
-        print(f"    Creating URL activity...")
-        location = create_url_activity(session, course_id, section_num, entry)
+
+        print(f"    Creating URL activity (order: {'newest_first' if is_newest_first else 'oldest_first'})...")
+        location = create_url_activity(session, course_id, section_num, entry, before_mod=anchor_beforemod)
         print(f"    Redirect: {location}")
-        
+
         # Add to existing titles to prevent duplicates within the same run
         existing_titles.add(title)
 
@@ -279,6 +313,12 @@ def main():
     parser.add_argument("--title", help="Single entry title")
     parser.add_argument("--url", help="Single entry share URL")
     parser.add_argument("--description", help="Single entry description; defaults to title")
+    parser.add_argument(
+        "--order",
+        default="newest_first",
+        choices=["newest_first", "oldest_first", "top", "bottom"],
+        help='Recording position in Moodle section: "newest_first" (top, default) or "oldest_first" (bottom)',
+    )
     parser.add_argument("--config", default=CONFIG_FILE, help=f"Config file (default: {CONFIG_FILE})")
 
     args = parser.parse_args()
@@ -311,7 +351,7 @@ def main():
         sys.exit(1)
 
     print(f"[Moodle] Using course {course_id}, section {section_num}")
-    upload_entries(session, course_id, section_num, entries)
+    upload_entries(session, course_id, section_num, entries, order=args.order)
 
 
 if __name__ == "__main__":

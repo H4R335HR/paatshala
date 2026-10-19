@@ -559,9 +559,11 @@
             <th>Course ID</th>
             <th>Section</th>
             <th class="hide-mobile">Zoom Account</th>
+            <th>Order</th>
             <th>Limit</th>
             <th>Delay</th>
-            <th>Enabled</th>
+            <th>Active Until</th>
+            <th>Status</th>
             <th></th>
           </tr>
         </thead>
@@ -642,6 +644,13 @@
         <input type="text" id="m-section" placeholder="Recordings" value="Recordings">
       </div>
       <div class="form-group">
+        <label>Recording Order in Moodle</label>
+        <select id="m-order" style="font-family:var(--sans);font-size:13px;background:var(--bg-2);color:var(--text-0);border:1px solid var(--border);padding:8px 10px;border-radius:5px;width:100%;">
+          <option value="newest_first">Newest first (latest video at top)</option>
+          <option value="oldest_first">Oldest first (bottom of section)</option>
+        </select>
+      </div>
+      <div class="form-group">
         <label>Limit (0 = all, +N newest, -N oldest)</label>
         <input type="number" id="m-limit" value="0">
       </div>
@@ -649,6 +658,11 @@
         <label>Upload Delay (days, optional)</label>
         <input type="number" id="m-delay" min="0" max="365" step="1" value="0" placeholder="0 = upload immediately"
                title="Only upload recordings at least this many days old. 0 = upload as soon as available.">
+      </div>
+      <div class="form-group">
+        <label>Active Until (optional end date)</label>
+        <input type="date" id="m-enabled-until"
+               title="Batch mapping automatically deactivates after this date (leaves existing recordings untouched).">
       </div>
       <div class="form-group">
         <div class="toggle-row">
@@ -908,12 +922,22 @@ async function refreshConfig() {
         <td class="small hide-mobile">
           ${m.zoom_account ? `<span class="status-pill status-running" style="font-size:10px;padding:2px 7px;">${esc(m.zoom_account)}</span>` : '<span class="dim" style="font-size:11px;">(default)</span>'}
         </td>
+        <td class="small">${m.recording_order === 'oldest_first' ? 'Oldest first' : 'Newest first'}</td>
         <td class="mono">${m.limit_count || 'all'}</td>
         <td class="mono">${m.upload_delay_days ? `${m.upload_delay_days}d` : '<span class="dim">–</span>'}</td>
-        <td>${m.enabled ? '<span style="color:var(--green)">✓</span>' : '<span style="color:var(--text-2)">✗</span>'}</td>
+        <td class="small">
+          ${m.enabled_until ? (m.is_expired ? `<span class="status-pill status-failed" style="font-size:10px;padding:2px 6px;" title="Expired on ${esc(m.enabled_until)}">Expired (${esc(m.enabled_until)})</span>` : `<span class="mono">${esc(m.enabled_until)}</span>`) : '<span class="dim">Indefinite</span>'}
+        </td>
+        <td>
+          ${!m.enabled 
+            ? '<span style="color:var(--text-2)">Disabled</span>' 
+            : (m.is_expired 
+                ? '<span style="color:var(--text-2)" title="Batch end date passed">Inactive</span>' 
+                : '<span style="color:var(--green)">✓ Active</span>')}
+        </td>
         <td>
           <div class="btn-group">
-            <button class="btn btn-sm btn-primary" onclick="triggerOne(${m.id})" title="Run now">▶</button>
+            <button class="btn btn-sm btn-primary" onclick="triggerOne(${m.id}, '${esc(m.name)}', ${m.is_expired})" title="Run now">▶</button>
             <button class="btn btn-sm btn-secondary" onclick="editMapping(${m.id})">edit</button>
             <button class="btn btn-sm btn-danger" onclick="deleteMapping(${m.id}, '${esc(m.name)}')">×</button>
           </div>
@@ -935,7 +959,10 @@ async function triggerAll() {
   } catch (e) { alert(e.detail || 'Failed to trigger'); }
 }
 
-async function triggerOne(mappingId) {
+async function triggerOne(mappingId, name = '', isExpired = false) {
+  if (isExpired && !confirm(`Mapping "${name}" has passed its end date. Run anyway?`)) {
+    return;
+  }
   try {
     const data = await api(`/trigger/${mappingId}`, { method: 'POST', body: '{}' });
     alert(`Pipeline started (Run #${data.run_id})`);
@@ -993,8 +1020,10 @@ function openMappingModal(editData) {
   document.getElementById('m-search').value = editData?.search_term || '';
   document.getElementById('m-course').value = editData?.course_id || '';
   document.getElementById('m-section').value = editData?.section_name || 'Recordings';
+  document.getElementById('m-order').value = editData?.recording_order || 'newest_first';
   document.getElementById('m-limit').value = editData?.limit_count ?? 0;
   document.getElementById('m-delay').value = editData?.upload_delay_days ?? 0;
+  document.getElementById('m-enabled-until').value = editData?.enabled_until || '';
   document.getElementById('m-check-settings').checked = editData?.check_settings ?? true;
   document.getElementById('m-enabled').checked = editData?.enabled ?? true;
 
@@ -1059,8 +1088,10 @@ async function saveMapping() {
     search_term: document.getElementById('m-search').value.trim(),
     course_id: parseInt(document.getElementById('m-course').value) || 0,
     section_name: document.getElementById('m-section').value.trim() || 'Recordings',
+    recording_order: document.getElementById('m-order').value || 'newest_first',
     limit_count: parseInt(document.getElementById('m-limit').value) || 0,
     upload_delay_days: Math.min(365, Math.max(0, parseInt(document.getElementById('m-delay').value) || 0)),
+    enabled_until: document.getElementById('m-enabled-until').value.trim(),
     check_settings: document.getElementById('m-check-settings').checked,
     enabled: document.getElementById('m-enabled').checked,
     zoom_account: zoomAccount,

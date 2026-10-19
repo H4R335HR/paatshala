@@ -144,6 +144,26 @@ check skips anything already posted.
 
 > Delays rely on the pipeline running regularly (e.g. the daily cron above).
 
+## Recording Order in Moodle
+
+Each batch mapping lets you configure the position and order of recordings in the Moodle section:
+
+- **Newest first (Default)**: Inserts each new recording at the **top** (first position) of the section using Moodle's native `beforemod` parameter. The latest uploaded session is always displayed at the very top for students.
+- **Oldest first**: Appends recordings to the **bottom** of the section in chronological order.
+
+CLI equivalent in `moodlesharer.py`:
+```bash
+python moodlesharer.py --course 491 --section-name "Recordings" --input zoom_links.json --order newest_first
+```
+
+## Batch Expiration (`Active Until`)
+
+Batches often conclude after a specific date. To avoid unnecessary pipeline executions when batches finish, each mapping has an optional **Active Until** end date (`YYYY-MM-DD`):
+
+- **Automatic Deactivation**: Once today's date exceeds `Active Until`, the batch is automatically marked as **Inactive (Expired)** and excluded from automated runs (`/api/trigger-all` and cron runs).
+- **Manual Override**: If needed, an expired mapping can still be triggered manually from the UI after confirming the prompt.
+- **Existing Content Protected**: Expiring a batch does not alter or delete any existing recordings already posted to Moodle.
+
 ## API Endpoints
 
 | Method | Path                     | Description                    |

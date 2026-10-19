@@ -159,6 +159,8 @@ def init_db():
             zoom_account    TEXT NOT NULL DEFAULT '',
             zoom_password   TEXT NOT NULL DEFAULT '',
             upload_delay_days INTEGER NOT NULL DEFAULT 0,
+            recording_order TEXT NOT NULL DEFAULT 'newest_first',
+            enabled_until   TEXT NOT NULL DEFAULT '',
             created_at      TEXT NOT NULL DEFAULT (datetime('now')),
             updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
         );
@@ -213,6 +215,14 @@ def init_db():
             conn.execute("ALTER TABLE batch_mappings ADD COLUMN upload_delay_days INTEGER NOT NULL DEFAULT 0")
         except sqlite3.OperationalError:
             pass
+        try:
+            conn.execute("ALTER TABLE batch_mappings ADD COLUMN recording_order TEXT NOT NULL DEFAULT 'newest_first'")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            conn.execute("ALTER TABLE batch_mappings ADD COLUMN enabled_until TEXT NOT NULL DEFAULT ''")
+        except sqlite3.OperationalError:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -230,6 +240,8 @@ class BatchMappingCreate(BaseModel):
     zoom_account: Optional[str] = ""
     zoom_password: Optional[str] = ""
     upload_delay_days: int = Field(0, ge=0, le=365)
+    recording_order: str = "newest_first"
+    enabled_until: Optional[str] = ""
 
 
 class BatchMappingUpdate(BaseModel):
@@ -243,6 +255,8 @@ class BatchMappingUpdate(BaseModel):
     zoom_account: Optional[str] = None
     zoom_password: Optional[str] = None
     upload_delay_days: Optional[int] = Field(None, ge=0, le=365)
+    recording_order: Optional[str] = None
+    enabled_until: Optional[str] = None
 
 
 class TriggerRequest(BaseModel):
@@ -391,11 +405,13 @@ def _run_pipeline(run_id: int, mapping: dict):
         return
 
     # --- Stage 2: Moodle upload ---
+    order_mode = mapping.get("recording_order") or "newest_first"
     moodle_cmd = [
         PYTHON_BIN, str(scripts_dir / "moodlesharer.py"),
         "-c", str(mapping["course_id"]),
         "--section-name", mapping["section_name"],
         "--input", str(zoom_links_file),
+        "--order", order_mode,
     ]
 
     try:
@@ -503,6 +519,9 @@ def trigger_pipeline(mapping_id: int, trigger_type: str = "manual") -> int:
             raise HTTPException(404, "Batch mapping not found")
 
         mapping = dict(row)
+        until = (mapping.get("enabled_until") or "").strip()
+        if until and datetime.now().strftime("%Y-%m-%d") > until and trigger_type == "cron":
+            raise HTTPException(400, f"Batch mapping '{mapping['name']}' expired on {until}")
 
         cursor = conn.execute(
             """INSERT INTO pipeline_runs (batch_mapping_id, batch_name, status, trigger_type)
@@ -538,6 +557,8 @@ def _public_mapping(row) -> dict:
     """Serialize a mapping for the API without leaking the stored Zoom password."""
     m = dict(row)
     m["has_zoom_password"] = bool(m.pop("zoom_password", ""))
+    until = (m.get("enabled_until") or "").strip()
+    m["is_expired"] = bool(until and datetime.now().strftime("%Y-%m-%d") > until)
     return m
 
 
@@ -561,8 +582,8 @@ def create_mapping(data: BatchMappingCreate):
     with get_db() as conn:
         cursor = conn.execute(
             """INSERT INTO batch_mappings
-               (name, search_term, course_id, section_name, check_settings, limit_count, enabled, zoom_account, zoom_password, upload_delay_days)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               (name, search_term, course_id, section_name, check_settings, limit_count, enabled, zoom_account, zoom_password, upload_delay_days, recording_order, enabled_until)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 data.name,
                 data.search_term,
@@ -574,6 +595,8 @@ def create_mapping(data: BatchMappingCreate):
                 data.zoom_account or "",
                 data.zoom_password or "",
                 data.upload_delay_days,
+                data.recording_order or "newest_first",
+                (data.enabled_until or "").strip(),
             ),
         )
         return {"id": cursor.lastrowid, "message": "Created"}
@@ -583,10 +606,10 @@ def create_mapping(data: BatchMappingCreate):
 def update_mapping(mapping_id: int, data: BatchMappingUpdate):
     updates = {}
     # zoom_password: None = keep existing, "" = clear, otherwise = set
-    for field in ("name", "search_term", "course_id", "section_name", "limit_count", "zoom_account", "zoom_password", "upload_delay_days"):
+    for field in ("name", "search_term", "course_id", "section_name", "limit_count", "zoom_account", "zoom_password", "upload_delay_days", "recording_order", "enabled_until"):
         val = getattr(data, field)
         if val is not None:
-            updates[field] = val
+            updates[field] = val.strip() if isinstance(val, str) else val
     for field in ("check_settings", "enabled"):
         val = getattr(data, field)
         if val is not None:
@@ -689,9 +712,14 @@ def trigger_all(data: TriggerRequest = TriggerRequest()):
     if _pipeline_lock.locked():
         raise HTTPException(409, "A pipeline is already running. Wait for it to finish.")
 
+    today = datetime.now().strftime("%Y-%m-%d")
     with get_db() as conn:
         mappings = conn.execute(
-            "SELECT id FROM batch_mappings WHERE enabled=1 ORDER BY id"
+            """SELECT id FROM batch_mappings 
+               WHERE enabled=1 
+                 AND (enabled_until IS NULL OR enabled_until = '' OR enabled_until >= ?) 
+               ORDER BY id""",
+            (today,),
         ).fetchall()
 
     if not mappings:
